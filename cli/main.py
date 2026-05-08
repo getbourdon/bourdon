@@ -41,6 +41,10 @@ def _default_claude_code_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "claude-code.l5.yaml"
 
 
+def _default_codex_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
+
+
 def _parse_since(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -220,6 +224,104 @@ def _handle_codex_recognize(args: argparse.Namespace) -> int:
     }
     if args.prompt_context:
         report["prompt_context"] = _build_recognition_prompt_context(result)
+    _write_yaml_if_requested(report, args.report_out)
+    _print_yaml(report)
+    return 0
+
+
+def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
+    adapter = _build_adapter(args)
+    access_level = args.access_level
+    since = _parse_since(args.since)
+    mode = "write" if args.write else "dry-run"
+
+    native_payload = _build_codex_native_memory_payload(
+        adapter._codex_home,
+        adapter._codex_brain,
+        max_sessions=args.max_sessions,
+    )
+    native_target_kind = "memory_md" if args.memory_md else "bourdon_file"
+    native_target = (
+        Path(args.native_out)
+        if getattr(args, "native_out", None)
+        else (
+            _default_codex_memory_md_path(adapter._codex_home)
+            if args.memory_md
+            else _default_codex_native_memory_path(adapter._codex_home)
+        )
+    )
+    native_text = str(native_payload["text"])
+    if args.memory_md:
+        existing_text = (
+            native_target.read_text(encoding="utf-8")
+            if native_target.is_file()
+            else ""
+        )
+        native_text = _merge_bourdon_memory_md_section(existing_text, native_text)
+
+    manifest = _manifest_for_access(
+        adapter,
+        since=since,
+        access_level=access_level,
+    )
+    l5_target = Path(args.l5_out) if args.l5_out else _default_codex_l5_path()
+
+    t0 = _time.perf_counter()
+    result = recognition_first(
+        args.prompt,
+        manifest,
+        access_level=access_level,
+    )
+    recognition_us = (_time.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    native_written = False
+    l5_written = False
+    if args.write:
+        _write_text_atomic(native_text, native_target)
+        write_l5_dict(manifest, l5_target)
+        native_written = True
+        l5_written = True
+
+    recognition_report = {
+        "prompt": args.prompt,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(recognition_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+    }
+    report = {
+        "mode": mode,
+        "access_level": access_level,
+        "recognition": recognition_report,
+        "prompt_context": _build_recognition_prompt_context(result),
+        "fallback_recall": native_payload["fallback_recall"],
+        "writes": {
+            "native_memory": {
+                "target": str(native_target),
+                "target_kind": native_target_kind,
+                "would_write": bool(native_text.strip()),
+                "written": native_written,
+                "bytes": len(native_text.encode("utf-8")),
+            },
+            "l5": {
+                "target": str(l5_target),
+                "would_write": True,
+                "written": l5_written,
+                "entity_count": len(manifest.get("known_entities") or []),
+                "session_count": len(manifest.get("recent_sessions") or []),
+            },
+        },
+    }
     _write_yaml_if_requested(report, args.report_out)
     _print_yaml(report)
     return 0
@@ -554,6 +656,35 @@ def _build_parser() -> argparse.ArgumentParser:
     recognize_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
     recognize_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
     recognize_cmd.set_defaults(func=_handle_codex_recognize)
+
+    prepare_turn_cmd = codex_subparsers.add_parser(
+        "prepare-turn",
+        help="Refresh Codex memory surfaces and return recognition context",
+    )
+    prepare_turn_cmd.add_argument("prompt")
+    prepare_turn_cmd.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the native memory bridge and Codex L5 manifest.",
+    )
+    prepare_turn_cmd.add_argument(
+        "--memory-md",
+        action="store_true",
+        help="Update a bounded Bourdon section in ~/.codex/memories/MEMORY.md.",
+    )
+    prepare_turn_cmd.add_argument("--native-out")
+    prepare_turn_cmd.add_argument("--l5-out")
+    prepare_turn_cmd.add_argument("--max-sessions", type=int, default=20)
+    prepare_turn_cmd.add_argument("--since")
+    prepare_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    prepare_turn_cmd.add_argument("--report-out")
+    prepare_turn_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    prepare_turn_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
+    prepare_turn_cmd.set_defaults(func=_handle_codex_prepare_turn)
 
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()

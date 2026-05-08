@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -285,6 +285,87 @@ class L6Store:
         ]
         return filtered
 
+    def build_recognition_manifest(
+        self,
+        include_private: bool = False,
+        access_level: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build a visibility-filtered manifest for recognition-time matching.
+
+        The result is intentionally small: known entities are merged across
+        agents by name/type, with aliases and source-agent summaries preserved.
+        It is shaped like an L5 manifest so ``recognition_first`` can consume it
+        directly without knowing about the federation store.
+        """
+        resolved_access = _resolve_access_level(
+            include_private=include_private,
+            access_level=access_level,
+        )
+        entities_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        recent_sessions: list[dict[str, Any]] = []
+
+        for agent_id, manifest in sorted(self._manifests.items()):
+            for entity in manifest.get("known_entities") or []:
+                if not isinstance(entity, dict):
+                    continue
+                if not _is_visible(entity, resolved_access):
+                    continue
+                name = entity.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+
+                entity_type = str(entity.get("type") or "topic")
+                key = (name.strip().lower(), entity_type.lower())
+                merged = entities_by_key.setdefault(
+                    key,
+                    {
+                        "name": name.strip(),
+                        "type": entity_type,
+                        "aliases": [],
+                        "summary": str(entity.get("summary") or ""),
+                        "summaries": {},
+                        "source_agents": [],
+                        "tags": [],
+                        "visibility": resolved_access,
+                    },
+                )
+
+                _append_unique(merged["source_agents"], agent_id)
+                for alias in entity.get("aliases") or []:
+                    if isinstance(alias, str) and alias.strip():
+                        _append_unique(merged["aliases"], alias.strip())
+                for tag in entity.get("tags") or []:
+                    if isinstance(tag, str) and tag.strip():
+                        _append_unique(merged["tags"], tag.strip())
+
+                summary = entity.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    if not merged.get("summary"):
+                        merged["summary"] = summary.strip()
+                    merged["summaries"][agent_id] = summary.strip()
+
+            for session in manifest.get("recent_sessions") or []:
+                if not isinstance(session, dict):
+                    continue
+                if not _is_visible(session, resolved_access):
+                    continue
+                session_copy = dict(session)
+                session_copy["agent"] = agent_id
+                recent_sessions.append(session_copy)
+
+        recent_sessions.sort(
+            key=lambda session: str(session.get("date") or ""),
+            reverse=True,
+        )
+        return {
+            "spec_version": "0.1",
+            "agent": {"id": "bourdon-l6", "type": "federation"},
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "known_entities": list(entities_by_key.values()),
+            "recent_sessions": recent_sessions,
+        }
+
     def find_entity(
         self,
         name: str,
@@ -462,3 +543,8 @@ class L6Store:
             recent_sessions=sessions,
             entities=entities,
         )
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)

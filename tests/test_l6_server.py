@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -10,7 +11,6 @@ import yaml
 
 from core import l6_server as server_module
 from core.l6_store import L6Store
-
 
 # -- Lazy-import behavior ------------------------------------------------------
 
@@ -32,8 +32,6 @@ def test_importing_module_does_not_require_fastmcp(monkeypatch):
     # Remove any cached fastmcp import
     monkeypatch.setitem(sys.modules, "fastmcp", None)
     # Re-import the module -- should succeed even though fastmcp is None
-    import importlib
-
     importlib.reload(server_module)
     # No exception raised means the test passes
 
@@ -86,3 +84,41 @@ def test_server_name_override(library):
     store = L6Store(library["path"])
     server = server_module.create_l6_server(store, name="my-custom-server")
     assert getattr(server, "name", None) == "my-custom-server"
+
+
+def test_prepare_recognition_context_from_store_returns_prompt_fragment(library):
+    library["write"](
+        "codex",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "codex", "type": "code-assistant"},
+            "last_updated": "2026-05-07T12:00:00+00:00",
+            "known_entities": [
+                {
+                    "name": "Bourdon",
+                    "type": "topic",
+                    "summary": "Runtime recognition project.",
+                    "visibility": "team",
+                    "tags": ["codex-fallback-concept"],
+                }
+            ],
+        },
+    )
+    store = L6Store(library["path"])
+
+    report = server_module.prepare_recognition_context_from_store(
+        store,
+        "Can we keep working on Bourdon?",
+        access_level="team",
+    )
+
+    assert report["recognition"] == "Oh -- Bourdon, the topic."
+    assert report["matched_entities"] == [
+        {
+            "name": "Bourdon",
+            "type": "topic",
+            "source_agents": ["codex"],
+        }
+    ]
+    assert "Bourdon recognition context" in report["prompt_context"]
+    assert "Runtime recognition project." in report["prompt_context"]
