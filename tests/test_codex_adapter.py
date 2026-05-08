@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,9 +21,13 @@ from adapters.codex import (
     CodexAdapter,
     _extract_project_candidates,
     _find_rollout_file,
+    _inspect_codex_fallback_recall,
+    _inspect_codex_state_db,
     _parse_memory_text,
     _parse_session_index,
+    _project_key_from_cwd,
     _read_session_meta,
+    _render_codex_native_memory_text,
     _timestamp_to_iso_date,
 )
 
@@ -259,6 +264,32 @@ def test_find_rollout_file_matches_by_id(isolated_home):
     assert "abc123" in found.name
 
 
+def test_find_rollout_file_matches_archived_session_by_id(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    archived_dir = codex_home / "archived_sessions"
+    archived_dir.mkdir()
+    archived_rollout = archived_dir / "rollout-2026-04-15T12-00-00Z-archived123.jsonl"
+    archived_rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-15T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "archived123",
+                    "timestamp": "2026-04-15T12:00:00Z",
+                    "cwd": "/workspace/archived",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    found = _find_rollout_file(codex_home, "archived123")
+
+    assert found == archived_rollout
+
+
 def test_find_rollout_file_returns_none_when_missing(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     assert _find_rollout_file(codex_home, "nope") is None
@@ -301,6 +332,11 @@ def test_timestamp_parsing_returns_none_for_garbage():
     assert _timestamp_to_iso_date("") is None
 
 
+def test_project_key_filters_generic_new_project_workspace():
+    assert _project_key_from_cwd("/Users/radman/Documents/New project") is None
+    assert _project_key_from_cwd("/workspace/bourdon") == "bourdon"
+
+
 def test_parse_memory_text_stops_preference_capture_at_new_sections():
     parsed = _parse_memory_text(
         """## Preference signals
@@ -322,6 +358,342 @@ References:
     assert "implemented the API" not in parsed["preferences"]
     assert "do less guessing" not in parsed["preferences"]
     assert "docs/playbook.md" not in parsed["preferences"]
+
+
+def test_inspect_codex_state_db_reports_stage1_memory_failures(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    db_path = codex_home / "state_5.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, "
+            "memory_mode TEXT NOT NULL, "
+            "archived INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE stage1_outputs ("
+            "thread_id TEXT PRIMARY KEY, "
+            "raw_memory TEXT NOT NULL, "
+            "rollout_summary TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE jobs ("
+            "kind TEXT NOT NULL, "
+            "job_key TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "retry_remaining INTEGER NOT NULL, "
+            "last_error TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads (id, memory_mode, archived) VALUES ('thread-1', 'enabled', 0)"
+        )
+        conn.execute(
+            "INSERT INTO jobs "
+            "(kind, job_key, status, retry_remaining, last_error) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "memory_stage1",
+                "thread-1",
+                "error",
+                2,
+                "You've hit your usage limit.",
+            ),
+        )
+
+    report = _inspect_codex_state_db(codex_home)
+
+    assert report["present"] is True
+    assert report["readable"] is True
+    assert report["stage1_outputs"]["total"] == 0
+    assert report["threads"]["memory_enabled"] == 1
+    assert report["threads"]["active"] == 1
+    assert report["memory_stage1_jobs"]["by_status"] == {"error": 1}
+    assert report["memory_stage1_jobs"]["errors"][0]["retry_remaining"] == 2
+    assert "usage limit" in report["memory_stage1_jobs"]["errors"][0]["last_error"]
+
+
+def test_inspect_codex_fallback_recall_reports_session_rollout_coverage(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "bourdon1",
+        "Diagnose Bourdon runtime recognition memory",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "bourdon1",
+        "/workspace/bourdon",
+        "2026-05-07T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-07T12:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "arguments": (
+                        "*** Begin Patch\n"
+                        "*** Update File: adapters/codex.py\n"
+                        "@@\n"
+                        "-old\n"
+                        "+new\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            }
+        ],
+    )
+    isolated_home["write_memory_file"](
+        "raw_memories.md",
+        "# Raw Memories\n\nNo raw memories yet.\n",
+    )
+
+    report = _inspect_codex_fallback_recall(codex_home, codex_brain=None)
+
+    assert report["status"] == "available"
+    assert report["active"] is True
+    assert report["reason"] == "codex_distilled_memory_empty"
+    assert report["session_records"] == 1
+    assert report["rollout_records"] == 1
+    assert report["file_evidence_sessions"] == 1
+    assert report["fallback_memory_items"] >= 1
+    assert report["project_candidates"] == ["Bourdon"]
+
+
+def test_inspect_codex_fallback_recall_ignores_bourdon_owned_memory_md_section(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "fallback1",
+        "Build Bourdon memory doctor",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "fallback1",
+        "/workspace/bourdon",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["write_memory_file"](
+        "MEMORY.md",
+        (
+            "<!-- BEGIN BOURDON FALLBACK MEMORY -->\n"
+            "# Bourdon Fallback Memory\n"
+            "\n"
+            "Generated by Bourdon from Codex session and rollout metadata.\n"
+            "<!-- END BOURDON FALLBACK MEMORY -->\n"
+        ),
+    )
+
+    report = _inspect_codex_fallback_recall(codex_home, codex_brain=None)
+
+    assert report["distilled_memory_items"] == 0
+    assert report["active"] is True
+    assert report["reason"] == "codex_distilled_memory_empty"
+
+
+def test_render_codex_native_memory_redacts_credential_like_thread_titles(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "secret1",
+        "Debug API_KEY=super-secret for Bourdon",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "secret1",
+        "/workspace/bourdon",
+        "2026-05-07T12:00:00Z",
+    )
+
+    text = _render_codex_native_memory_text(codex_home, codex_brain=None)
+
+    assert "API_KEY" not in text
+    assert "super-secret" not in text
+    assert "[redacted credential-like text]" in text
+    assert "Bourdon" in text
+
+
+def test_render_codex_native_memory_extracts_bourdon_thesis_from_user_prompt(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "bourdon-thesis",
+        "Review Bourdon memory integration",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "bourdon-thesis",
+        "/Users/radman/shipstable",
+        "2026-05-07T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-07T12:01:00Z",
+                "type": "user_input",
+                "payload": {
+                    "text": (
+                        "We renamed Continuo to Bourdon. The project is about "
+                        "runtime recognition and a recognition timing layer "
+                        "for natural AI communication."
+                    ),
+                },
+            }
+        ],
+    )
+
+    text = _render_codex_native_memory_text(codex_home, codex_brain=None)
+
+    assert "Bourdon" in text
+    assert "Continuo" in text
+    assert "runtime recognition" in text
+    assert "recognition timing layer" in text
+
+
+def test_render_codex_native_memory_extracts_concepts_from_response_item_user_message(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "response-item-user-message",
+        "Review Bourdon memory integration",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "response-item-user-message",
+        "/Users/radman/shipstable",
+        "2026-05-07T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-07T12:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Continuo became Bourdon and needs runtime "
+                                "recognition as a recognition timing layer."
+                            ),
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    text = _render_codex_native_memory_text(codex_home, codex_brain=None)
+
+    assert "Bourdon" in text
+    assert "Continuo" in text
+    assert "runtime recognition" in text
+    assert "recognition timing layer" in text
+
+
+def test_render_codex_native_memory_extracts_concepts_from_event_user_message(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "event-user-message",
+        "Review Bourdon memory integration",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "event-user-message",
+        "/Users/radman/shipstable",
+        "2026-05-07T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-07T12:01:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": (
+                        "Continuo became Bourdon and needs run time "
+                        "recognition for natural AI communication."
+                    ),
+                },
+            }
+        ],
+    )
+
+    text = _render_codex_native_memory_text(codex_home, codex_brain=None)
+
+    assert "Bourdon" in text
+    assert "Continuo" in text
+    assert "runtime recognition" in text
+    assert "natural AI communication" in text
+
+
+def test_export_l5_promotes_recovered_fallback_concepts_to_topic_entities(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "bourdon-concepts",
+        "Review Bourdon memory integration",
+        "2026-05-07T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 7),
+        "bourdon-concepts",
+        "/Users/radman/shipstable",
+        "2026-05-07T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-07T12:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Continuo became Bourdon and needs run time "
+                                "recognition as a recognition timing layer."
+                            ),
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    manifest = CodexAdapter().export_l5()
+    topics = {
+        entity.name: entity
+        for entity in manifest.known_entities
+        if entity.type == "topic"
+    }
+
+    assert "Bourdon" in topics
+    assert "Continuo" in topics
+    assert "runtime recognition" in topics
+    assert "recognition timing layer" in topics
+    assert "codex-fallback-concept" in topics["Bourdon"].tags
+    assert "run time recognition" in topics["runtime recognition"].aliases
 
 
 def test_extract_project_candidates_filters_glue_words_and_generic_workstreams():
