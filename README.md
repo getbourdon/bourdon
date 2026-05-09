@@ -92,10 +92,23 @@ This loads the L0 hot cache and any matching L1 synopses, then prints the fully-
 ```bash
 bourdon codex export --access-level team
 bourdon codex build-context --out-dir ./build/codex-context
+bourdon codex prepare-turn --memory-md "Can we keep working on Bourdon?"
 bourdon codex eval --fixtures
 ```
 
 This generic Codex path is designed for org-wide distribution: local Codex memories stay `team` by default, public federation requires explicit promotion, and generated L0/L1 artifacts live separately from the repo's static Clyde examples.
+
+## Quick Start (Cross-Agent Recognition)
+
+```bash
+bourdon prepare-turn "Can we keep working on Bourdon?" --access-level team
+bourdon deeper-context "Can we keep working on Bourdon?" --access-level team
+python -m core.l6_server --transport stdio
+```
+
+`prepare-turn` reads the L6 federation library and returns immediate recognition
+plus a bounded prompt fragment. `deeper-context` is the companion L2 retrieval
+surface; it returns empty context when L2 is disabled.
 
 ## Quick Start (Hybrid Memory Cycle)
 
@@ -117,6 +130,7 @@ Docs:
 
 - [`docs/getting-started-memory-cycle.md`](docs/getting-started-memory-cycle.md)
 - [`docs/good-first-issues.md`](docs/good-first-issues.md)
+- [`docs/agent-integration-status.md`](docs/agent-integration-status.md)
 
 ## Hybrid Memory Tooling
 
@@ -160,15 +174,16 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 - **v1.0.0** — Docs site, community adapter contributions, public launch
 - **v1.x** — Cursor adapter (SQLite reverse-engineering), Copilot adapter (partial coverage), framework adapters (LangChain, CrewAI, AutoGen)
 
-## Adapter Compatibility (Planned v1)
+## Adapter Compatibility
 
 | Agent          | Difficulty        | Status    |
 |----------------|-------------------|-----------|
 | Clyde          | Native            | Planned   |
 | Clair          | Native            | Planned   |
-| Claude Code    | Native + Adapter  | Planned   |
-| Codex          | Moderate          | Planned   |
-| Cursor         | Deferred v1.x     | SQLite reverse-engineering required |
+| Claude Code    | Native + Adapter  | Export hook available |
+| Codex          | Moderate          | Fallback + prepare-turn available |
+| Cursor         | SQLite            | Adapter available; `bourdon cursor export` |
+| Cline          | Unknown           | Blocked pending native store path/schema |
 | Copilot        | Deferred v1.x     | Encrypted reasoning, no session index |
 
 ## Philosophy

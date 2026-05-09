@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
-import pytest
 import yaml
 
-from adapters.base import AgentInfo, Entity, L5Manifest, SPEC_VERSION, Visibility
+from adapters.base import SPEC_VERSION, AgentInfo, Entity, L5Manifest, Visibility
 from core.l5_io import read_l5_dict, write_l5, write_l5_dict
-
 
 # -- write_l5_dict -------------------------------------------------------------
 

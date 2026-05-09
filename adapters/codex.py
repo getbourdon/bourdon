@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import socket
+import sqlite3
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -35,6 +36,9 @@ ROLE_NARRATIVE = (
     "Consults with Claude on solutions, problems, and issues via PR or the "
     "Slack #agents channel."
 )
+BOURDON_NATIVE_MEMORY_FILENAME = "bourdon_fallback.md"
+BOURDON_MEMORY_MD_BEGIN = "<!-- BEGIN BOURDON FALLBACK MEMORY -->"
+BOURDON_MEMORY_MD_END = "<!-- END BOURDON FALLBACK MEMORY -->"
 
 DEFAULT_POLICY = VisibilityPolicy(
     default=Visibility.TEAM,
@@ -144,6 +148,7 @@ _GENERIC_PROJECT_NAMES = {
     "monorepo",
     "native",
     "new",
+    "new-project",
     "node",
     "notes",
     "npm",
@@ -204,10 +209,49 @@ _MEMORY_SECTION_KEYS = (
     "keywords",
     "descriptions",
 )
+_NATIVE_MEMORY_SENSITIVE_PATTERNS = (
+    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
+    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
+    re.compile(r"\bpassword\b", re.IGNORECASE),
+    re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
+    re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
+)
+_FALLBACK_CONCEPT_PATTERNS = (
+    ("Bourdon", re.compile(r"\bbourdon\b", re.IGNORECASE)),
+    ("Continuo", re.compile(r"\bcontinuo\b", re.IGNORECASE)),
+    (
+        "runtime recognition",
+        re.compile(r"\brun[- ]?time recognition\b", re.IGNORECASE),
+    ),
+    (
+        "recognition timing layer",
+        re.compile(r"\brecognition timing layer\b", re.IGNORECASE),
+    ),
+    (
+        "natural AI communication",
+        re.compile(r"\bnatural ai communication\b", re.IGNORECASE),
+    ),
+    (
+        "native Codex memory",
+        re.compile(r"\bnative codex memor(?:y|ies)\b", re.IGNORECASE),
+    ),
+)
 
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip())
+
+
+def _safe_native_memory_text(value: str, limit: int = 180) -> str:
+    text = _normalize_text(value)
+    if any(pattern.search(text) for pattern in _NATIVE_MEMORY_SENSITIVE_PATTERNS):
+        return "[redacted credential-like text]"
+    text = re.sub(r"https?://\S+", "[link]", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _split_csv(value: str) -> list[str]:
@@ -319,11 +363,167 @@ def _parse_session_index(path: Path, limit: int | None = None) -> list[dict]:
 
 def _find_rollout_file(codex_home: Path, session_id: str) -> Path | None:
     """Locate the rollout JSONL for a session id."""
-    sessions_dir = codex_home / "sessions"
-    if not sessions_dir.is_dir():
-        return None
-    matches = list(sessions_dir.rglob(f"rollout-*-{session_id}.jsonl"))
+    search_roots = [
+        codex_home / "sessions",
+        codex_home / "archived_sessions",
+    ]
+    matches: list[Path] = []
+    for root in search_roots:
+        if root.is_dir():
+            matches.extend(root.rglob(f"rollout-*-{session_id}.jsonl"))
     return matches[0] if matches else None
+
+
+def _empty_codex_state_report(codex_home: Path | None) -> dict[str, Any]:
+    db_path = codex_home / "state_5.sqlite" if codex_home else None
+    return {
+        "path": str(db_path) if db_path else None,
+        "present": bool(db_path and db_path.is_file()),
+        "readable": False,
+        "error": None,
+        "threads": {
+            "total": 0,
+            "memory_enabled": 0,
+            "active": 0,
+            "archived": 0,
+        },
+        "stage1_outputs": {
+            "total": 0,
+            "raw_memory": 0,
+            "rollout_summary": 0,
+        },
+        "memory_stage1_jobs": {
+            "total": 0,
+            "by_status": {},
+            "errors": [],
+        },
+    }
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    escaped_table = table_name.replace('"', '""')
+    rows = conn.execute(f'PRAGMA table_info("{escaped_table}")').fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _sqlite_count(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> int:
+    row = conn.execute(query, params).fetchone()
+    if row is None:
+        return 0
+    value = row[0]
+    return int(value or 0)
+
+
+def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
+    """Summarize Codex's local memory pipeline state without reading auth data."""
+    report = _empty_codex_state_report(codex_home)
+    db_path = codex_home / "state_5.sqlite" if codex_home else None
+    if db_path is None or not db_path.is_file():
+        report["error"] = "missing"
+        return report
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        report["error"] = str(exc)
+        return report
+
+    try:
+        report["readable"] = True
+
+        if _sqlite_table_exists(conn, "threads"):
+            thread_columns = _sqlite_table_columns(conn, "threads")
+            report["threads"]["total"] = _sqlite_count(conn, "SELECT count(*) FROM threads")
+            if "memory_mode" in thread_columns:
+                report["threads"]["memory_enabled"] = _sqlite_count(
+                    conn,
+                    "SELECT count(*) FROM threads WHERE memory_mode = ?",
+                    ("enabled",),
+                )
+            if "archived" in thread_columns:
+                report["threads"]["active"] = _sqlite_count(
+                    conn,
+                    "SELECT count(*) FROM threads WHERE archived = 0",
+                )
+                report["threads"]["archived"] = _sqlite_count(
+                    conn,
+                    "SELECT count(*) FROM threads WHERE archived = 1",
+                )
+
+        if _sqlite_table_exists(conn, "stage1_outputs"):
+            stage1_columns = _sqlite_table_columns(conn, "stage1_outputs")
+            report["stage1_outputs"]["total"] = _sqlite_count(
+                conn,
+                "SELECT count(*) FROM stage1_outputs",
+            )
+            if "raw_memory" in stage1_columns:
+                report["stage1_outputs"]["raw_memory"] = _sqlite_count(
+                    conn,
+                    "SELECT count(raw_memory) FROM stage1_outputs",
+                )
+            if "rollout_summary" in stage1_columns:
+                report["stage1_outputs"]["rollout_summary"] = _sqlite_count(
+                    conn,
+                    "SELECT count(rollout_summary) FROM stage1_outputs",
+                )
+
+        if _sqlite_table_exists(conn, "jobs"):
+            job_columns = _sqlite_table_columns(conn, "jobs")
+            if {"kind", "status"}.issubset(job_columns):
+                job_rows = conn.execute(
+                    """
+                    SELECT status, count(*)
+                    FROM jobs
+                    WHERE kind = ?
+                    GROUP BY status
+                    ORDER BY status
+                    """,
+                    ("memory_stage1",),
+                ).fetchall()
+                by_status = {str(status): int(count) for status, count in job_rows}
+                report["memory_stage1_jobs"]["by_status"] = by_status
+                report["memory_stage1_jobs"]["total"] = sum(by_status.values())
+            if {
+                "kind",
+                "job_key",
+                "status",
+                "retry_remaining",
+                "last_error",
+            }.issubset(job_columns):
+                error_rows = conn.execute(
+                    """
+                    SELECT job_key, status, retry_remaining, last_error
+                    FROM jobs
+                    WHERE kind = ? AND status != ?
+                    ORDER BY job_key
+                    LIMIT 20
+                    """,
+                    ("memory_stage1", "done"),
+                ).fetchall()
+                report["memory_stage1_jobs"]["errors"] = [
+                    {
+                        "job_key": str(job_key),
+                        "status": str(status),
+                        "retry_remaining": int(retry_remaining or 0),
+                        "last_error": str(last_error or "")[:500],
+                    }
+                    for job_key, status, retry_remaining, last_error in error_rows
+                ]
+    except sqlite3.Error as exc:
+        report["readable"] = False
+        report["error"] = str(exc)
+    finally:
+        conn.close()
+
+    return report
 
 
 def _iter_rollout_records(rollout_path: Path) -> list[dict[str, Any]]:
@@ -391,6 +591,90 @@ def _extract_structured_files_touched(rollout_path: Path) -> list[str]:
     return _dedupe_preserve(files, key=lambda item: item.lower())
 
 
+def _extract_rollout_user_texts(rollout_path: Path, limit: int = 3) -> list[str]:
+    texts: list[str] = []
+
+    def append_text(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        texts.append(value)
+        return len(texts) >= limit
+
+    for record in _iter_rollout_records(rollout_path):
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        record_type = record.get("type")
+        if record_type == "user_input":
+            if append_text(payload.get("text")):
+                break
+            continue
+
+        if record_type == "event_msg" and payload.get("type") == "user_message":
+            if append_text(payload.get("message")):
+                break
+            continue
+
+        if record_type != "response_item":
+            continue
+        if payload.get("type") != "message" or payload.get("role") != "user":
+            continue
+
+        content = payload.get("content")
+        if isinstance(content, str):
+            if append_text(content):
+                break
+            continue
+        if not isinstance(content, list):
+            continue
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "input_text":
+                continue
+            if append_text(item.get("text")):
+                break
+        if len(texts) >= limit:
+            break
+
+    return texts
+
+
+def _extract_fallback_concepts(texts: list[str]) -> list[str]:
+    combined = "\n".join(texts)
+    concepts = [
+        label
+        for label, pattern in _FALLBACK_CONCEPT_PATTERNS
+        if pattern.search(combined)
+    ]
+    return _dedupe_preserve(concepts, key=lambda item: item.lower())
+
+
+def _extract_recovered_fallback_concepts(descriptions: list[str]) -> list[str]:
+    concepts: list[str] = []
+    prefix = "Recovered concept:"
+    for description in descriptions:
+        if not isinstance(description, str):
+            continue
+        if not description.startswith(prefix):
+            continue
+        concept = _normalize_text(description.removeprefix(prefix))
+        if concept:
+            concepts.append(concept)
+    return _dedupe_preserve(concepts, key=lambda item: item.lower())
+
+
+def _fallback_concept_aliases(concept_name: str) -> list[str]:
+    normalized = concept_name.lower()
+    if normalized == "runtime recognition":
+        return ["run time recognition", "run-time recognition"]
+    if normalized == "native codex memory":
+        return ["native Codex memories"]
+    return []
+
+
 def _timestamp_to_iso_date(ts: str) -> str | None:
     """Extract `YYYY-MM-DD` from an ISO-ish timestamp string."""
     if not ts:
@@ -416,8 +700,10 @@ def _project_key_from_cwd(cwd: str | None) -> str | None:
     if not basename:
         return None
     key = basename.strip().lower()
+    normalized_key = key.replace(" ", "-")
     if (
         key in _GENERIC_PROJECT_NAMES
+        or normalized_key in _GENERIC_PROJECT_NAMES
         or key == Path.home().name.lower()
         or _looks_like_generated_workspace_name(key)
     ):
@@ -677,6 +963,23 @@ def _parse_raw_memories_threads(text: str) -> dict[str, dict[str, list[str]]]:
     return thread_contexts
 
 
+def _strip_bourdon_memory_md_section(existing_text: str) -> str:
+    text = existing_text
+    while BOURDON_MEMORY_MD_BEGIN in text:
+        start = text.index(BOURDON_MEMORY_MD_BEGIN)
+        end = text.find(BOURDON_MEMORY_MD_END, start)
+        if end == -1:
+            text = text[:start].rstrip()
+            break
+
+        end += len(BOURDON_MEMORY_MD_END)
+        prefix = text[:start].rstrip()
+        suffix = text[end:].lstrip()
+        joined_text = f"{prefix}\n\n{suffix}"
+        text = joined_text if prefix and suffix else prefix or suffix
+    return text
+
+
 def _extend_memory_data(
     into: dict[str, Any], parsed: dict[str, list[str]]
 ) -> None:
@@ -710,8 +1013,12 @@ def _collect_memory_data(
 
         if memory_md.is_file():
             data["source_counts"]["memory_md"] += 1
+            memory_text = _strip_bourdon_memory_md_section(
+                memory_md.read_text(encoding="utf-8")
+            )
             _extend_memory_data(
-                data, _parse_memory_text(memory_md.read_text(encoding="utf-8"))
+                data,
+                _parse_memory_text(memory_text),
             )
         if raw_memories.is_file():
             data["source_counts"]["raw_memories"] += 1
@@ -749,6 +1056,80 @@ def _collect_memory_data(
     return data
 
 
+def _memory_item_count(memory_data: dict[str, Any]) -> int:
+    total = sum(len(memory_data.get(key, [])) for key in _MEMORY_SECTION_KEYS)
+    for thread_context in memory_data.get("thread_contexts", {}).values():
+        if not isinstance(thread_context, dict):
+            continue
+        total += sum(len(thread_context.get(key, [])) for key in _MEMORY_SECTION_KEYS)
+    return total
+
+
+def _collect_rollout_fallback_memory_data(
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        **_empty_memory_sections(),
+        "thread_contexts": {},
+        "source_counts": {
+            "rollout_fallbacks": 0,
+        },
+    }
+
+    for record in records:
+        thread_data = _empty_memory_sections()
+        thread_name = str(record.get("thread_name") or "").strip()
+        if thread_name and thread_name != "(untitled)":
+            thread_data["task_titles"].append(thread_name)
+
+        project_key = _project_key_from_cwd(record.get("cwd"))
+        if project_key:
+            project_label = _friendly_label(project_key)
+            thread_data["keywords"].append(project_label)
+            thread_data["task_groups"].append(f"{project_label} Codex session history")
+
+        concepts = list(record.get("fallback_concepts") or [])
+        if concepts:
+            thread_data["keywords"].extend(concepts)
+            for concept in concepts:
+                thread_data["descriptions"].append(f"Recovered concept: {concept}")
+
+        files_touched = list(record.get("files_touched") or [])
+        if files_touched:
+            shown_files = ", ".join(files_touched[:5])
+            thread_data["descriptions"].append(
+                f"Structured patch evidence touched: {shown_files}"
+            )
+
+        if not any(thread_data.values()):
+            continue
+
+        data["source_counts"]["rollout_fallbacks"] += 1
+        _extend_memory_data(data, thread_data)
+        thread_id = str(record.get("id") or "")
+        if thread_id:
+            existing = data["thread_contexts"].setdefault(
+                thread_id,
+                _empty_memory_sections(),
+            )
+            _extend_memory_data(existing, thread_data)
+
+    return data
+
+
+def _merge_memory_data(into: dict[str, Any], other: dict[str, Any]) -> None:
+    _extend_memory_data(into, other)
+    source_counts = into.setdefault("source_counts", {})
+    for source_name, count in other.get("source_counts", {}).items():
+        source_counts[source_name] = int(source_counts.get(source_name, 0)) + int(count)
+    for thread_id, thread_data in other.get("thread_contexts", {}).items():
+        existing = into.setdefault("thread_contexts", {}).setdefault(
+            thread_id,
+            _empty_memory_sections(),
+        )
+        _extend_memory_data(existing, thread_data)
+
+
 def _collect_session_records(
     codex_home: Path | None, limit: int | None = None
 ) -> list[dict[str, Any]]:
@@ -762,6 +1143,7 @@ def _collect_session_records(
             continue
         rollout = _find_rollout_file(codex_home, session_id)
         meta = _read_session_meta(rollout) if rollout else {}
+        user_texts = _extract_rollout_user_texts(rollout) if rollout else []
         updated_at = entry.get("updated_at") or meta.get("timestamp") or ""
         session_date = _timestamp_to_iso_date(str(updated_at))
         if not session_date:
@@ -787,12 +1169,177 @@ def _collect_session_records(
                 "source": meta.get("source")
                 if isinstance(meta.get("source"), str)
                 else None,
+                "has_rollout": rollout is not None,
+                "fallback_concepts": _extract_fallback_concepts(
+                    [str(entry.get("thread_name") or "")] + user_texts
+                ),
                 "files_touched": (
                     _extract_structured_files_touched(rollout) if rollout else []
                 ),
             }
         )
     return records
+
+
+def _inspect_codex_fallback_recall(
+    codex_home: Path | None, codex_brain: Path | None
+) -> dict[str, Any]:
+    records = _collect_session_records(codex_home)
+    memory_data = _collect_memory_data(codex_home, codex_brain)
+    fallback_data = _collect_rollout_fallback_memory_data(records)
+
+    distilled_items = _memory_item_count(memory_data)
+    fallback_items = _memory_item_count(fallback_data)
+    project_candidates = sorted(
+        {
+            _friendly_label(project_key)
+            for project_key in (
+                _project_key_from_cwd(record.get("cwd")) for record in records
+            )
+            if project_key
+        }
+    )
+    active = distilled_items == 0 and fallback_items > 0
+    status = "available" if fallback_items > 0 else "missing"
+    if active:
+        reason = "codex_distilled_memory_empty"
+    elif fallback_items > 0:
+        reason = "codex_distilled_memory_available"
+    else:
+        reason = "no_session_rollout_fallback"
+
+    return {
+        "status": status,
+        "active": active,
+        "reason": reason,
+        "distilled_memory_items": distilled_items,
+        "fallback_memory_items": fallback_items,
+        "session_records": len(records),
+        "rollout_records": sum(1 for record in records if record.get("has_rollout")),
+        "file_evidence_sessions": sum(
+            1 for record in records if record.get("files_touched")
+        ),
+        "project_candidates": project_candidates,
+    }
+
+
+def _default_codex_native_memory_path(codex_home: Path | None) -> Path:
+    root = codex_home or (Path.home() / ".codex")
+    return root / "memories" / BOURDON_NATIVE_MEMORY_FILENAME
+
+
+def _default_codex_memory_md_path(codex_home: Path | None) -> Path:
+    root = codex_home or (Path.home() / ".codex")
+    return root / "memories" / "MEMORY.md"
+
+
+def _merge_bourdon_memory_md_section(existing_text: str, bourdon_text: str) -> str:
+    block = (
+        f"{BOURDON_MEMORY_MD_BEGIN}\n"
+        f"{bourdon_text.rstrip()}\n"
+        f"{BOURDON_MEMORY_MD_END}\n"
+    )
+    if BOURDON_MEMORY_MD_BEGIN not in existing_text:
+        prefix = existing_text.rstrip()
+        return f"{prefix}\n\n{block}" if prefix else block
+
+    start = existing_text.index(BOURDON_MEMORY_MD_BEGIN)
+    end = existing_text.find(BOURDON_MEMORY_MD_END, start)
+    if end == -1:
+        prefix = existing_text.rstrip()
+        return f"{prefix}\n\n{block}" if prefix else block
+
+    end += len(BOURDON_MEMORY_MD_END)
+    merged = existing_text[:start].rstrip() + "\n\n" + block
+    suffix = existing_text[end:].lstrip()
+    if suffix:
+        merged += "\n" + suffix
+    return merged
+
+
+def _render_codex_native_memory_text(
+    codex_home: Path | None,
+    codex_brain: Path | None,
+    max_sessions: int = 20,
+) -> str:
+    records = _collect_session_records(codex_home, limit=max_sessions)
+    fallback = _inspect_codex_fallback_recall(codex_home, codex_brain)
+    project_names = list(fallback.get("project_candidates") or [])
+    concepts = _dedupe_preserve(
+        [
+            str(concept)
+            for record in records
+            for concept in list(record.get("fallback_concepts") or [])
+            if concept
+        ],
+        key=lambda item: item.lower(),
+    )
+
+    lines = [
+        "# Bourdon Fallback Memory",
+        "",
+        "Generated by Bourdon from Codex session and rollout metadata.",
+        "This file is local, reversible, and avoids raw conversation transcripts.",
+        "",
+        "## Recovered Projects",
+    ]
+    if project_names:
+        lines.extend(f"- {_safe_native_memory_text(name)}" for name in project_names)
+    else:
+        lines.append("- No project anchors recovered yet.")
+
+    lines.extend(["", "## Recovered Concepts"])
+    if concepts:
+        lines.extend(f"- {_safe_native_memory_text(concept)}" for concept in concepts)
+    else:
+        lines.append("- No concept anchors recovered yet.")
+
+    lines.extend(["", "## Recent Codex Threads"])
+    if not records:
+        lines.append("- No Codex session records found.")
+    for record in records[:max_sessions]:
+        title = _safe_native_memory_text(str(record.get("thread_name") or "(untitled)"))
+        date_text = _safe_native_memory_text(str(record.get("date") or "unknown-date"))
+        project_key = _project_key_from_cwd(record.get("cwd"))
+        parts = [f"- {date_text}: {title}"]
+        if project_key:
+            parts.append(f"project={_safe_native_memory_text(_friendly_label(project_key))}")
+        files_touched = [
+            _safe_native_memory_text(str(path), limit=120)
+            for path in list(record.get("files_touched") or [])[:5]
+        ]
+        if files_touched:
+            parts.append(f"files={', '.join(files_touched)}")
+        lines.append("; ".join(parts))
+
+    lines.extend(
+        [
+            "",
+            "## Recognition Hints",
+            "- Treat recovered project names and thread titles as lightweight recall anchors.",
+            "- Prefer Bourdon fallback recall only when Codex distilled memories are empty.",
+            "- Do not treat this file as a raw transcript or source of secrets.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_codex_native_memory_payload(
+    codex_home: Path | None,
+    codex_brain: Path | None,
+    max_sessions: int = 20,
+) -> dict[str, Any]:
+    text = _render_codex_native_memory_text(
+        codex_home,
+        codex_brain,
+        max_sessions=max_sessions,
+    )
+    return {
+        "text": text,
+        "bytes": len(text.encode("utf-8")),
+        "fallback_recall": _inspect_codex_fallback_recall(codex_home, codex_brain),
+    }
 
 
 def _record_to_session(record: dict[str, Any], project_label: str | None = None) -> Session:
@@ -889,6 +1436,10 @@ class CodexAdapter:
         )
         records = _collect_session_records(self._codex_home)
         memory_data = _collect_memory_data(self._codex_home, self._codex_brain)
+        if _memory_item_count(memory_data) == 0:
+            fallback_data = _collect_rollout_fallback_memory_data(records)
+            if _memory_item_count(fallback_data) > 0:
+                _merge_memory_data(memory_data, fallback_data)
         phrases = (
             memory_data["keywords"]
             + memory_data["task_groups"]
@@ -1012,6 +1563,37 @@ class CodexAdapter:
                 _merge_entity(entity_map[key], topic)
             else:
                 entity_map[key] = topic
+
+        fallback_concept_dates: dict[str, list[str]] = {}
+        for record in records:
+            record_date = str(record.get("date") or "")
+            for concept in list(record.get("fallback_concepts") or []):
+                concept_key = str(concept).lower()
+                fallback_concept_dates.setdefault(concept_key, []).append(record_date)
+
+        for concept_name in _extract_recovered_fallback_concepts(
+            memory_data["descriptions"]
+        ):
+            concept = Entity(
+                name=concept_name,
+                type="topic",
+                aliases=_fallback_concept_aliases(concept_name),
+                summary=(
+                    "Codex fallback concept recovered from rollout user prompts: "
+                    f"{concept_name}."
+                ),
+                last_touched=max(
+                    fallback_concept_dates.get(concept_name.lower(), []),
+                    default=None,
+                ),
+                tags=["codex-memory", "codex-fallback-concept"],
+                visibility=Visibility.TEAM,
+            )
+            key = (concept.type or "topic", concept.name.lower())
+            if key in entity_map:
+                _merge_entity(entity_map[key], concept)
+            else:
+                entity_map[key] = concept
 
         for preference_text in memory_data["preferences"]:
             preference = Entity(

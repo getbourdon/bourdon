@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from adapters._cursor_sqlite import (
     CursorSQLiteMemories,
@@ -83,7 +82,7 @@ class CursorAdapter:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
-    def __init__(self, cursor_dir: Optional[Path] = None) -> None:
+    def __init__(self, cursor_dir: Path | None = None) -> None:
         self._cursor_dir = cursor_dir
         self._policy = DEFAULT_POLICY
 
@@ -131,7 +130,7 @@ class CursorAdapter:
                 break
         return out
 
-    def export_l5(self, since: Optional[datetime] = None) -> L5Manifest:
+    def export_l5(self, since: datetime | None = None) -> L5Manifest:
         """Build the L5 manifest from Cursor's current SQLite state.
 
         Filters sessions to those newer than ``since`` when provided.

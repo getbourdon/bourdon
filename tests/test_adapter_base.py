@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import pytest
-
 from adapters.base import (
+    SPEC_VERSION,
     AgentInfo,
     AgentStore,
     BourdonAdapter,
@@ -14,13 +13,11 @@ from adapters.base import (
     HealthStatus,
     L5Manifest,
     Session,
-    SPEC_VERSION,
     Visibility,
     VisibilityPolicy,
     apply_visibility,
     filter_for_federation,
 )
-
 
 # -- Visibility enum -----------------------------------------------------------
 

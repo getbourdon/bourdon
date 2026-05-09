@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 
 import yaml
 
+import cli.main as cli_main
 from cli.main import main
 
 
@@ -127,6 +130,237 @@ Outcome: success
     )
 
 
+def _build_fake_codex_state_db(fake_home: Path) -> None:
+    codex_home = fake_home / ".codex"
+    with sqlite3.connect(codex_home / "state_5.sqlite") as conn:
+        conn.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, "
+            "memory_mode TEXT NOT NULL, "
+            "archived INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE stage1_outputs ("
+            "thread_id TEXT PRIMARY KEY, "
+            "raw_memory TEXT NOT NULL, "
+            "rollout_summary TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE jobs ("
+            "kind TEXT NOT NULL, "
+            "job_key TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "retry_remaining INTEGER NOT NULL, "
+            "last_error TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads (id, memory_mode, archived) VALUES ('sess1', 'enabled', 0)"
+        )
+        conn.execute(
+            "INSERT INTO jobs "
+            "(kind, job_key, status, retry_remaining, last_error) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "memory_stage1",
+                "sess1",
+                "error",
+                2,
+                "You've hit your usage limit.",
+            ),
+        )
+
+
+def _write_l5_manifest(library: Path, agent_id: str, entities: list[dict]) -> Path:
+    path = library / "agents" / f"{agent_id}.l5.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "spec_version": "0.1",
+        "agent": {"id": agent_id, "type": "code-assistant"},
+        "last_updated": "2026-05-08T12:00:00+00:00",
+        "known_entities": entities,
+        "recent_sessions": [],
+    }
+    path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _build_fake_cursor_dir(tmp_path: Path) -> Path:
+    cursor_dir = tmp_path / "Cursor"
+    db_path = cursor_dir / "User" / "workspaceStorage" / "abc123" / "state.vscdb"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+            (
+                "composer.composerData",
+                json.dumps(
+                    {
+                        "workspacePath": "/Users/dev/projects/bourdon",
+                        "title": "Wire Bourdon recognition",
+                        "messages": [],
+                        "lastUpdatedAt": "2026-05-08T12:00:00Z",
+                    }
+                ),
+            ),
+        )
+    return cursor_dir
+
+
+def test_cli_prepare_turn_returns_l6_recognition_from_merged_agents(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "claude-code",
+        [
+            {
+                "name": "Bourdon",
+                "type": "topic",
+                "summary": "Claude planning context.",
+                "visibility": "team",
+            }
+        ],
+    )
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "topic",
+                "summary": "Codex implementation context.",
+                "visibility": "team",
+            }
+        ],
+    )
+
+    exit_code = main(
+        [
+            "prepare-turn",
+            "Can we keep working on Bourdon?",
+            "--library",
+            str(library),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["recognition"] == "Oh -- Bourdon, the topic."
+    assert report["matched_entities"] == [
+        {
+            "name": "Bourdon",
+            "type": "topic",
+            "source_agents": ["claude-code", "codex"],
+        }
+    ]
+    assert "Bourdon recognition context" in report["prompt_context"]
+    assert "via claude-code, codex" in report["prompt_context"]
+
+
+def test_cli_prepare_turn_returns_empty_context_on_no_match(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [{"name": "Bourdon", "type": "topic", "visibility": "team"}],
+    )
+
+    exit_code = main(
+        [
+            "prepare-turn",
+            "What is the weather?",
+            "--library",
+            str(library),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["recognition"] == ""
+    assert report["matched_entities"] == []
+    assert report["prompt_context"] == ""
+
+
+def test_cli_cursor_export_writes_schema_valid_manifest(tmp_path, capsys):
+    import jsonschema
+
+    cursor_dir = _build_fake_cursor_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "cursor.l5.yaml"
+
+    exit_code = main(
+        [
+            "cursor",
+            "export",
+            "--cursor-dir",
+            str(cursor_dir),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+    manifest = yaml.safe_load(out_path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        (Path(__file__).parent.parent / "spec" / "L5_schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert exit_code == 0
+    assert manifest["agent"]["id"] == "cursor"
+    assert any(entity["name"] == "bourdon" for entity in manifest["known_entities"])
+    jsonschema.validate(instance=manifest, schema=schema)
+
+
+def test_cli_cursor_export_print_still_writes_file(tmp_path, capsys):
+    cursor_dir = _build_fake_cursor_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "cursor.l5.yaml"
+
+    exit_code = main(
+        [
+            "cursor",
+            "export",
+            "--cursor-dir",
+            str(cursor_dir),
+            "--out",
+            str(out_path),
+            "--print",
+        ]
+    )
+    printed = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert out_path.is_file()
+    assert printed["agent"]["id"] == "cursor"
+
+
+def test_cli_deeper_context_returns_empty_when_l2_disabled(monkeypatch, capsys):
+    async def disabled_query_l2(prompt):
+        return ""
+
+    monkeypatch.setattr(cli_main, "query_l2", disabled_query_l2)
+
+    exit_code = main(["deeper-context", "Tell me about Bourdon"])
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["context"] == ""
+    assert report["context_chars"] == 0
+
+
+def test_cli_deeper_context_returns_l2_text_with_fake_query(monkeypatch, capsys):
+    async def fake_query_l2(prompt):
+        return f"Hydrated detail for {prompt}."
+
+    monkeypatch.setattr(cli_main, "query_l2", fake_query_l2)
+
+    exit_code = main(["deeper-context", "Bourdon"])
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["context"] == "Hydrated detail for Bourdon."
+    assert report["context_chars"] == len("Hydrated detail for Bourdon.")
+
+
 def test_cli_codex_export_writes_manifest(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -162,6 +396,348 @@ def test_cli_codex_build_context_writes_l0_and_l1(tmp_path, monkeypatch):
         "Coolculator" in l1_file.read_text(encoding="utf-8")
         for l1_file in l1_files
     )
+
+
+def test_cli_codex_doctor_reports_sqlite_memory_health(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    _build_fake_codex_state_db(fake_home)
+
+    report_path = tmp_path / "doctor.yaml"
+    exit_code = main(["codex", "doctor", "--report-out", str(report_path)])
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert "codex_state_db" in stdout
+    assert report["source_coverage"]["status"] == "ok"
+    assert report["codex_state_db"]["stage1_outputs"]["total"] == 0
+    assert report["codex_state_db"]["threads"]["memory_enabled"] == 1
+    assert report["codex_state_db"]["memory_stage1_jobs"]["by_status"] == {"error": 1}
+    assert (
+        report["codex_state_db"]["memory_stage1_jobs"]["errors"][0]["last_error"]
+        == "You've hit your usage limit."
+    )
+    assert report["fallback_recall"]["status"] == "available"
+    assert report["fallback_recall"]["active"] is False
+    assert report["fallback_recall"]["session_records"] == 1
+    assert report["fallback_recall"]["rollout_records"] == 1
+
+
+def test_cli_codex_doctor_marks_fallback_active_when_distilled_memory_empty(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    memories = fake_home / ".codex" / "memories"
+    (memories / "MEMORY.md").unlink()
+    (memories / "rollout_summaries" / "2026-04-19-coolculator.md").unlink()
+    shutil.rmtree(fake_home / "codex-brain")
+    (memories / "raw_memories.md").write_text(
+        "# Raw Memories\n\nNo raw memories yet.\n",
+        encoding="utf-8",
+    )
+
+    report_path = tmp_path / "doctor.yaml"
+    exit_code = main(["codex", "doctor", "--report-out", str(report_path)])
+    capsys.readouterr()
+    report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["fallback_recall"]["status"] == "available"
+    assert report["fallback_recall"]["active"] is True
+    assert report["fallback_recall"]["reason"] == "codex_distilled_memory_empty"
+    assert report["fallback_recall"]["fallback_memory_items"] >= 1
+    assert report["fallback_recall"]["project_candidates"] == ["Coolculator"]
+
+
+def test_cli_codex_sync_native_dry_run_does_not_write_memory_file(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+
+    target = fake_home / ".codex" / "memories" / "bourdon_fallback.md"
+    exit_code = main(["codex", "sync-native", "--dry-run"])
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    assert target.exists() is False
+    assert report["mode"] == "dry-run"
+    assert report["target"] == str(target)
+    assert report["would_write"] is True
+    assert report["written"] is False
+    assert "Coolculator" in report["preview"]
+
+
+def test_cli_codex_sync_native_write_creates_bourdon_owned_memory_file(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+
+    target = fake_home / ".codex" / "memories" / "bourdon_fallback.md"
+    exit_code = main(["codex", "sync-native", "--write"])
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    assert target.is_file()
+    content = target.read_text(encoding="utf-8")
+    assert report["mode"] == "write"
+    assert report["written"] is True
+    assert report["target"] == str(target)
+    assert "# Bourdon Fallback Memory" in content
+    assert "Coolculator" in content
+
+
+def test_cli_codex_sync_native_memory_md_preserves_existing_content_with_markers(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+
+    target = fake_home / ".codex" / "memories" / "MEMORY.md"
+    target.write_text("# Existing Codex Memory\n\nKeep this.\n", encoding="utf-8")
+
+    exit_code = main(["codex", "sync-native", "--write", "--memory-md"])
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    content = target.read_text(encoding="utf-8")
+    assert report["target"] == str(target)
+    assert report["target_kind"] == "memory_md"
+    assert "# Existing Codex Memory" in content
+    assert "Keep this." in content
+    assert "<!-- BEGIN BOURDON FALLBACK MEMORY -->" in content
+    assert "<!-- END BOURDON FALLBACK MEMORY -->" in content
+    assert "Coolculator" in content
+
+
+def test_cli_codex_recognize_returns_immediate_fallback_concept_match(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    memories = fake_home / ".codex" / "memories"
+    (memories / "MEMORY.md").unlink()
+    (memories / "rollout_summaries" / "2026-04-19-coolculator.md").unlink()
+    shutil.rmtree(fake_home / "codex-brain")
+    (memories / "raw_memories.md").write_text(
+        "# Raw Memories\n\nNo raw memories yet.\n",
+        encoding="utf-8",
+    )
+    rollout_path = next((fake_home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    with open(rollout_path, "a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-19T12:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Continuo became Bourdon and needs runtime "
+                                    "recognition."
+                                ),
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    exit_code = main(
+        ["codex", "recognize", "Can we keep working on Bourdon runtime recognition?"]
+    )
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    assert (
+        report["recognition"]
+        == "You're asking about Bourdon and runtime recognition -- I have both."
+    )
+    assert report["matched_entities"] == [
+        {"name": "Bourdon", "type": "topic"},
+        {"name": "runtime recognition", "type": "topic"},
+    ]
+    assert report["hydration_scheduled"] is True
+
+
+def test_cli_codex_recognize_prompt_context_includes_matched_entity_summaries(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    memories = fake_home / ".codex" / "memories"
+    (memories / "MEMORY.md").unlink()
+    (memories / "rollout_summaries" / "2026-04-19-coolculator.md").unlink()
+    shutil.rmtree(fake_home / "codex-brain")
+    (memories / "raw_memories.md").write_text(
+        "# Raw Memories\n\nNo raw memories yet.\n",
+        encoding="utf-8",
+    )
+    rollout_path = next((fake_home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    with open(rollout_path, "a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-19T12:02:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": (
+                            "Continuo became Bourdon and needs run time "
+                            "recognition."
+                        ),
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    exit_code = main(
+        [
+            "codex",
+            "recognize",
+            "--prompt-context",
+            "Can we keep working on Bourdon runtime recognition?",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    assert "Bourdon recognition context" in report["prompt_context"]
+    assert report["recognition"] in report["prompt_context"]
+    assert "- Bourdon (topic):" in report["prompt_context"]
+    assert "- runtime recognition (topic):" in report["prompt_context"]
+    assert "Codex fallback concept recovered" in report["prompt_context"]
+
+
+def test_cli_codex_prepare_turn_writes_bridge_l5_and_prompt_context(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    memories = fake_home / ".codex" / "memories"
+    (memories / "MEMORY.md").unlink()
+    (memories / "rollout_summaries" / "2026-04-19-coolculator.md").unlink()
+    shutil.rmtree(fake_home / "codex-brain")
+    (memories / "raw_memories.md").write_text(
+        "# Raw Memories\n\nNo raw memories yet.\n",
+        encoding="utf-8",
+    )
+    rollout_path = next((fake_home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    with open(rollout_path, "a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-19T12:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Continuo became Bourdon and needs runtime "
+                                    "recognition."
+                                ),
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    l5_path = tmp_path / "agent-library" / "agents" / "codex.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex",
+            "prepare-turn",
+            "--write",
+            "--memory-md",
+            "--l5-out",
+            str(l5_path),
+            "Can we keep working on Bourdon runtime recognition?",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    memory_md = memories / "MEMORY.md"
+    assert exit_code == 0
+    assert report["mode"] == "write"
+    assert report["recognition"]["recognition"]
+    assert "Bourdon recognition context" in report["prompt_context"]
+    assert report["writes"]["native_memory"]["written"] is True
+    assert report["writes"]["native_memory"]["target"] == str(memory_md)
+    assert report["writes"]["l5"]["written"] is True
+    assert report["writes"]["l5"]["target"] == str(l5_path)
+    assert "<!-- BEGIN BOURDON FALLBACK MEMORY -->" in memory_md.read_text(
+        encoding="utf-8"
+    )
+    l5_manifest = yaml.safe_load(l5_path.read_text(encoding="utf-8"))
+    l5_entities = {entity["name"] for entity in l5_manifest["known_entities"]}
+    assert "Bourdon" in l5_entities
+    assert "runtime recognition" in l5_entities
+
+
+def test_cli_codex_prepare_turn_dry_run_does_not_write(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    l5_path = tmp_path / "agent-library" / "agents" / "codex.l5.yaml"
+    native_path = fake_home / ".codex" / "memories" / "bourdon_fallback.md"
+
+    exit_code = main(
+        [
+            "codex",
+            "prepare-turn",
+            "--native-out",
+            str(native_path),
+            "--l5-out",
+            str(l5_path),
+            "Tell me about Coolculator",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    report = yaml.safe_load(stdout)
+
+    assert exit_code == 0
+    assert report["mode"] == "dry-run"
+    assert report["writes"]["native_memory"]["written"] is False
+    assert report["writes"]["l5"]["written"] is False
+    assert native_path.exists() is False
+    assert l5_path.exists() is False
 
 
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):

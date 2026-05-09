@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures" / "short-index"
 MIGRATE_SCRIPT = REPO_ROOT / "scripts" / "migrate_short_index.py"
@@ -32,14 +31,17 @@ def _copy_fixture_case(case_dir: Path, tmp_path: Path) -> tuple[Path, Path, dict
 
     workspace_fixture = case_dir / "workspace-short-index.json"
     global_fixture = case_dir / "global-short-index.json"
-    workspace_index.write_text(
-        workspace_fixture.read_text(encoding="utf-8") if workspace_fixture.exists() else _default_short_index_text(),
-        encoding="utf-8",
-    )
-    global_index.write_text(
-        global_fixture.read_text(encoding="utf-8") if global_fixture.exists() else _default_short_index_text(),
-        encoding="utf-8",
-    )
+    if workspace_fixture.exists():
+        workspace_text = workspace_fixture.read_text(encoding="utf-8")
+    else:
+        workspace_text = _default_short_index_text()
+    workspace_index.write_text(workspace_text, encoding="utf-8")
+
+    if global_fixture.exists():
+        global_text = global_fixture.read_text(encoding="utf-8")
+    else:
+        global_text = _default_short_index_text()
+    global_index.write_text(global_text, encoding="utf-8")
 
     meta = json.loads((case_dir / "meta.json").read_text(encoding="utf-8"))
     return workspace_root, workspace_index, global_index, meta
@@ -75,7 +77,9 @@ def test_short_index_regression_fixtures_match_expected_check_and_validate_exits
         global_index,
         "--check",
     )
-    assert check_result.returncode == meta["expectCheckExit"], check_result.stdout + check_result.stderr
+    assert check_result.returncode == meta["expectCheckExit"], (
+        check_result.stdout + check_result.stderr
+    )
 
     if meta["runMigrateWrite"]:
         migrate_write_result = _run_python(
@@ -108,9 +112,8 @@ def test_short_index_regression_fixtures_match_expected_check_and_validate_exits
 def test_memory_cycle_workflow_stops_after_failed_migration_check() -> None:
     workflow = yaml.safe_load(WORKFLOW_FILE.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["verify-memory-cycle"]["steps"]
-    schema_step = next(
-        step for step in steps if step.get("name") == "Enforce canonical short-index schema (CI check only)"
-    )
+    schema_step_name = "Enforce canonical short-index schema (CI check only)"
+    schema_step = next(step for step in steps if step.get("name") == schema_step_name)
 
     run_script = schema_step["run"]
     expected_guard = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"

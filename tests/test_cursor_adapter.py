@@ -12,7 +12,6 @@ import pytest
 from adapters.base import AdapterDiscoveryError, L5Manifest
 from adapters.cursor import AGENT_ID, AGENT_TYPE, CursorAdapter
 
-
 # ---- Helpers ----------------------------------------------------------------
 
 

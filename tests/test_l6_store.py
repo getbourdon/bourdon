@@ -408,6 +408,81 @@ def test_get_agent_manifest_access_level_team_includes_team_not_private(library)
     assert "Private" not in names
 
 
+def test_build_recognition_manifest_merges_visible_entities_across_agents(library):
+    library["write"](
+        "claude-code",
+        _manifest(
+            "claude-code",
+            entities=[
+                {
+                    "name": "Bourdon",
+                    "type": "topic",
+                    "aliases": ["Continuo"],
+                    "summary": "Claude thesis context.",
+                    "visibility": "team",
+                    "tags": ["claude"],
+                }
+            ],
+        ),
+    )
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            entities=[
+                {
+                    "name": "Bourdon",
+                    "type": "topic",
+                    "aliases": ["runtime recognition"],
+                    "summary": "Codex fallback concept.",
+                    "visibility": "team",
+                    "tags": ["codex"],
+                },
+                {
+                    "name": "Private Anchor",
+                    "type": "topic",
+                    "visibility": "private",
+                },
+            ],
+        ),
+    )
+
+    store = L6Store(library["path"])
+    manifest = store.build_recognition_manifest(access_level="team")
+    entities = {entity["name"]: entity for entity in manifest["known_entities"]}
+
+    assert "Bourdon" in entities
+    assert "Private Anchor" not in entities
+    assert set(entities["Bourdon"]["source_agents"]) == {"claude-code", "codex"}
+    assert set(entities["Bourdon"]["aliases"]) == {
+        "Continuo",
+        "runtime recognition",
+    }
+    assert entities["Bourdon"]["summaries"] == {
+        "claude-code": "Claude thesis context.",
+        "codex": "Codex fallback concept.",
+    }
+
+
+def test_build_recognition_manifest_respects_public_default(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            entities=[
+                {"name": "Public Anchor", "visibility": "public"},
+                {"name": "Team Anchor", "visibility": "team"},
+            ],
+        ),
+    )
+
+    store = L6Store(library["path"])
+    manifest = store.build_recognition_manifest()
+    names = {entity["name"] for entity in manifest["known_entities"]}
+
+    assert names == {"Public Anchor"}
+
+
 # -- get_cross_agent_summary ---------------------------------------------------
 
 

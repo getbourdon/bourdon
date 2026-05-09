@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -13,13 +11,11 @@ import yaml
 from core import l2 as l2_module
 from core.l2 import (
     FastMCPL2Client,
-    L2Client,
     L2Config,
     _format_l2_context,
     _parse_bool,
     query_l2,
 )
-
 
 # -- L2Config ------------------------------------------------------------------
 

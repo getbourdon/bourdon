@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from core import orchestrator
@@ -15,7 +13,6 @@ from core.orchestrator import (
     load_l0,
     load_l1_synopsis,
 )
-
 
 # -- Pure-function tests (no fixture needed) -----------------------------------
 

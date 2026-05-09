@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Iterable
+from collections.abc import Iterable
 
 import httpx
 import pytest
@@ -12,14 +12,13 @@ import pytest
 from adapters.llama_cpp_backend import LlamaCppBackend, _parse_sse_line
 from core.inference_protocol import InferenceBackend, Slot
 
-
 # ---- Test helpers -----------------------------------------------------------
 
 
 def _sse(events: Iterable[dict]) -> bytes:
     """Serialize event dicts into llama-server-style SSE byte body."""
     return b"".join(
-        f"data: {json.dumps(e)}\n\n".encode("utf-8") for e in events
+        f"data: {json.dumps(e)}\n\n".encode() for e in events
     )
 
 

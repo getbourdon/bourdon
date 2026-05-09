@@ -9,17 +9,18 @@ from pathlib import Path
 import pytest
 import yaml
 
+from adapters import claude_code as cc_module
 from adapters.base import (
+    SPEC_VERSION,
     AdapterDiscoveryError,
     BourdonAdapter,
     Entity,
     HealthStatus,
     L5Manifest,
-    SPEC_VERSION,
     Visibility,
 )
-from adapters import claude_code as cc_module
 from adapters.claude_code import (
+    ClaudeCodeAdapter,
     _contains_credential_pattern,
     _dedupe_entities,
     _extract_h1_title,
@@ -28,9 +29,7 @@ from adapters.claude_code import (
     _parse_frontmatter,
     _parse_log_file,
     _parse_project_overview,
-    ClaudeCodeAdapter,
 )
-
 
 # -- Fixture: isolated filesystem tree -----------------------------------------
 

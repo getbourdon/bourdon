@@ -19,7 +19,6 @@ from core.recognition_runtime import (
     recognition_first,
 )
 
-
 # ---- detect_entities --------------------------------------------------------
 
 

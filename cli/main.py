@@ -16,10 +16,23 @@ import yaml
 
 from adapters.base import AdapterDiscoveryError
 from adapters.claude_code import ClaudeCodeAdapter
-from adapters.codex import CodexAdapter
+from adapters.codex import (
+    CodexAdapter,
+    _build_codex_native_memory_payload,
+    _default_codex_memory_md_path,
+    _default_codex_native_memory_path,
+    _inspect_codex_fallback_recall,
+    _inspect_codex_state_db,
+    _merge_bourdon_memory_md_section,
+    _safe_native_memory_text,
+)
+from adapters.cursor import CursorAdapter
 from core.codex_context import filter_manifest_for_access, write_codex_context_artifacts
 from core.codex_fixtures import create_sample_codex_sources
+from core.l2 import query_l2
 from core.l5_io import write_l5_dict
+from core.l6_server import prepare_recognition_context_from_store
+from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
 
 
@@ -30,6 +43,14 @@ def _default_claude_code_l5_path() -> Path:
     ``Path.home`` and have the resolution honor the override.
     """
     return Path.home() / "agent-library" / "agents" / "claude-code.l5.yaml"
+
+
+def _default_codex_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
+
+
+def _default_cursor_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "cursor.l5.yaml"
 
 
 def _parse_since(value: str | None) -> datetime | None:
@@ -52,6 +73,13 @@ def _write_yaml_if_requested(data: dict[str, Any], path: str | None) -> None:
 
 def _print_yaml(data: dict[str, Any]) -> None:
     print(yaml.safe_dump(data, sort_keys=False), end="")
+
+
+def _write_text_atomic(text: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_name(f".{target.name}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(target)
 
 
 def _build_adapter(args: argparse.Namespace) -> CodexAdapter:
@@ -81,10 +109,280 @@ def _handle_codex_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_prepare_turn(args: argparse.Namespace) -> int:
+    store = L6Store(Path(args.library))
+    report = prepare_recognition_context_from_store(
+        store,
+        args.prompt,
+        access_level=args.access_level,
+    )
+    _write_yaml_if_requested(report, args.report_out)
+    _print_yaml(report)
+    return 0
+
+
+async def _build_deeper_context_report(
+    prompt: str,
+    access_level: str,
+) -> dict[str, Any]:
+    try:
+        context = await query_l2(prompt)
+    except Exception:
+        context = ""
+    return {
+        "prompt": prompt,
+        "access_level": access_level,
+        "context": context,
+        "context_chars": len(context),
+    }
+
+
+def _handle_deeper_context(args: argparse.Namespace) -> int:
+    report = asyncio.run(
+        _build_deeper_context_report(
+            args.prompt,
+            args.access_level,
+        )
+    )
+    _write_yaml_if_requested(report, args.report_out)
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_export(args: argparse.Namespace) -> int:
+    cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
+    adapter = CursorAdapter(cursor_dir=cursor_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_cursor_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
 def _handle_codex_build_context(args: argparse.Namespace) -> int:
     adapter = _build_adapter(args)
     manifest = _manifest_for_access(adapter, since=_parse_since(args.since), access_level="team")
     report = write_codex_context_artifacts(manifest, Path(args.out_dir), access_level="team")
+    _print_yaml(report)
+    return 0
+
+
+def _handle_codex_doctor(args: argparse.Namespace) -> int:
+    adapter = _build_adapter(args)
+    report = {
+        "source_coverage": _source_coverage(adapter),
+        "codex_state_db": _inspect_codex_state_db(adapter._codex_home),
+        "fallback_recall": _inspect_codex_fallback_recall(
+            adapter._codex_home,
+            adapter._codex_brain,
+        ),
+    }
+    _write_yaml_if_requested(report, args.report_out)
+    _print_yaml(report)
+    return 0
+
+
+def _handle_codex_sync_native(args: argparse.Namespace) -> int:
+    adapter = _build_adapter(args)
+    payload = _build_codex_native_memory_payload(
+        adapter._codex_home,
+        adapter._codex_brain,
+        max_sessions=args.max_sessions,
+    )
+    target_kind = "memory_md" if args.memory_md else "bourdon_file"
+    target = (
+        Path(args.out)
+        if getattr(args, "out", None)
+        else (
+            _default_codex_memory_md_path(adapter._codex_home)
+            if args.memory_md
+            else _default_codex_native_memory_path(adapter._codex_home)
+        )
+    )
+    mode = "write" if args.write else "dry-run"
+    text = str(payload["text"])
+    if args.memory_md:
+        existing_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+        text = _merge_bourdon_memory_md_section(existing_text, text)
+    written = False
+    if args.write:
+        _write_text_atomic(text, target)
+        written = True
+
+    report = {
+        "mode": mode,
+        "target": str(target),
+        "target_kind": target_kind,
+        "would_write": bool(text.strip()),
+        "written": written,
+        "bytes": payload["bytes"],
+        "fallback_recall": payload["fallback_recall"],
+    }
+    if not args.write:
+        report["preview"] = text
+    _print_yaml(report)
+    return 0
+
+
+def _build_recognition_prompt_context(result: Any) -> str:
+    if not result.recognition:
+        return ""
+
+    lines = [
+        "Bourdon recognition context",
+        f"Immediate recognition: {_safe_native_memory_text(result.recognition)}",
+    ]
+    if result.matched_entities:
+        lines.append("Matched entities:")
+    for entity in result.matched_entities:
+        name = _safe_native_memory_text(str(entity.get("name") or ""))
+        entity_type = _safe_native_memory_text(str(entity.get("type") or "topic"))
+        summary = str(entity.get("summary") or "").strip()
+        line = f"- {name} ({entity_type})"
+        if summary:
+            line += f": {_safe_native_memory_text(summary, limit=240)}"
+        lines.append(line)
+    lines.append("Use this as timing-layer context, not as a final answer.")
+    return "\n".join(lines)
+
+
+def _handle_codex_recognize(args: argparse.Namespace) -> int:
+    adapter = _build_adapter(args)
+    manifest = _manifest_for_access(
+        adapter,
+        since=_parse_since(args.since),
+        access_level=args.access_level,
+    )
+    t0 = _time.perf_counter()
+    result = recognition_first(
+        args.prompt,
+        manifest,
+        access_level=args.access_level,
+    )
+    recognition_us = (_time.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    report = {
+        "mode": "live",
+        "access_level": args.access_level,
+        "prompt": args.prompt,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(recognition_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+    }
+    if args.prompt_context:
+        report["prompt_context"] = _build_recognition_prompt_context(result)
+    _write_yaml_if_requested(report, args.report_out)
+    _print_yaml(report)
+    return 0
+
+
+def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
+    adapter = _build_adapter(args)
+    access_level = args.access_level
+    since = _parse_since(args.since)
+    mode = "write" if args.write else "dry-run"
+
+    native_payload = _build_codex_native_memory_payload(
+        adapter._codex_home,
+        adapter._codex_brain,
+        max_sessions=args.max_sessions,
+    )
+    native_target_kind = "memory_md" if args.memory_md else "bourdon_file"
+    native_target = (
+        Path(args.native_out)
+        if getattr(args, "native_out", None)
+        else (
+            _default_codex_memory_md_path(adapter._codex_home)
+            if args.memory_md
+            else _default_codex_native_memory_path(adapter._codex_home)
+        )
+    )
+    native_text = str(native_payload["text"])
+    if args.memory_md:
+        existing_text = (
+            native_target.read_text(encoding="utf-8")
+            if native_target.is_file()
+            else ""
+        )
+        native_text = _merge_bourdon_memory_md_section(existing_text, native_text)
+
+    manifest = _manifest_for_access(
+        adapter,
+        since=since,
+        access_level=access_level,
+    )
+    l5_target = Path(args.l5_out) if args.l5_out else _default_codex_l5_path()
+
+    t0 = _time.perf_counter()
+    result = recognition_first(
+        args.prompt,
+        manifest,
+        access_level=access_level,
+    )
+    recognition_us = (_time.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    native_written = False
+    l5_written = False
+    if args.write:
+        _write_text_atomic(native_text, native_target)
+        write_l5_dict(manifest, l5_target)
+        native_written = True
+        l5_written = True
+
+    recognition_report = {
+        "prompt": args.prompt,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(recognition_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+    }
+    report = {
+        "mode": mode,
+        "access_level": access_level,
+        "recognition": recognition_report,
+        "prompt_context": _build_recognition_prompt_context(result),
+        "fallback_recall": native_payload["fallback_recall"],
+        "writes": {
+            "native_memory": {
+                "target": str(native_target),
+                "target_kind": native_target_kind,
+                "would_write": bool(native_text.strip()),
+                "written": native_written,
+                "bytes": len(native_text.encode("utf-8")),
+            },
+            "l5": {
+                "target": str(l5_target),
+                "would_write": True,
+                "written": l5_written,
+                "entity_count": len(manifest.get("known_entities") or []),
+                "session_count": len(manifest.get("recent_sessions") or []),
+            },
+        },
+    }
+    _write_yaml_if_requested(report, args.report_out)
     _print_yaml(report)
     return 0
 
@@ -292,7 +590,8 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
     except AdapterDiscoveryError as exc:
         if args.verbose:
             print(
-                f"bourdon claude-code export: no Claude Code memory sources found ({exc}), skipping",
+                "bourdon claude-code export: no Claude Code memory sources "
+                f"found ({exc}), skipping",
                 file=sys.stderr,
             )
         return 0
@@ -334,6 +633,61 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    prepare_turn_cmd = subparsers.add_parser(
+        "prepare-turn",
+        help="Return L6 recognition context for a prompt",
+    )
+    prepare_turn_cmd.add_argument("prompt")
+    prepare_turn_cmd.add_argument(
+        "--library",
+        type=Path,
+        default=DEFAULT_LIBRARY_PATH,
+        help=f"Path to agent-library (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    prepare_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    prepare_turn_cmd.add_argument("--report-out")
+    prepare_turn_cmd.set_defaults(func=_handle_prepare_turn)
+
+    deeper_context_cmd = subparsers.add_parser(
+        "deeper-context",
+        help="Return post-recognition L2 context for a prompt",
+    )
+    deeper_context_cmd.add_argument("prompt")
+    deeper_context_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    deeper_context_cmd.add_argument("--report-out")
+    deeper_context_cmd.set_defaults(func=_handle_deeper_context)
+
+    cursor = subparsers.add_parser("cursor", help="Cursor-specific commands")
+    cursor_subparsers = cursor.add_subparsers(dest="cursor_command")
+
+    cursor_export_cmd = cursor_subparsers.add_parser(
+        "export",
+        help="Build a Cursor L5 manifest from native SQLite state",
+    )
+    cursor_export_cmd.add_argument("--cursor-dir")
+    cursor_export_cmd.add_argument("--out")
+    cursor_export_cmd.add_argument("--since")
+    cursor_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cursor_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")
 
@@ -359,6 +713,93 @@ def _build_parser() -> argparse.ArgumentParser:
     build_context_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
     build_context_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
     build_context_cmd.set_defaults(func=_handle_codex_build_context)
+
+    doctor_cmd = codex_subparsers.add_parser(
+        "doctor", help="Diagnose Codex memory sources"
+    )
+    doctor_cmd.add_argument("--report-out")
+    doctor_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    doctor_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
+    doctor_cmd.set_defaults(func=_handle_codex_doctor)
+
+    sync_native_cmd = codex_subparsers.add_parser(
+        "sync-native",
+        help="Render Bourdon fallback recall into a Codex-native memory file",
+    )
+    sync_mode = sync_native_cmd.add_mutually_exclusive_group()
+    sync_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the native memory file without writing. This is the default.",
+    )
+    sync_mode.add_argument(
+        "--write",
+        action="store_true",
+        help="Write ~/.codex/memories/bourdon_fallback.md.",
+    )
+    sync_native_cmd.add_argument("--out")
+    sync_native_cmd.add_argument("--max-sessions", type=int, default=20)
+    sync_native_cmd.add_argument(
+        "--memory-md",
+        action="store_true",
+        help=(
+            "Update a bounded Bourdon section in ~/.codex/memories/MEMORY.md "
+            "instead of writing the standalone Bourdon file."
+        ),
+    )
+    sync_native_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    sync_native_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
+    sync_native_cmd.set_defaults(func=_handle_codex_sync_native)
+
+    recognize_cmd = codex_subparsers.add_parser(
+        "recognize",
+        help="Run the Codex recognition layer for one prompt",
+    )
+    recognize_cmd.add_argument("prompt")
+    recognize_cmd.add_argument("--since")
+    recognize_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    recognize_cmd.add_argument("--report-out")
+    recognize_cmd.add_argument(
+        "--prompt-context",
+        action="store_true",
+        help="Include a bounded prompt fragment built from matched entities.",
+    )
+    recognize_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    recognize_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
+    recognize_cmd.set_defaults(func=_handle_codex_recognize)
+
+    prepare_turn_cmd = codex_subparsers.add_parser(
+        "prepare-turn",
+        help="Refresh Codex memory surfaces and return recognition context",
+    )
+    prepare_turn_cmd.add_argument("prompt")
+    prepare_turn_cmd.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the native memory bridge and Codex L5 manifest.",
+    )
+    prepare_turn_cmd.add_argument(
+        "--memory-md",
+        action="store_true",
+        help="Update a bounded Bourdon section in ~/.codex/memories/MEMORY.md.",
+    )
+    prepare_turn_cmd.add_argument("--native-out")
+    prepare_turn_cmd.add_argument("--l5-out")
+    prepare_turn_cmd.add_argument("--max-sessions", type=int, default=20)
+    prepare_turn_cmd.add_argument("--since")
+    prepare_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    prepare_turn_cmd.add_argument("--report-out")
+    prepare_turn_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    prepare_turn_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
+    prepare_turn_cmd.set_defaults(func=_handle_codex_prepare_turn)
 
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()

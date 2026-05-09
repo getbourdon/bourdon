@@ -36,19 +36,34 @@ Tools exposed
   ``public``. ``include_private`` remains as a compatibility shim.
 - ``get_cross_agent_summary(project, access_level, include_private)``
   Roll-up: all agents + sessions + entities relating to one project.
+- ``prepare_recognition_context(prompt, access_level, include_private)``
+  Immediate recognition and a bounded prompt-context fragment for turn start.
+- ``get_deeper_context(prompt, access_level, include_private)``
+  Post-recognition L2 context retrieval. Returns empty context when disabled.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import re
+import time as time_module
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+from core.recognition_runtime import recognition_first
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_SENSITIVE_PATTERNS = (
+    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
+    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\bpassword\b", re.IGNORECASE),
+)
 
 
 def _require_fastmcp():
@@ -64,6 +79,105 @@ def _require_fastmcp():
 
 
 # -- Server construction -------------------------------------------------------
+
+
+def _safe_context_text(value: str, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", value.strip())
+    if any(pattern.search(text) for pattern in _CONTEXT_SENSITIVE_PATTERNS):
+        return "[redacted credential-like text]"
+    text = re.sub(r"https?://\S+", "[link]", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _recognition_prompt_context(result: Any) -> str:
+    if not result.recognition:
+        return ""
+
+    lines = [
+        "Bourdon recognition context",
+        f"Immediate recognition: {_safe_context_text(result.recognition)}",
+    ]
+    if result.matched_entities:
+        lines.append("Matched entities:")
+    for entity in result.matched_entities:
+        name = _safe_context_text(str(entity.get("name") or ""))
+        entity_type = _safe_context_text(str(entity.get("type") or "topic"))
+        summary = str(entity.get("summary") or "").strip()
+        source_agents = [
+            str(agent)
+            for agent in entity.get("source_agents", [])
+            if isinstance(agent, str) and agent
+        ]
+        line = f"- {name} ({entity_type})"
+        if source_agents:
+            line += f" via {', '.join(source_agents)}"
+        if summary:
+            line += f": {_safe_context_text(summary)}"
+        lines.append(line)
+    lines.append("Use this as timing-layer context, not as a final answer.")
+    return "\n".join(lines)
+
+
+def prepare_recognition_context_from_store(
+    store: L6Store,
+    prompt: str,
+    access_level: str = "team",
+    include_private: bool = False,
+) -> dict[str, Any]:
+    manifest = store.build_recognition_manifest(
+        include_private=include_private,
+        access_level=access_level,
+    )
+    t0 = time_module.perf_counter()
+    result = recognition_first(
+        prompt,
+        manifest,
+        access_level=access_level,
+    )
+    latency_us = (time_module.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    return {
+        "prompt": prompt,
+        "access_level": access_level,
+        "include_private": include_private,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+                "source_agents": list(entity.get("source_agents") or []),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(latency_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+        "prompt_context": _recognition_prompt_context(result),
+    }
+
+
+async def get_deeper_context_for_prompt(
+    prompt: str,
+    access_level: str = "team",
+    include_private: bool = False,
+) -> dict[str, Any]:
+    try:
+        context = await query_l2(prompt)
+    except Exception as exc:  # noqa: BLE001 -- deeper context must not crash a turn
+        logger.warning("L2 deeper context failed: %s", exc)
+        context = ""
+    return {
+        "prompt": prompt,
+        "access_level": access_level,
+        "include_private": include_private,
+        "context": context,
+        "context_chars": len(context),
+    }
 
 
 def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
@@ -247,6 +361,46 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             access_level=access_level,
         )
         return summary.to_dict()
+
+    @mcp.tool()
+    def prepare_recognition_context(
+        prompt: str,
+        access_level: str = "team",
+        include_private: bool = False,
+    ) -> dict:
+        """
+        Return immediate recognition and a bounded prompt-context fragment.
+
+        This is the MCP-facing timing layer: agents can call it at turn start,
+        prepend the returned ``prompt_context`` to their own model prompt, and
+        continue with deeper retrieval in parallel.
+        """
+        return prepare_recognition_context_from_store(
+            store,
+            prompt,
+            access_level=access_level,
+            include_private=include_private,
+        )
+
+    @mcp.tool()
+    async def get_deeper_context(
+        prompt: str,
+        access_level: str = "team",
+        include_private: bool = False,
+    ) -> dict:
+        """
+        Return post-recognition L2 context for the prompt.
+
+        This companion tool is intentionally separate from
+        ``prepare_recognition_context`` so immediate recognition never waits on
+        retrieval. If L2 is disabled or unavailable, the returned context is
+        empty.
+        """
+        return await get_deeper_context_for_prompt(
+            prompt,
+            access_level=access_level,
+            include_private=include_private,
+        )
 
     return mcp
 
