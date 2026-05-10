@@ -26,6 +26,12 @@ from adapters.codex import (
     _merge_bourdon_memory_md_section,
     _safe_native_memory_text,
 )
+from adapters.copilot import (
+    CopilotAdapter,
+    _inspect_copilot_memory,
+    default_copilot_memory_path,
+    init_memory_file,
+)
 from adapters.cursor import CursorAdapter
 from core.codex_context import filter_manifest_for_access, write_codex_context_artifacts
 from core.codex_fixtures import create_sample_codex_sources
@@ -51,6 +57,10 @@ def _default_codex_l5_path() -> Path:
 
 def _default_cursor_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cursor.l5.yaml"
+
+
+def _default_copilot_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "copilot.l5.yaml"
 
 
 def _parse_since(value: str | None) -> datetime | None:
@@ -158,6 +168,50 @@ def _handle_cursor_export(args: argparse.Namespace) -> int:
     write_l5_dict(data, out_path)
     if args.print_manifest:
         _print_yaml(data)
+    return 0
+
+
+def _handle_copilot_export(args: argparse.Namespace) -> int:
+    copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
+    adapter = CopilotAdapter(copilot_dir=copilot_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_copilot_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_copilot_doctor(args: argparse.Namespace) -> int:
+    copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
+    adapter = CopilotAdapter(copilot_dir=copilot_dir)
+    health = adapter.health_check()
+    mem_report = _inspect_copilot_memory(copilot_dir)
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "memory_file": mem_report,
+        "memory_path": str(default_copilot_memory_path(copilot_dir)),
+    }
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_copilot_init(args: argparse.Namespace) -> int:
+    copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
+    force = getattr(args, "force", False)
+    try:
+        path = init_memory_file(copilot_dir=copilot_dir, force=force)
+        print(f"Created {path}")
+        print("Edit it to add entities and sessions, then run `bourdon copilot export`.")
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -687,6 +741,50 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the exported manifest after writing it.",
     )
     cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
+    # ---- copilot subcommands ------------------------------------------------
+    copilot = subparsers.add_parser("copilot", help="GitHub Copilot-specific commands")
+    copilot_subparsers = copilot.add_subparsers(dest="copilot_command")
+
+    copilot_export_cmd = copilot_subparsers.add_parser(
+        "export",
+        help="Build a Copilot L5 manifest from ~/.copilot-bourdon/memory.md",
+    )
+    copilot_export_cmd.add_argument("--copilot-dir", help=argparse.SUPPRESS)
+    copilot_export_cmd.add_argument("--out")
+    copilot_export_cmd.add_argument("--since")
+    copilot_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    copilot_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    copilot_export_cmd.set_defaults(func=_handle_copilot_export)
+
+    copilot_doctor_cmd = copilot_subparsers.add_parser(
+        "doctor",
+        help="Diagnose the Copilot convention memory file",
+    )
+    copilot_doctor_cmd.add_argument("--copilot-dir", help=argparse.SUPPRESS)
+    copilot_doctor_cmd.add_argument("--report-out")
+    copilot_doctor_cmd.set_defaults(func=_handle_copilot_doctor)
+
+    copilot_init_cmd = copilot_subparsers.add_parser(
+        "init",
+        help="Create ~/.copilot-bourdon/memory.md with a starter template",
+    )
+    copilot_init_cmd.add_argument("--copilot-dir", help=argparse.SUPPRESS)
+    copilot_init_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing memory.md.",
+    )
+    copilot_init_cmd.set_defaults(func=_handle_copilot_init)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")

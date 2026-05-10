@@ -37,6 +37,13 @@ If you submit a PR that an AI agent helped write, please:
 - **Scope:** co-implementor on the reference orchestrator and CLI. Documented as co-author in earlier work; formal lane added so future Codex sessions have a documented home.
 - **Recent delivery (OpenAI Codex 5.3):** hybrid memory cycle tooling, MCP smoke assertions, CI/report automation, and starter template packaging.
 
+### GitHub Copilot -- `copilot`
+
+- **Status:** contributor (granted 2026-05-10)
+- **Branch lane:** `copilot/<feature-slug>`
+- **Scope:** Copilot adapter (`adapters/copilot.py`), `bourdon copilot` CLI subcommands (`export`, `doctor`, `init`), test suite, adapter integration status documentation. Convention-based memory layer using `~/.copilot-bourdon/memory.md` -- Copilot's contribution to the recognition runtime designed from the inside out, same as every other agent in the fleet.
+- **Notes:** GitHub Copilot has no accessible on-disk session index (cloud reasoning, no JSONL). The convention-file approach is Copilot's native layer: Copilot Chat can be instructed to maintain `memory.md` at session end, giving it persistent cross-session entity awareness via the L6 federation library.
+
 ## Stacked-PR caveat (cursor[bot] auto-close)
 
 When an agent (Cursor especially) opens a PR whose **base branch is another open PR's head branch** (a stacked PR), automation may auto-close the child PR when the parent merges -- even if the child contains commits the parent did not absorb. We hit this on 2026-05-03: PR #14 merged at `T+0`, and `cursor[bot]` closed PR #12 at `T+3 seconds` and deleted its head ref at `T+5 seconds`. Four hardening commits unique to the child became unreachable from any branch.

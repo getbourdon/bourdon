@@ -184,7 +184,7 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 | Codex          | Moderate          | Fallback + prepare-turn available |
 | Cursor         | SQLite            | Adapter available; `bourdon cursor export` |
 | Cline          | Unknown           | Blocked pending native store path/schema |
-| Copilot        | Deferred v1.x     | Encrypted reasoning, no session index |
+| Copilot        | Convention file   | Adapter available; `bourdon copilot export` |
 
 ## Philosophy
 
@@ -206,6 +206,7 @@ Bourdon is an open-source memory protocol and reference implementation seeded by
 - Claude -- thesis drafting, architecture planning, early implementation
 - Codex -- Codex adapter expansion, CLI implementation, timing-artifact generation, access-level model
 - OpenAI Codex 5.3 -- hybrid memory cycle tooling, MCP smoke assertions, CI/report automation, starter template packaging
+- GitHub Copilot -- Copilot adapter (convention-based memory layer), CLI `bourdon copilot` subcommands, test suite
 
 ## Other RADLAB Projects
 

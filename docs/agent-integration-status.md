@@ -57,3 +57,25 @@ an MCP source.
 - OpenManus currently consumes Bourdon but does not publish into it. A future
   Python adapter (per `docs/AUTHORING_AN_ADAPTER.md`) would close the loop once
   OpenManus's distilled-memory model stabilizes upstream.
+
+## GitHub Copilot
+
+Status: adapter available; `bourdon copilot export` is the convention-file
+export path.
+
+- GitHub Copilot has no accessible on-disk session index (cloud-side reasoning,
+  no session JSONL). The adapter reads from a **convention-based memory file**
+  at `~/.copilot-bourdon/memory.md` that users or Copilot Chat can maintain.
+- `bourdon copilot init` creates `~/.copilot-bourdon/memory.md` with a starter
+  template. Edit the YAML front-matter to add entities and sessions.
+- `bourdon copilot export` reads the file, applies visibility filtering, and
+  writes `~/agent-library/agents/copilot.l5.yaml`.
+- `bourdon copilot doctor` diagnoses the memory file and reports entity/session
+  counts, front-matter validity, and health status.
+- Current role: inline-completion and chat ambient layer for L6 federation.
+- Copilot Chat can be instructed to update `memory.md` at session end using a
+  custom instruction like:
+
+  > "At the end of each session, append a YAML session block to the `sessions:`
+  > list in `~/.copilot-bourdon/memory.md`, and add any new project or concept
+  > entities to the `entities:` list."
