@@ -55,10 +55,16 @@ def _run_python_step(python_cmd: str, args: list[str]) -> int:
     return completed.returncode
 
 
-def _read_known_entities(python_cmd: str, yaml_path: Path) -> int | None:
+def _read_known_entities(
+    python_cmd: str, yaml_path: Path, case_name: str | None = None
+) -> int | None:
     """Parse ``known_entities`` count from a generated L5 YAML; ``None`` on failure."""
+    context_prefix = f"[{case_name}] " if case_name else ""
     if not yaml_path.exists():
-        print(f"Expected export artifact missing: {yaml_path}")
+        print(
+            f"{context_prefix}Expected export artifact missing: {yaml_path}",
+            file=sys.stderr,
+        )
         return None
     completed = subprocess.run(
         [
@@ -78,8 +84,9 @@ def _read_known_entities(python_cmd: str, yaml_path: Path) -> int | None:
     )
     if completed.returncode != 0:
         print(
-            f"Failed to parse known_entities count for {yaml_path}: "
-            f"{completed.stderr.strip()}"
+            f"{context_prefix}Failed to parse known_entities count for {yaml_path}: "
+            f"{completed.stderr.strip()}",
+            file=sys.stderr,
         )
         return None
     raw_lines = completed.stdout.strip().splitlines()
@@ -223,7 +230,9 @@ def _run_case(
                 ],
             )
             if export_exit == 0 and expected_known_entities is not None:
-                known_entities = _read_known_entities(python_cmd, paths["workspace_out"])
+                known_entities = _read_known_entities(
+                    python_cmd, paths["workspace_out"], case_name=case_name
+                )
 
         case_pass = True
         if check_exit != expected_check:

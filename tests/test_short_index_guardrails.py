@@ -19,7 +19,9 @@ def _default_short_index_text() -> str:
     return '{\n  "version": 1,\n  "entries": []\n}\n'
 
 
-def _copy_fixture_case(case_dir: Path, tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
+def _copy_fixture_case(
+    case_dir: Path, tmp_path: Path
+) -> tuple[Path, Path, Path, dict[str, object]]:
     workspace_root = tmp_path / "workspace"
     workspace_memory = workspace_root / ".cursor" / "memory"
     global_root = tmp_path / "global-memory"

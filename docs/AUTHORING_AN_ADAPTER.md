@@ -6,7 +6,7 @@ This is the operational guide for adding a new agent to Bourdon's cross-agent me
 
 **Canonical sources (read these first when you need detail beyond what's here):**
 
-- [`spec/ADAPTER_CONTRACT.md`](../spec/ADAPTER_CONTRACT.md) — the formal contract, semantic requirements, error semantics, idempotency guarantees, testing requirements. 172 lines, comprehensive. **This guide is operational; the spec doc is normative.**
+- [`spec/ADAPTER_CONTRACT.md`](../spec/ADAPTER_CONTRACT.md) — the formal contract, semantic requirements, error semantics, idempotency guarantees, testing requirements. Comprehensive. **This guide is operational; the spec doc is normative.**
 - [`spec/L5_schema.json`](../spec/L5_schema.json) — JSON Schema all manifests must validate against
 - [`adapters/base.py`](../adapters/base.py) — `BourdonAdapter` Protocol, dataclasses, helpers
 - [`core/l5_io.py`](../core/l5_io.py) — atomic write functions
@@ -95,7 +95,7 @@ write_l5(manifest, out_path)
 
 ## Step 4 — Wire CLI
 
-Add a subparser group in `cli/main.py`. Reference: `_handle_cursor_export` (cleanest), and the codex subparser block (`cli/main.py` around line 691) for the subparser-of-subparsers pattern. Pattern:
+Add a subparser group in `cli/main.py`. Reference: `_handle_cursor_export` (cleanest), and the codex subparser block in `cli/main.py` (search for "codex" in the subparser-builder section) for the subparser-of-subparsers pattern. Pattern:
 
 ```python
 def _handle_<id>_export(args):
@@ -200,7 +200,7 @@ Every `Entity` supports ISO 8601 dates for `valid_from` and `valid_to`. Use them
 
 When the agent has a plugin SDK (OpenClaw is the reference case), a Bourdon **plugin** in their idiom is the right shipping shape, not an external adapter. The plugin must:
 
-1. **Re-implement the L5 write semantics in the platform's language.** The atomic tmp+fsync+rename pattern is small (Bourdon's `core/l5_io.py` is 93 lines) — port it, don't import. Cross-language calls into Python from a TS/Go plugin are wrong.
+1. **Re-implement the L5 write semantics in the platform's language.** The atomic tmp+fsync+rename pattern is intentionally small (see Bourdon's `core/l5_io.py`) — port it, don't import. Cross-language calls into Python from a TS/Go plugin are wrong.
 2. **Re-implement the redaction patterns.** Same regex set (`api[_-]?key`, `sk_live_*`, etc.) translated to the host language. Keep the 180-char cap.
 3. **Use Bourdon's L6 MCP server for query tools.** The plugin spawns `python -m core.l6_server` as a stdio subprocess (or connects to `--transport http`) and proxies the L6 tools (`query_agent_memory`, `find_entity`, etc.) as native plugin tools. **This means the host agent's users get cross-agent recall without leaving the host.**
 4. **Match the plugin's manifest contract.** OpenClaw uses `openclaw.plugin.json` with `id`, `kind`, `contracts.tools`, `configSchema`. Future plugin platforms will have different shapes — read `<platform>/AGENTS.md` and a memory plugin in their `extensions/` for the pattern.
