@@ -10,7 +10,7 @@ Named for the *bourdon* — the deep continuous drone of a pipe organ, the found
 
 ---
 
-## Status: Pre-Alpha (v0.3.0, BSL 1.1)
+## Status: Pre-Alpha (v0.4.0, BSL 1.1)
 
 Project renamed Continuo → Bourdon on 2026-05-05 (v0.1.0); relicensed MIT → Business Source License 1.1 on 2026-05-06 (v0.2.0). See [release notes](https://github.com/getbourdon/bourdon/releases) for migration. The version-by-version history below covers v0.0.1 through v0.0.7 in detail; for v0.0.8 and later see GitHub Releases.
 
@@ -170,9 +170,10 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 - **v0.1.0** — L2 UltraRAG async integration + session-close L5 export
 - **v0.2.0** — Relicense MIT → BSL 1.1
 - **v0.3.0** — Codex operational layer: memory doctor + fallback recognition + L6 prep
-- **v0.4.0** — `pip install bourdon` + `bourdon init/up/query` CLI; Clyde + Clair native L5 publishers
+- **v0.4.0** — Copilot adapter (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public adapter-authoring guide (`docs/AUTHORING_AN_ADAPTER.md`)
+- **v0.5.0** — `pip install bourdon` + `bourdon init/up/query` CLI; Clyde + Clair native L5 publishers
 - **v1.0.0** — Docs site, community adapter contributions, public launch
-- **v1.x** — Cursor adapter (SQLite reverse-engineering), Copilot adapter (partial coverage), framework adapters (LangChain, CrewAI, AutoGen)
+- **v1.x** — Framework adapters (LangChain, CrewAI, AutoGen) and additional agents (Cline once memory store is known, Aider, Continue)
 
 ## Adapter Compatibility
 
