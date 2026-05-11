@@ -53,6 +53,7 @@ Each version of Bourdon auto-converts to **Apache License 2.0** four years after
 | v0.4.0 | 2026-05-10 | 2030-05-10 |
 | v0.4.1 | 2026-05-10 | 2030-05-10 |
 | v0.5.0 | 2026-05-11 | 2030-05-11 |
+| v0.6.0 | 2026-05-11 | 2030-05-11 |
 | ... | ... | ... |
 
 After conversion, that version is fully OSS forever. The BSL only protects the *current* version; the long tail becomes Apache 2.0 over time.
