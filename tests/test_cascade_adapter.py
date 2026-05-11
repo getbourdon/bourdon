@@ -190,13 +190,53 @@ def test_build_entity_redacts_credential_in_summary():
     e = _build_entity({"name": "Sec", "summary": "My api_key is abc123"})
     assert e is not None
     assert "api_key" not in (e.summary or "")
-    assert "redacted" in (e.summary or "").lower()
+    assert e.summary == "[redacted credential-like text]"
 
 
 def test_build_entity_redacts_sk_live_token():
     e = _build_entity({"name": "Stripe", "summary": "Token sk_live_abc123xyz"})
     assert e is not None
     assert "sk_live" not in (e.summary or "")
+    assert e.summary == "[redacted credential-like text]"
+
+
+def test_build_entity_redacts_sk_test_token():
+    e = _build_entity({"name": "Stripe", "summary": "Token sk_test_abc123xyz"})
+    assert e is not None
+    assert e.summary == "[redacted credential-like text]"
+
+
+def test_build_entity_redacts_bearer_token():
+    e = _build_entity({"name": "Auth", "summary": "Uses bearer token for API"})
+    assert e is not None
+    assert e.summary == "[redacted credential-like text]"
+
+
+def test_build_entity_redacts_hf_token():
+    e = _build_entity({"name": "ML", "summary": "Model at hf_abcdefghij1234"})
+    assert e is not None
+    assert e.summary == "[redacted credential-like text]"
+
+
+def test_build_entity_redacts_secret_keyword():
+    e = _build_entity({"name": "Vault", "summary": "The secret is stored here"})
+    assert e is not None
+    assert e.summary == "[redacted credential-like text]"
+
+
+def test_build_entity_strips_urls_to_link():
+    e = _build_entity({"name": "Docs", "summary": "See https://example.com/path for details"})
+    assert e is not None
+    assert "https://example.com" not in (e.summary or "")
+    assert "[link]" in (e.summary or "")
+
+
+def test_build_entity_caps_summary_at_180_chars():
+    long_text = "A" * 300
+    e = _build_entity({"name": "Long", "summary": long_text})
+    assert e is not None
+    assert len(e.summary or "") <= 180
+    assert (e.summary or "").endswith("...")
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +509,7 @@ entities:
     for entity in manifest.known_entities:
         assert "sk_live_abc123" not in (entity.summary or "")
         assert "api_key" not in (entity.summary or "").lower()
+        assert entity.summary == "[redacted credential-like text]"
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,26 @@ an MCP source.
   Python adapter (per `docs/AUTHORING_AN_ADAPTER.md`) would close the loop once
   OpenManus's distilled-memory model stabilizes upstream.
 
+## Cascade (Windsurf)
+
+Status: adapter available; `bourdon cascade export` is the convention-file
+export path.
+
+- Cascade has no standardized on-disk session state (similar to Copilot). The
+  adapter reads from a **convention-based memory file** at
+  `~/.cascade-bourdon/memory.md` that Cascade maintains at session end.
+- `bourdon cascade init` creates `~/.cascade-bourdon/memory.md` with a starter
+  template. Edit the YAML front-matter to add entities and sessions.
+- `bourdon cascade export` reads the file, applies visibility filtering, and
+  writes `~/agent-library/agents/cascade.l5.yaml`.
+- `bourdon cascade doctor` diagnoses the memory file and reports entity/session
+  counts, front-matter validity, and health status.
+- Credential redaction uses the canonical pattern set from `adapters/codex.py`,
+  extended with Cascade-specific patterns (`secret`, `sk_test_*`). See
+  [`SECURITY.md`](../SECURITY.md) for the full runtime security model.
+- Current role: agentic pair-programmer with multi-step planning for L6
+  federation.
+
 ## GitHub Copilot
 
 Status: adapter available; `bourdon copilot export` is the convention-file

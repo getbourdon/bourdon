@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +41,10 @@ from adapters.base import (
     Visibility,
     VisibilityPolicy,
     filter_for_federation,
+)
+from adapters.codex import (
+    _NATIVE_MEMORY_SENSITIVE_PATTERNS,
+    _safe_native_memory_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,13 +69,8 @@ DEFAULT_POLICY = VisibilityPolicy(
     private_tags=["personal", "credential", "financial", "secret", "private"],
 )
 
-_CREDENTIAL_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
+_CASCADE_SENSITIVE_PATTERNS = _NATIVE_MEMORY_SENSITIVE_PATTERNS + (
     re.compile(r"\bsecret\b", re.IGNORECASE),
-    re.compile(r"sk[_-]live[_-]", re.IGNORECASE),
     re.compile(r"sk[_-]test[_-]", re.IGNORECASE),
 )
 
@@ -112,13 +110,16 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
 
 
 def _scrub_credential(text: str) -> str:
-    """Redact text that looks like it contains credentials."""
+    """Redact + truncate native-memory text.
+
+    Same semantics as codex's ``_safe_native_memory_text``, extended with
+    Cascade-specific patterns (``secret``, ``sk_test_*``).
+    """
     if not text:
         return text
-    for pattern in _CREDENTIAL_PATTERNS:
-        if pattern.search(text):
-            return "[redacted credential-like content]"
-    return text
+    if any(p.search(text) for p in _CASCADE_SENSITIVE_PATTERNS):
+        return "[redacted credential-like text]"
+    return _safe_native_memory_text(text)
 
 
 def _build_entity(raw: Any) -> Entity | None:
