@@ -133,6 +133,8 @@ def test_export_l5_filters_by_since(tmp_path):
     manifest = adapter.export_l5(since=cutoff)
     dates = [s.date for s in manifest.recent_sessions]
     assert all(d >= "2026-01-01" for d in dates if d), dates
+    assert len(manifest.recent_sessions) == 1
+    assert manifest.recent_sessions[0].key_actions[0] == "new work"
 
 
 # ---- export_sessions() ------------------------------------------------------

@@ -28,6 +28,7 @@ path.
 
 - `CursorAdapter` reads Cursor's SQLite state through a read-only temp copy.
 - `bourdon cursor export` writes `~/agent-library/agents/cursor.l5.yaml`.
+- **Setup walkthrough:** [`docs/integrations/cursor.md`](integrations/cursor.md) (MCP in Cursor IDE + export).
 - The existing short-index memory-cycle scripts remain available for manually
   curated Cursor memory.
 

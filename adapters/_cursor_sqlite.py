@@ -192,7 +192,7 @@ def _first_message_text(messages: Any) -> str:
 
 
 def _date_from_record(value: dict[str, Any]) -> str:
-    for key in ("createdAt", "timestamp", "updatedAt", "time"):
+    for key in ("createdAt", "timestamp", "updatedAt", "lastUpdatedAt", "time"):
         candidate = value.get(key)
         parsed = _parse_date(candidate)
         if parsed:
