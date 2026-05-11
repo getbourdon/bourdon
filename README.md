@@ -10,7 +10,7 @@ Named for the *bourdon* — the deep continuous drone of a pipe organ, the found
 
 ---
 
-## Status: Pre-Alpha (v0.4.0, BSL 1.1)
+## Status: Pre-Alpha (v0.5.0, BSL 1.1)
 
 Project renamed Continuo → Bourdon on 2026-05-05 (v0.1.0); relicensed MIT → Business Source License 1.1 on 2026-05-06 (v0.2.0). See [release notes](https://github.com/getbourdon/bourdon/releases) for migration. The version-by-version history below covers v0.0.1 through v0.0.7 in detail; for v0.0.8 and later see GitHub Releases.
 
@@ -183,7 +183,7 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 - **v0.3.0** — Codex operational layer: memory doctor + fallback recognition + L6 prep
 - **v0.4.0** — Copilot adapter (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public adapter-authoring guide (`docs/AUTHORING_AN_ADAPTER.md`)
 - **v0.4.1** — Cascade (Windsurf) adapter (5th IDE adapter; self-authored against the public guide) + project-level `SECURITY.md` + `bourdon doctor` / `bourdon export-all` cross-adapter CLI surfaces
-- **v0.5.0** — `pip install bourdon` + `bourdon init/up/query` CLI; Clyde + Clair native L5 publishers
+- **v0.5.0** — Cross-agent acceptance: three-layer test stack (federation round-trip CI + `bourdon dogfood` smoke test + `docs/PROOF.md` walkthrough) + `bourdon serve` MCP launcher + Claude Desktop integration doc + paginated `list_recent_work` (default 20, cursor-based, 14-day default-since window — closes a first-call UX cliff observed during the acceptance demo)
 - **v1.0.0** — Docs site, community adapter contributions, public launch
 - **v1.x** — Framework adapters (LangChain, CrewAI, AutoGen) and additional agents (Cline once memory store is known, Aider, Continue)
 
