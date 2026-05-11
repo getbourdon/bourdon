@@ -310,6 +310,19 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_dogfood(args: argparse.Namespace) -> int:
+    """Run an end-to-end federation smoke test on the local machine."""
+    from cli.dogfood import format_matrix, run_dogfood
+
+    report = run_dogfood(
+        keep_marker=getattr(args, "keep_marker", False),
+        access_level=getattr(args, "access_level", "team"),
+    )
+    print(format_matrix(report))
+    _write_yaml_if_requested(report.to_dict(), getattr(args, "report_out", None))
+    return 0 if report.passed else 1
+
+
 def _handle_export_all(args: argparse.Namespace) -> int:
     """Export L5 manifests for all healthy adapters."""
     access_level = args.access_level
@@ -988,6 +1001,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_all_cmd.add_argument("--report-out")
     export_all_cmd.set_defaults(func=_handle_export_all)
+
+    dogfood_cmd = subparsers.add_parser(
+        "dogfood",
+        help=(
+            "End-to-end federation smoke test: plant marker in convention-file "
+            "adapters, export all, query L6, verify round-trip"
+        ),
+    )
+    dogfood_cmd.add_argument(
+        "--keep-marker",
+        action="store_true",
+        help="Leave the planted marker entity in place after the run (debug aid)",
+    )
+    dogfood_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+        help="L6 query access level (default team)",
+    )
+    dogfood_cmd.add_argument(
+        "--report-out",
+        help="Write the machine-readable YAML report to this path as well as stdout",
+    )
+    dogfood_cmd.set_defaults(func=_handle_dogfood)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")
