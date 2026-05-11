@@ -171,6 +171,7 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 - **v0.2.0** — Relicense MIT → BSL 1.1
 - **v0.3.0** — Codex operational layer: memory doctor + fallback recognition + L6 prep
 - **v0.4.0** — Copilot adapter (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public adapter-authoring guide (`docs/AUTHORING_AN_ADAPTER.md`)
+- **v0.4.1** — Cascade (Windsurf) adapter (5th IDE adapter; self-authored against the public guide) + project-level `SECURITY.md` + `bourdon doctor` / `bourdon export-all` cross-adapter CLI surfaces
 - **v0.5.0** — `pip install bourdon` + `bourdon init/up/query` CLI; Clyde + Clair native L5 publishers
 - **v1.0.0** — Docs site, community adapter contributions, public launch
 - **v1.x** — Framework adapters (LangChain, CrewAI, AutoGen) and additional agents (Cline once memory store is known, Aider, Continue)

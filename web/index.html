@@ -144,20 +144,23 @@ ai: replies.         ai: replies.</pre>
     <section>
       <h2>Status</h2>
       <p>
-        Pre-alpha. <strong>v0.4.0</strong>, source-available under
+        Pre-alpha. <strong>v0.4.1</strong>, source-available under
         <a href="https://github.com/getbourdon/bourdon/blob/main/LICENSE">Business Source License 1.1</a>
         (auto-converts to Apache 2.0 four years per version), public on GitHub.
-        428 tests passing across orchestrator, adapters, federation server,
+        479 tests passing across orchestrator, adapters, federation server,
         recognition runtime, and the three runtime layers (Layer A backend-neutral
         inference protocol, Layer B interrupt-first symmetric primitive, Layer C
-        KV-cache-aware splice). Four shipping IDE adapters (Claude Code, Codex,
-        Cursor, GitHub Copilot) plus native publishers for Clyde and Clair, and a
-        zero-code MCP integration with
+        KV-cache-aware splice). Five shipping IDE adapters (Claude Code, Codex,
+        Cursor, GitHub Copilot, Cascade) plus native publishers for Clyde and
+        Clair, and a zero-code MCP integration with
         <a href="https://github.com/getbourdon/bourdon/blob/main/docs/integrations/openmanus.md">OpenManus</a>.
-        v0.4.0 ships the Copilot adapter (convention-file fallback for cloud-only
-        agents — Copilot self-authored against the public
-        <a href="https://github.com/getbourdon/bourdon/blob/main/docs/AUTHORING_AN_ADAPTER.md">adapter-authoring guide</a>);
-        the recognition-first runtime is wired into a live agent and measured
+        v0.4.x ships the Copilot and Cascade adapters (both convention-file
+        fallback for cloud-only agents — both self-authored against the public
+        <a href="https://github.com/getbourdon/bourdon/blob/main/docs/AUTHORING_AN_ADAPTER.md">adapter-authoring guide</a>),
+        plus top-level `bourdon doctor` and `bourdon export-all` cross-adapter
+        CLI surfaces and a project-level
+        <a href="https://github.com/getbourdon/bourdon/blob/main/SECURITY.md">SECURITY.md</a>.
+        The recognition-first runtime is wired into a live agent and measured
         end-to-end.
       </p>
       <p class="note">
