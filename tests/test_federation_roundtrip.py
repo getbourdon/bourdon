@@ -109,10 +109,10 @@ def _plant_copilot(tmp_path: Path, monkeypatch) -> CopilotAdapter:
         "    summary: A fact only Copilot knows.\n"
         "    tags: [marker, federation-test]\n"
         f"  - name: {SHARED_ENTITY}\n"
-        # Match Cursor's inferred entity type so build_recognition_manifest()
-        # (which dedupes on (name, type)) collapses all three adapters into
-        # one row. See "Cross-type entity-dedupe question" in
-        # PROJECTS/NEUROLAYER/NOTES.md for why this is contract-relevant.
+        # Same type as Cursor's inferred entity. With Finding #1 resolved
+        # (dedupe by name only), this no longer matters for the dedupe
+        # behavior -- different types would still collapse into one row
+        # with a merged `types` list. Kept as-is for fixture readability.
         "    type: project\n"
         f"    summary: {SHARED_SUMMARY_PREFIX} Copilot\n"
         "    tags: [shared, federation-test]\n"
@@ -135,10 +135,10 @@ def _plant_cascade(tmp_path: Path, monkeypatch) -> CascadeAdapter:
         "    summary: A fact only Cascade knows.\n"
         "    tags: [marker, federation-test]\n"
         f"  - name: {SHARED_ENTITY}\n"
-        # Match Cursor's inferred entity type so build_recognition_manifest()
-        # (which dedupes on (name, type)) collapses all three adapters into
-        # one row. See "Cross-type entity-dedupe question" in
-        # PROJECTS/NEUROLAYER/NOTES.md for why this is contract-relevant.
+        # Same type as Cursor's inferred entity. With Finding #1 resolved
+        # (dedupe by name only), this no longer matters for the dedupe
+        # behavior -- different types would still collapse into one row
+        # with a merged `types` list. Kept as-is for fixture readability.
         "    type: project\n"
         f"    summary: {SHARED_SUMMARY_PREFIX} Cascade\n"
         "    tags: [shared, federation-test]\n"
@@ -393,21 +393,17 @@ def test_shared_entity_aggregates_across_agents(federation):
         )
 
 
-def test_recognition_manifest_recovers_shared_entity_with_full_attribution(federation):
+def test_recognition_manifest_collapses_shared_entity_to_one_row(federation):
     """
     build_recognition_manifest() is the surface recognition-runtime
-    consumes. The federation invariant we care about: every agent that
-    published the shared entity is recoverable from the manifest with
-    attribution, regardless of how many type-buckets the entity spans.
+    consumes. After Finding #1's resolution (dedupe by name only with
+    types as a list), a shared entity collapses to exactly one row even
+    when adapters disagree on its type (Codex emits 'topic', Cursor
+    infers 'project', convention-file adapters emit whatever the user
+    wrote in memory.md).
 
-    Stricter dedupe (collapse across types into one row) is a live
-    product question -- see "Cross-type entity-dedupe question" in
-    PROJECTS/NEUROLAYER/NOTES.md. Current contract is (name, type),
-    which produces multiple rows when adapters disagree on type
-    (e.g. Codex emits 'topic', Cursor infers 'project'). This test
-    asserts the weaker invariant that holds either way: across all
-    rows whose name matches, the union of source_agents covers every
-    planted publisher.
+    The strong contract: one row per name, all source_agents merged,
+    all distinct types preserved in the `types` field.
     """
     store, _library, planted = federation
     rec = store.build_recognition_manifest(access_level=FEDERATION_ACCESS)
@@ -417,17 +413,23 @@ def test_recognition_manifest_recovers_shared_entity_with_full_attribution(feder
         for e in rec["known_entities"]
         if e.get("name", "").strip().lower() == SHARED_ENTITY.lower()
     ]
-    assert shared_rows, "shared entity missing from recognition manifest"
-
-    attributed: set[str] = set()
-    for row in shared_rows:
-        for agent in row.get("source_agents") or []:
-            attributed.add(agent)
-    assert attributed == set(planted), (
-        f"recognition manifest dropped attribution for some agents: "
-        f"expected {set(planted)}, got {attributed} "
-        f"across {len(shared_rows)} row(s)"
+    assert len(shared_rows) == 1, (
+        f"shared entity should dedupe to exactly one row across adapters "
+        f"(Finding #1 resolution); got {len(shared_rows)}: "
+        f"{[(r['name'], r.get('types')) for r in shared_rows]}"
     )
+    row = shared_rows[0]
+    assert set(row.get("source_agents") or []) == set(planted), (
+        f"row's source_agents should cover every planted publisher: "
+        f"expected {set(planted)}, got {set(row.get('source_agents') or [])}"
+    )
+    # `types` should list every distinct type any adapter emitted.
+    assert isinstance(row.get("types"), list)
+    assert len(row["types"]) >= 1
+    # `type` (singular) still present for backward-compat with
+    # recognition_runtime._single_match_recognition and similar callers.
+    assert isinstance(row.get("type"), str)
+    assert row["type"] in row["types"]
 
 
 def test_unknown_entity_returns_empty(federation):

@@ -85,12 +85,33 @@ If your `agent-library/` lives somewhere other than `~/agent-library/` (rare, bu
 
 Three of five adapters tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
 
-There are two ways to handle this from Claude Desktop:
+The friendly fix shipped in v0.6.0: set an environment variable that flips the L6 default per install.
 
-1. **Ask the model to pass the access level explicitly.** Most calls accept an `access_level` parameter. Phrase queries like *"Call `list_recent_work` with `access_level='team'`."*
-2. **Wait for v0.5.0**, which is expected to add a config flag that flips the L6 default to `team` for single-user installs. Tracked in claude-brain Finding 2.
+```bash
+export BOURDON_DEFAULT_ACCESS_LEVEL=team
+```
 
-The second is friendlier but isn't shipped yet.
+Put that in your shell rc, or set it inside the MCP server entry in Claude Desktop's config so it inherits even when launched as an MCP subprocess:
+
+```json
+{
+  "mcpServers": {
+    "bourdon": {
+      "command": "/Users/you/path/to/.venv/bin/bourdon",
+      "args": ["serve", "--quiet"],
+      "env": {
+        "BOURDON_DEFAULT_ACCESS_LEVEL": "team"
+      }
+    }
+  }
+}
+```
+
+With the env var set, `list_recent_work`, `find_entity`, and `commit_to_federation` all default to `team` access — no need to ask the model to pass `access_level='team'` explicitly. Explicit arguments still win when provided, so per-call overrides keep working.
+
+Valid values: `public` (default), `team`, `private`. Invalid values log a warning and fall back to `public`.
+
+If you'd rather not use the env var, the original pattern still works — ask the model to pass the access level explicitly: *"Call `list_recent_work` with `access_level='team'`."*
 
 ## Verifying it works
 

@@ -1006,6 +1006,171 @@ def test_commit_l5_role_narrative_overwrites_on_subsequent_write(library):
     assert manifest["agent"]["role_narrative"] == "updated role description"
 
 
+# -- build_recognition_manifest unified dedupe (Finding #1 + #3) -------------
+
+
+def test_build_recognition_manifest_dedupes_by_name_across_types(library):
+    """Finding #1: same name with different types collapses to ONE row
+    with `types` listing both. Previously this would have been two rows
+    keyed by (name, type)."""
+    library["write"](
+        "agent-a",
+        _manifest(
+            "agent-a",
+            entities=[
+                {"name": "Bourdon", "type": "project", "summary": "from A"}
+            ],
+        ),
+    )
+    library["write"](
+        "agent-b",
+        _manifest(
+            "agent-b",
+            entities=[
+                {"name": "Bourdon", "type": "concept", "summary": "from B"}
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    rec = store.build_recognition_manifest()
+    bourdon_rows = [
+        e for e in rec["known_entities"]
+        if e.get("name", "").lower() == "bourdon"
+    ]
+    assert len(bourdon_rows) == 1, (
+        f"name-only dedupe should produce one row, got {len(bourdon_rows)}"
+    )
+    row = bourdon_rows[0]
+    assert set(row["source_agents"]) == {"agent-a", "agent-b"}
+    assert set(row["types"]) == {"project", "concept"}
+    # `type` (singular) stays for backward compat: first-seen wins.
+    assert row["type"] in {"project", "concept"}
+
+
+def test_build_recognition_manifest_types_field_is_unique(library):
+    """`types` list shouldn't accumulate duplicates when many agents
+    share the same type for the same name."""
+    library["write"](
+        "agent-a",
+        _manifest("agent-a", entities=[{"name": "X", "type": "project"}]),
+    )
+    library["write"](
+        "agent-b",
+        _manifest("agent-b", entities=[{"name": "X", "type": "project"}]),
+    )
+    library["write"](
+        "agent-c",
+        _manifest("agent-c", entities=[{"name": "X", "type": "topic"}]),
+    )
+    store = L6Store(library["path"])
+    rec = store.build_recognition_manifest()
+    row = next(e for e in rec["known_entities"] if e["name"] == "X")
+    assert row["types"] == ["project", "topic"] or row["types"] == ["topic", "project"]
+    # Both unique, in some order; total len 2 not 3.
+    assert len(row["types"]) == 2
+
+
+def test_find_entity_and_recognition_manifest_agree_on_row_count(library):
+    """Finding #3: the two surfaces should agree on row count for the
+    same shared entity. Previously find_entity (name-only dedupe)
+    returned 1, recognition_manifest (name+type dedupe) could return >1."""
+    library["write"](
+        "agent-a",
+        _manifest("agent-a", entities=[{"name": "Bourdon", "type": "project"}]),
+    )
+    library["write"](
+        "agent-b",
+        _manifest("agent-b", entities=[{"name": "Bourdon", "type": "concept"}]),
+    )
+    library["write"](
+        "agent-c",
+        _manifest("agent-c", entities=[{"name": "Bourdon", "type": "topic"}]),
+    )
+    store = L6Store(library["path"])
+    find_matches = store.find_entity("Bourdon")
+    rec = store.build_recognition_manifest()
+    rec_rows = [
+        e for e in rec["known_entities"]
+        if e.get("name", "").lower() == "bourdon"
+    ]
+    assert len(find_matches) == len(rec_rows) == 1
+
+
+# -- Default access_level env var (Finding #2) -------------------------------
+
+
+def test_resolve_access_level_env_var_flips_default(monkeypatch):
+    """BOURDON_DEFAULT_ACCESS_LEVEL=team flips the default for single-user
+    federations so adapters that tag entities `team` aren't silently
+    filtered from naive queries."""
+    from core.l6_store import _resolve_access_level
+
+    monkeypatch.delenv("BOURDON_DEFAULT_ACCESS_LEVEL", raising=False)
+    assert _resolve_access_level() == "public"
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "team")
+    assert _resolve_access_level() == "team"
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "private")
+    assert _resolve_access_level() == "private"
+
+
+def test_resolve_access_level_explicit_argument_beats_env(monkeypatch):
+    """An explicit access_level= always wins over the env var."""
+    from core.l6_store import _resolve_access_level
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "team")
+    assert _resolve_access_level(access_level="public") == "public"
+    assert _resolve_access_level(access_level="private") == "private"
+
+
+def test_resolve_access_level_include_private_beats_env(monkeypatch):
+    """The legacy `include_private=True` shim still resolves to `private`
+    even when the env var would have said `team`."""
+    from core.l6_store import _resolve_access_level
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "team")
+    assert _resolve_access_level(include_private=True) == "private"
+
+
+def test_resolve_access_level_bad_env_value_falls_back_to_public(
+    monkeypatch, caplog
+):
+    """A bogus env value logs a warning and falls back to `public`."""
+    from core.l6_store import _resolve_access_level
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "ULTRA_SECRET")
+    with caplog.at_level("WARNING"):
+        assert _resolve_access_level() == "public"
+    assert any(
+        "BOURDON_DEFAULT_ACCESS_LEVEL" in r.message and "public" in r.message
+        for r in caplog.records
+    )
+
+
+def test_env_default_access_level_affects_find_entity(library, monkeypatch):
+    """End-to-end: with the env var set to `team`, find_entity() without
+    an explicit access_level surfaces team-tagged entities."""
+    library["write"](
+        "agent-a",
+        _manifest(
+            "agent-a",
+            entities=[
+                {"name": "TeamOnly", "type": "topic", "visibility": "team"},
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+
+    monkeypatch.delenv("BOURDON_DEFAULT_ACCESS_LEVEL", raising=False)
+    assert store.find_entity("TeamOnly") == []
+
+    monkeypatch.setenv("BOURDON_DEFAULT_ACCESS_LEVEL", "team")
+    matches = store.find_entity("TeamOnly")
+    assert len(matches) == 1
+    assert matches[0].agents == ["agent-a"]
+
+
 def test_commit_l5_sessions_sorted_newest_first_after_write(library):
     store = L6Store(library["path"])
     store.commit_l5(
