@@ -228,6 +228,89 @@ A new adapter is shipped when ALL of these are true:
 - [ ] CI green on all 12 matrix entries
 - [ ] Release notes drafted
 
+## Write-side / cloud-only agents (`commit_to_federation`)
+
+Every adapter described above reads from a local store the agent owns (Cursor's SQLite, Codex's session_index.jsonl, Claude Code's claude-brain, Copilot/Cascade's convention file). That shape doesn't fit **cloud-only or webview-wrapper agents** — most importantly Claude Desktop, where conversations are stored server-side by Anthropic and the local disk surface is just a Chromium webview cache. The same applies to ChatGPT desktop, future Anthropic-mobile, and any other MCP-aware agent without a readable on-disk store.
+
+For these agents, use the write-side flow instead: the agent's model calls Bourdon's `commit_to_federation` MCP tool whenever it has context worth sharing. Bourdon writes that contribution to `~/agent-library/agents/<agent_id>.l5.yaml` atomically. No adapter code, no scraping, no per-agent reverse-engineering.
+
+### Tool signature
+
+```python
+commit_to_federation(
+    agent_id: str,                    # e.g. "claude-desktop"
+    agent_type: str | None = None,    # required for new manifests
+    instance: str | None = None,      # optional machine/deploy id
+    role_narrative: str | None = None,
+    entities: list[dict] | None = None,
+    sessions: list[dict] | None = None,
+    mode: str = "merge",              # or "replace"
+) -> dict
+```
+
+Returns a write summary: counts of rows added/updated/total, the manifest path on disk, and the new `last_updated` timestamp. On invalid input, returns a dict with an `error` key rather than raising — keeps the MCP surface predictable.
+
+### When to call it
+
+The model decides. Suggested triggers (in a system prompt or user instruction):
+
+- The user mentions a project / topic worth carrying across sessions
+- A decision or constraint gets settled (e.g. "we picked Postgres over MySQL because…")
+- A session is about to end and the model wants to leave breadcrumbs for the next one
+- A cross-agent question came up that the model thinks other agents would want to know the answer to
+
+The convention is *under-write* — only commit things that would be useful to another agent looking back. The L5 isn't a transcript; it's the per-agent **public** glossary.
+
+### Visibility — the agent decides
+
+The caller is responsible for setting `visibility` on entity/session rows. Bourdon does NOT redact server-side because:
+
+- The model is making a deliberate decision to share, not scraping a noisy native store
+- Read-side adapters apply visibility filtering at query time regardless
+
+That said, agents using this tool **should** treat anything tagged credential / financial / personal as `visibility: private` by default. The system prompt fragment that recommends `commit_to_federation` should also recommend that default.
+
+### Merge vs replace
+
+- **`merge`** (default) is right for cloud agents. The model adds new things this conversation learned; old context stays. Entities dedupe by `name.lower()`; sessions dedupe by `(date, cwd)`. List fields (`tags`, `aliases`, `key_actions`, `files_touched`, `project_focus`) are unioned on dupe; non-list fields are overwritten by the incoming value.
+- **`replace`** wipes the manifest entirely. Use it when the agent wants explicit control over its full published view each time (e.g. "remember exactly these things and forget the rest").
+
+### Example: Claude Desktop committing a project decision
+
+```
+User: "Let's lock in Postgres for the OMNIVour storage layer."
+
+Model decides to commit. Calls commit_to_federation with:
+  agent_id      = "claude-desktop"
+  agent_type    = "code-assistant"  # only matters on first call
+  entities      = [
+                    {
+                      "name": "OMNIVour storage decision",
+                      "type": "decision",
+                      "summary": "Postgres chosen over alternatives 2026-05-11. Reasons: ...",
+                      "tags": ["omnivour", "architecture"],
+                      "visibility": "team",
+                    }
+                  ]
+  sessions      = [
+                    {
+                      "date": "2026-05-11",
+                      "cwd": "/Users/you/omnivour",
+                      "project_focus": ["OMNIVour"],
+                      "key_actions": ["Locked in Postgres for storage layer"],
+                      "visibility": "team",
+                    }
+                  ]
+```
+
+Next time Claude Code starts a session in `~/claudework/omnivour/`, Bourdon's recognition runtime will surface the "OMNIVour storage decision" entity and the Claude Desktop session — without anything being copy-pasted.
+
+### What this generalizes to
+
+This pattern is the canonical fit for **every future cloud-only or webview-based MCP-aware agent**. ChatGPT desktop, Anthropic mobile, browser-based agents, hosted agent frameworks — they all federate via the same `commit_to_federation` call. No per-agent adapter code. No filesystem reverse-engineering. The agent's model picks what to share; Bourdon persists.
+
+For agents that *do* have a readable local store, prefer the adapter path documented above — automatic capture beats deliberate commit when you can get it.
+
 ## Paginating `list_recent_work` (issue #48)
 
 `L6Store.list_recent_work` returns one **page** of sessions, capped at 20 by default and 100 by `MAX_LIMIT`. Adapters or external clients that want the full history walk pages via the `cursor` token in the response:

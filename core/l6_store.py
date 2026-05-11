@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -685,6 +686,284 @@ class L6Store:
             recent_sessions=sessions,
             entities=entities,
         )
+
+    def commit_l5(
+        self,
+        agent_id: str,
+        *,
+        agent_type: str | None = None,
+        instance: str | None = None,
+        role_narrative: str | None = None,
+        entities: list[dict] | None = None,
+        sessions: list[dict] | None = None,
+        mode: str = "merge",
+    ) -> dict[str, Any]:
+        """
+        Write a contribution to ``~/agent-library/agents/<agent_id>.l5.yaml``.
+
+        This is the write-side companion to the existing read APIs. It exists
+        so cloud-only or webview-wrapper agents (Claude Desktop, ChatGPT
+        desktop, etc.) -- which have no readable on-disk store for a Bourdon
+        adapter to scrape -- can contribute to federation by calling this
+        method (via the ``commit_to_federation`` MCP tool).
+
+        Parameters
+        ----------
+        agent_id : str
+            Agent slug. Must match ``^[a-z0-9][a-z0-9_-]*$`` per L5 schema.
+            This is the manifest filename and the cross-agent reference key.
+        agent_type : str, optional
+            Required when creating a NEW manifest. One of the agent-type
+            enum values from ``spec/L5_schema.json`` (``code-assistant``,
+            ``note-capture``, ``other``, etc.). When merging into an
+            existing manifest, this parameter is ignored unless the
+            existing manifest has no ``agent.type`` (recovery path).
+        instance : str, optional
+            Optional machine/deployment identifier. Survives across merges
+            once set.
+        role_narrative : str, optional
+            Optional ``agent.role_narrative``. When provided, overwrites
+            any prior value on the existing manifest (most recent wins).
+        entities : list of dict, optional
+            Entity rows. Each must have a non-empty ``name``. Other fields
+            (``type``, ``summary``, ``tags``, ``visibility``, ``aliases``,
+            ``valid_from``, ``valid_to``) are passed through as-is.
+        sessions : list of dict, optional
+            Session rows. Each must have a ``date`` (ISO 8601 date or
+            datetime string). Other fields (``cwd``, ``project_focus``,
+            ``key_actions``, ``files_touched``, ``visibility``) are
+            passed through as-is.
+        mode : "merge" or "replace"
+            ``merge`` (default): union new entities/sessions with the
+            existing manifest. Entities dedupe by ``name.lower()``;
+            sessions dedupe by ``(date, cwd)`` tuple. For dupes, the
+            new value wins for non-list fields; list fields (``tags``,
+            ``aliases``, ``key_actions``, ``files_touched``,
+            ``project_focus``) are unioned.
+            ``replace``: discard existing content and write the provided
+            entities/sessions as the whole manifest.
+
+        Returns
+        -------
+        dict
+            Summary of what was written: counts of added/updated rows,
+            total counts post-write, path on disk, agent identity.
+
+        Raises
+        ------
+        ValueError
+            On invalid agent_id, invalid mode, missing agent_type for a
+            new manifest, or malformed entity/session rows.
+        """
+        # -- validate inputs -------------------------------------------------
+        if not _AGENT_ID_RE.match(agent_id or ""):
+            raise ValueError(
+                f"invalid agent_id {agent_id!r}: must match {_AGENT_ID_RE.pattern}"
+            )
+        if mode not in ("merge", "replace"):
+            raise ValueError(f"invalid mode {mode!r}: must be 'merge' or 'replace'")
+
+        new_entities = list(entities or [])
+        new_sessions = list(sessions or [])
+        for ent in new_entities:
+            if not isinstance(ent, dict):
+                raise ValueError(f"entity is not a dict: {ent!r}")
+            name = ent.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"entity missing non-empty 'name': {ent!r}")
+        for ses in new_sessions:
+            if not isinstance(ses, dict):
+                raise ValueError(f"session is not a dict: {ses!r}")
+            if not isinstance(ses.get("date"), str) or not ses["date"].strip():
+                raise ValueError(f"session missing non-empty 'date': {ses!r}")
+
+        existing = self._manifests.get(agent_id) if mode == "merge" else None
+
+        # agent_type: required for new manifests; for merges, fall back to
+        # the existing manifest's value; if neither, error.
+        existing_type = None
+        if existing:
+            existing_agent = existing.get("agent") or {}
+            existing_type = existing_agent.get("type")
+        resolved_type = agent_type or existing_type
+        if resolved_type is None:
+            raise ValueError(
+                f"agent_type is required for a new manifest "
+                f"(agent_id={agent_id!r}, mode={mode!r})"
+            )
+        if resolved_type not in _ALLOWED_AGENT_TYPES:
+            raise ValueError(
+                f"agent_type {resolved_type!r} is not in the L5 schema enum: "
+                f"{sorted(_ALLOWED_AGENT_TYPES)}"
+            )
+
+        # -- build the manifest dict ----------------------------------------
+        if mode == "replace" or not existing:
+            manifest: dict[str, Any] = {
+                "spec_version": "0.1",
+                "agent": {"id": agent_id, "type": resolved_type},
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "recent_sessions": [],
+                "known_entities": [],
+            }
+        else:
+            # Deep-copy the existing manifest so we don't mutate the in-memory
+            # cache before write. The cache is refreshed via reload_agent
+            # after the write lands.
+            manifest = json.loads(json.dumps(existing))
+            manifest.setdefault("agent", {})
+            manifest["agent"]["id"] = agent_id
+            manifest["agent"]["type"] = resolved_type
+            manifest.setdefault("spec_version", "0.1")
+            manifest["last_updated"] = datetime.now(timezone.utc).isoformat()
+            manifest.setdefault("known_entities", [])
+            manifest.setdefault("recent_sessions", [])
+
+        if instance is not None:
+            manifest["agent"]["instance"] = instance
+        if role_narrative is not None:
+            manifest["agent"]["role_narrative"] = role_narrative
+
+        # -- merge entities/sessions ----------------------------------------
+        ent_added, ent_updated = _merge_entities(
+            manifest["known_entities"], new_entities
+        )
+        ses_added, ses_updated = _merge_sessions(
+            manifest["recent_sessions"], new_sessions
+        )
+
+        # Sort sessions newest-first, like list_recent_work expects.
+        manifest["recent_sessions"].sort(
+            key=lambda s: str(s.get("date") or ""), reverse=True
+        )
+
+        # -- write atomically -----------------------------------------------
+        # Lazy import to avoid a circular dependency: core.l5_io imports
+        # adapters.base.L5Manifest which imports nothing in core, but the
+        # lazy import keeps the import graph tidy in case that ever flips.
+        from core.l5_io import write_l5_dict
+
+        target = self._agents_dir() / f"{agent_id}.l5.yaml"
+        write_l5_dict(manifest, target)
+
+        # Refresh the in-memory cache so subsequent queries see the write.
+        self.reload_agent(agent_id)
+
+        return {
+            "agent_id": agent_id,
+            "path": str(target),
+            "mode": mode,
+            "entities_added": ent_added,
+            "entities_updated": ent_updated,
+            "sessions_added": ses_added,
+            "sessions_updated": ses_updated,
+            "total_entities": len(manifest["known_entities"]),
+            "total_sessions": len(manifest["recent_sessions"]),
+            "last_updated": manifest["last_updated"],
+        }
+
+
+# Subset of agent.id pattern from spec/L5_schema.json (kept inline to avoid
+# pulling jsonschema as a runtime dep).
+_AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# Mirrors the agent.type enum in spec/L5_schema.json. Kept inline for the
+# same reason -- if the schema enum changes, this list moves in lockstep.
+_ALLOWED_AGENT_TYPES = frozenset(
+    {
+        "code-assistant",
+        "note-capture",
+        "local-swarm",
+        "customer-support",
+        "research-assistant",
+        "creative-collaborator",
+        "project-manager",
+        "tutor",
+        "other",
+    }
+)
+
+# Entity dict fields that should be unioned (not overwritten) when merging.
+_ENTITY_LIST_FIELDS = ("tags", "aliases")
+
+# Session dict fields that should be unioned (not overwritten) when merging.
+_SESSION_LIST_FIELDS = ("project_focus", "key_actions", "files_touched")
+
+
+def _merge_entities(
+    existing: list[dict], incoming: list[dict]
+) -> tuple[int, int]:
+    """Merge ``incoming`` into ``existing`` in-place. Dedupe by name.lower().
+
+    Returns ``(added_count, updated_count)``. List fields (tags, aliases) are
+    unioned; non-list fields are overwritten by the incoming value when the
+    incoming side provides a non-None value.
+    """
+    by_key: dict[str, dict] = {}
+    for e in existing:
+        if isinstance(e, dict):
+            name = e.get("name")
+            if isinstance(name, str):
+                by_key[name.strip().lower()] = e
+
+    added = 0
+    updated = 0
+    for incoming_ent in incoming:
+        key = str(incoming_ent["name"]).strip().lower()
+        if key in by_key:
+            target = by_key[key]
+            for field_name, value in incoming_ent.items():
+                if field_name in _ENTITY_LIST_FIELDS:
+                    target.setdefault(field_name, [])
+                    for item in value or []:
+                        if item not in target[field_name]:
+                            target[field_name].append(item)
+                elif value is not None:
+                    target[field_name] = value
+            updated += 1
+        else:
+            existing.append(dict(incoming_ent))
+            by_key[key] = existing[-1]
+            added += 1
+    return added, updated
+
+
+def _merge_sessions(
+    existing: list[dict], incoming: list[dict]
+) -> tuple[int, int]:
+    """Merge ``incoming`` into ``existing`` in-place. Dedupe by (date, cwd).
+
+    Returns ``(added_count, updated_count)``. List fields (project_focus,
+    key_actions, files_touched) are unioned; non-list fields are
+    overwritten by the incoming value.
+    """
+
+    def _key(s: dict) -> tuple[str, str]:
+        return (str(s.get("date") or ""), str(s.get("cwd") or ""))
+
+    by_key: dict[tuple[str, str], dict] = {
+        _key(s): s for s in existing if isinstance(s, dict)
+    }
+    added = 0
+    updated = 0
+    for incoming_ses in incoming:
+        key = _key(incoming_ses)
+        if key in by_key:
+            target = by_key[key]
+            for field_name, value in incoming_ses.items():
+                if field_name in _SESSION_LIST_FIELDS:
+                    target.setdefault(field_name, [])
+                    for item in value or []:
+                        if item not in target[field_name]:
+                            target[field_name].append(item)
+                elif value is not None:
+                    target[field_name] = value
+            updated += 1
+        else:
+            existing.append(dict(incoming_ses))
+            by_key[key] = existing[-1]
+            added += 1
+    return added, updated
 
 
 def _append_unique(values: list[str], value: str) -> None:

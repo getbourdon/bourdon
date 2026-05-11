@@ -797,3 +797,226 @@ def test_project_summary_to_dict_shape():
     assert d["agents"] == ["a"]
     assert len(d["recent_sessions"]) == 1
     assert len(d["entities"]) == 1
+
+
+# -- commit_l5 / write-side federation (issue #51) ----------------------------
+
+
+def test_commit_l5_creates_new_manifest(library):
+    """Fresh write of a previously-unknown agent."""
+    store = L6Store(library["path"])
+    result = store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        entities=[{"name": "Bourdon", "type": "project", "summary": "a thing"}],
+        sessions=[{"date": "2026-05-11", "cwd": "/tmp/foo"}],
+    )
+    assert result["entities_added"] == 1
+    assert result["sessions_added"] == 1
+    assert result["total_entities"] == 1
+    assert result["total_sessions"] == 1
+    # Manifest persisted to disk
+    assert (library["agents_dir"] / "claude-desktop.l5.yaml").is_file()
+    # And immediately visible via the read APIs (reload happens in commit).
+    assert "claude-desktop" in store.list_agents()
+
+
+def test_commit_l5_merge_unions_list_fields_and_overwrites_scalars(library):
+    """A second call merges: existing entity gets tags/aliases unioned,
+    scalar fields overwritten by the new value."""
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        entities=[
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "v1 summary",
+                "tags": ["ai", "memory"],
+                "aliases": ["bourdon-cli"],
+            }
+        ],
+    )
+    result = store.commit_l5(
+        "claude-desktop",
+        entities=[
+            {
+                "name": "Bourdon",
+                "summary": "v2 summary",          # overwrite
+                "tags": ["memory", "federation"],  # union -> ai, memory, federation
+                "aliases": ["bourdon-mcp"],        # union -> bourdon-cli, bourdon-mcp
+            }
+        ],
+    )
+    assert result["entities_updated"] == 1
+    assert result["entities_added"] == 0
+
+    manifest = store.get_agent_manifest("claude-desktop", access_level="team")
+    bourdon = next(e for e in manifest["known_entities"] if e["name"] == "Bourdon")
+    assert bourdon["summary"] == "v2 summary"
+    assert set(bourdon["tags"]) == {"ai", "memory", "federation"}
+    assert set(bourdon["aliases"]) == {"bourdon-cli", "bourdon-mcp"}
+
+
+def test_commit_l5_merge_session_dedupes_by_date_and_cwd(library):
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        sessions=[
+            {
+                "date": "2026-05-11",
+                "cwd": "/tmp/foo",
+                "key_actions": ["first action"],
+            }
+        ],
+    )
+    result = store.commit_l5(
+        "claude-desktop",
+        sessions=[
+            # Same (date, cwd) -> updates the existing row.
+            {
+                "date": "2026-05-11",
+                "cwd": "/tmp/foo",
+                "key_actions": ["second action"],
+            },
+            # Different cwd -> new row.
+            {
+                "date": "2026-05-11",
+                "cwd": "/tmp/bar",
+                "key_actions": ["other project"],
+            },
+        ],
+    )
+    assert result["sessions_added"] == 1
+    assert result["sessions_updated"] == 1
+    assert result["total_sessions"] == 2
+
+    manifest = store.get_agent_manifest("claude-desktop", access_level="team")
+    foo = next(s for s in manifest["recent_sessions"] if s.get("cwd") == "/tmp/foo")
+    assert set(foo["key_actions"]) == {"first action", "second action"}
+
+
+def test_commit_l5_replace_mode_wipes_existing(library):
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        entities=[{"name": "OldEntity"}, {"name": "AnotherOldEntity"}],
+        sessions=[{"date": "2026-05-01", "cwd": "/old"}],
+    )
+    result = store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        entities=[{"name": "OnlyNew"}],
+        mode="replace",
+    )
+    assert result["mode"] == "replace"
+    assert result["total_entities"] == 1
+    assert result["total_sessions"] == 0
+    manifest = store.get_agent_manifest("claude-desktop", access_level="team")
+    names = {e["name"] for e in manifest["known_entities"]}
+    assert names == {"OnlyNew"}
+    assert manifest["recent_sessions"] == []
+
+
+def test_commit_l5_requires_agent_type_for_new_manifest(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="agent_type is required"):
+        store.commit_l5("newagent", entities=[{"name": "X"}])
+
+
+def test_commit_l5_inherits_agent_type_on_merge(library):
+    """After the first call sets agent_type, subsequent merges don't need it."""
+    store = L6Store(library["path"])
+    store.commit_l5("agent-x", agent_type="other", entities=[{"name": "A"}])
+    # Second call omits agent_type -> should succeed by inheriting from disk.
+    result = store.commit_l5("agent-x", entities=[{"name": "B"}])
+    assert result["total_entities"] == 2
+
+
+def test_commit_l5_rejects_invalid_agent_id(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="invalid agent_id"):
+        store.commit_l5("Invalid Agent ID", agent_type="other")
+    with pytest.raises(ValueError, match="invalid agent_id"):
+        store.commit_l5("", agent_type="other")
+    with pytest.raises(ValueError, match="invalid agent_id"):
+        store.commit_l5("-leading-dash", agent_type="other")
+
+
+def test_commit_l5_rejects_invalid_agent_type(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="not in the L5 schema enum"):
+        store.commit_l5("agent-x", agent_type="bogus-category")
+
+
+def test_commit_l5_rejects_invalid_mode(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="invalid mode"):
+        store.commit_l5("agent-x", agent_type="other", mode="upsert")
+
+
+def test_commit_l5_rejects_entity_missing_name(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="missing non-empty 'name'"):
+        store.commit_l5(
+            "agent-x", agent_type="other", entities=[{"type": "concept"}]
+        )
+
+
+def test_commit_l5_rejects_session_missing_date(library):
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="missing non-empty 'date'"):
+        store.commit_l5(
+            "agent-x", agent_type="other", sessions=[{"cwd": "/no/date"}]
+        )
+
+
+def test_commit_l5_persists_across_l6store_instances(library):
+    """A write through one L6Store instance is visible to a fresh instance --
+    proves atomicity isn't accidentally using in-memory-only state."""
+    store_a = L6Store(library["path"])
+    store_a.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        entities=[{"name": "Persisted"}],
+    )
+    # Independent instance reads from disk.
+    store_b = L6Store(library["path"])
+    matches = store_b.find_entity("Persisted", access_level="team")
+    assert len(matches) == 1
+    assert matches[0].agents == ["claude-desktop"]
+
+
+def test_commit_l5_role_narrative_overwrites_on_subsequent_write(library):
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "agent-x",
+        agent_type="code-assistant",
+        role_narrative="initial role description",
+        entities=[{"name": "X"}],
+    )
+    store.commit_l5(
+        "agent-x",
+        role_narrative="updated role description",
+    )
+    manifest = store.get_agent_manifest("agent-x", access_level="team")
+    assert manifest["agent"]["role_narrative"] == "updated role description"
+
+
+def test_commit_l5_sessions_sorted_newest_first_after_write(library):
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "agent-x",
+        agent_type="other",
+        sessions=[
+            {"date": "2026-04-01", "cwd": "/a"},
+            {"date": "2026-05-11", "cwd": "/b"},
+            {"date": "2026-04-15", "cwd": "/c"},
+        ],
+    )
+    manifest = store.get_agent_manifest("agent-x", access_level="team")
+    dates = [s["date"] for s in manifest["recent_sessions"]]
+    assert dates == sorted(dates, reverse=True)

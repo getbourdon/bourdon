@@ -40,6 +40,10 @@ Tools exposed
   Immediate recognition and a bounded prompt-context fragment for turn start.
 - ``get_deeper_context(prompt, access_level, include_private)``
   Post-recognition L2 context retrieval. Returns empty context when disabled.
+- ``commit_to_federation(agent_id, agent_type, entities, sessions, mode, ...)``
+  Write-side tool. Cloud-only / webview-wrapper agents (Claude Desktop,
+  ChatGPT desktop, etc.) call this to push L5 contributions when they
+  have no readable on-disk store for a Bourdon adapter to scrape.
 """
 
 from __future__ import annotations
@@ -382,6 +386,78 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             "include_private": include_private,
             "matches": [m.to_dict() for m in matches],
         }
+
+    @mcp.tool()
+    def commit_to_federation(
+        agent_id: str,
+        agent_type: str | None = None,
+        instance: str | None = None,
+        role_narrative: str | None = None,
+        entities: list[dict] | None = None,
+        sessions: list[dict] | None = None,
+        mode: str = "merge",
+    ) -> dict:
+        """
+        Write a contribution to the federation under ``agent_id``.
+
+        The write-side companion to the read tools. Lets MCP-aware cloud
+        agents (Claude Desktop, ChatGPT desktop, other webview/cloud-only
+        agents that have no readable on-disk store for Bourdon to scrape)
+        push their own L5 contributions into the federation by calling
+        this tool when they decide a piece of context is worth sharing.
+
+        Parameters
+        ----------
+        agent_id : str
+            Agent slug, e.g. ``claude-desktop``. Must match
+            ``^[a-z0-9][a-z0-9_-]*$``.
+        agent_type : str, optional
+            Required when creating a NEW manifest for this agent_id; one
+            of the L5 schema enum values (``code-assistant``,
+            ``note-capture``, ``other``, etc.). Ignored when merging
+            into an existing manifest that already has agent.type set.
+        instance : str, optional
+            Optional machine/deployment identifier.
+        role_narrative : str, optional
+            Free-text description of the agent's role within a fleet.
+        entities : list of dict, optional
+            Each entity dict needs at minimum a non-empty ``name`` (other
+            L5 entity fields -- type, summary, tags, visibility, aliases,
+            valid_from, valid_to -- pass through as-is).
+        sessions : list of dict, optional
+            Each session dict needs at minimum a non-empty ``date`` (ISO
+            8601 string). Other L5 session fields -- cwd, project_focus,
+            key_actions, files_touched, visibility -- pass through.
+        mode : "merge" or "replace"
+            ``merge`` (default) unions new rows with the existing manifest.
+            Entities dedupe by ``name.lower()``; sessions dedupe by
+            ``(date, cwd)``. List fields (tags, aliases, key_actions,
+            files_touched, project_focus) are unioned on dupe; non-list
+            fields are overwritten. ``replace`` wipes the manifest and
+            writes only the provided content.
+
+        Returns
+        -------
+        dict with the write summary (counts added/updated/total, path,
+        agent identity, last_updated). On invalid input, returns a
+        structured error response with an ``error`` key.
+        """
+        try:
+            return store.commit_l5(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                instance=instance,
+                role_narrative=role_narrative,
+                entities=entities,
+                sessions=sessions,
+                mode=mode,
+            )
+        except ValueError as exc:
+            return {
+                "error": str(exc),
+                "agent_id": agent_id,
+                "mode": mode,
+            }
 
     @mcp.tool()
     def get_cross_agent_summary(
