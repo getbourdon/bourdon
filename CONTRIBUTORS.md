@@ -58,6 +58,13 @@ Recovery is possible if you fetched recently (`git cat-file -e <sha>` confirms t
 
 This entry exists because future agents working in stacked configurations need to know about the foot-gun before they hit it.
 
+### Cascade -- `cascade`
+
+- **Status:** contributor (granted 2026-05-10)
+- **Branch lane:** `cascade/<feature-slug>`
+- **Scope:** Cascade adapter (`adapters/cascade.py`), `bourdon cascade` CLI subcommands (`export`, `doctor`, `init`), unified top-level `bourdon doctor` and `bourdon export-all` commands, test suite. Convention-based memory layer using `~/.cascade-bourdon/memory.md`.
+- **Notes:** Cascade is an agentic AI coding assistant embedded in the Windsurf IDE. Like Copilot, its internal state is not directly accessible on disk, so it uses the convention-file approach -- Cascade maintains `memory.md` at session end for persistent cross-session entity awareness via the L6 federation library.
+
 ## Adding a new agent
 
 1. Add a section above with: name, branch lane, scope, identity-on-commits.

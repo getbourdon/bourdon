@@ -5,11 +5,14 @@ An adapter implements the BourdonAdapter Protocol defined in adapters.base.
 Adapters are registered via Python entry points in pyproject.toml under the
 `bourdon.adapters` group.
 
-First-party adapters shipped in v0.0.x:
+First-party adapters:
     - claude_code  -- Claude Code (reads claude-brain + auto-memory + MCP graph)
+    - codex       -- OpenAI Codex CLI (session_index, rollouts, SQLite state)
+    - cursor      -- Cursor IDE (SQLite workspace state)
+    - copilot     -- GitHub Copilot (convention-based memory.md)
+    - cascade     -- Cascade / Windsurf (convention-based memory.md)
 
-Planned:
-    - codex  -- OpenAI Codex CLI
+Planned / native publishers:
     - clyde  -- RADLAB Clyde (native publisher, not external adapter)
     - clair  -- RADLAB Clair (native publisher)
 """

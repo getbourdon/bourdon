@@ -74,6 +74,7 @@ claude-code = "adapters.claude_code:ClaudeCodeAdapter"
 codex = "adapters.codex:CodexAdapter"
 cursor = "adapters.cursor:CursorAdapter"
 copilot = "adapters.copilot:CopilotAdapter"
+cascade = "adapters.cascade:CascadeAdapter"
 # clyde = "adapters.clyde:ClydeAdapter"     # native publisher lives in ~/.clyde/, not here
 # clair = "adapters.clair:ClairAdapter"     # same pattern -- native publisher
 

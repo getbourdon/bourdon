@@ -26,6 +26,12 @@ from adapters.codex import (
     _merge_bourdon_memory_md_section,
     _safe_native_memory_text,
 )
+from adapters.cascade import (
+    CascadeAdapter,
+    _inspect_cascade_memory,
+    default_cascade_memory_path,
+    init_memory_file as cascade_init_memory_file,
+)
 from adapters.copilot import (
     CopilotAdapter,
     _inspect_copilot_memory,
@@ -61,6 +67,10 @@ def _default_cursor_l5_path() -> Path:
 
 def _default_copilot_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "copilot.l5.yaml"
+
+
+def _default_cascade_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "cascade.l5.yaml"
 
 
 def _parse_since(value: str | None) -> datetime | None:
@@ -212,6 +222,128 @@ def _handle_copilot_init(args: argparse.Namespace) -> int:
     except FileExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+# -- Cascade handlers ---------------------------------------------------------
+
+
+def _handle_cascade_export(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_cascade_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_cascade_doctor(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir)
+    health = adapter.health_check()
+    mem_report = _inspect_cascade_memory(cascade_dir or adapter._dir)
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "memory_file": mem_report,
+        "memory_path": str(default_cascade_memory_path()),
+    }
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cascade_init(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    force = getattr(args, "force", False)
+    try:
+        path = cascade_init_memory_file(cascade_dir=cascade_dir, force=force)
+        print(f"Created {path}")
+        print("Edit it to add entities and sessions, then run `bourdon cascade export`.")
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# -- Top-level doctor / export-all --------------------------------------------
+
+_ADAPTER_REGISTRY: list[tuple[str, type]] = [
+    ("claude-code", ClaudeCodeAdapter),
+    ("codex", CodexAdapter),
+    ("cursor", CursorAdapter),
+    ("copilot", CopilotAdapter),
+    ("cascade", CascadeAdapter),
+]
+
+
+def _handle_doctor(args: argparse.Namespace) -> int:
+    """Run health checks across all known adapters."""
+    results: list[dict[str, Any]] = []
+    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+        try:
+            adapter = adapter_cls()
+            health = adapter.health_check()
+            results.append({
+                "agent": agent_id,
+                "status": health.status,
+                "reason": health.reason,
+                "details": health.details,
+            })
+        except Exception as exc:  # noqa: BLE001
+            results.append({
+                "agent": agent_id,
+                "status": "error",
+                "reason": str(exc),
+                "details": {},
+            })
+
+    report = {"adapters": results}
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_export_all(args: argparse.Namespace) -> int:
+    """Export L5 manifests for all healthy adapters."""
+    access_level = args.access_level
+    since = _parse_since(getattr(args, "since", None))
+    results: list[dict[str, Any]] = []
+
+    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+        try:
+            adapter = adapter_cls()
+            manifest = adapter.export_l5(since=since)
+            data = filter_manifest_for_access(manifest, access_level=access_level)
+            out_path = (
+                Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
+            )
+            write_l5_dict(data, out_path)
+            entity_count = len(data.get("known_entities") or [])
+            session_count = len(data.get("recent_sessions") or [])
+            results.append({
+                "agent": agent_id,
+                "status": "ok",
+                "path": str(out_path),
+                "entities": entity_count,
+                "sessions": session_count,
+            })
+        except Exception as exc:  # noqa: BLE001
+            results.append({
+                "agent": agent_id,
+                "status": "error",
+                "reason": str(exc),
+            })
+
+    report = {"exports": results}
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
     return 0
 
 
@@ -785,6 +917,77 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing memory.md.",
     )
     copilot_init_cmd.set_defaults(func=_handle_copilot_init)
+
+    # ---- cascade subcommands ------------------------------------------------
+    cascade = subparsers.add_parser("cascade", help="Cascade (Windsurf)-specific commands")
+    cascade_subparsers = cascade.add_subparsers(dest="cascade_command")
+
+    cascade_export_cmd = cascade_subparsers.add_parser(
+        "export",
+        help="Build a Cascade L5 manifest from ~/.cascade-bourdon/memory.md",
+    )
+    cascade_export_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_export_cmd.add_argument("--out")
+    cascade_export_cmd.add_argument("--since")
+    cascade_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cascade_export_cmd.set_defaults(func=_handle_cascade_export)
+
+    cascade_doctor_cmd = cascade_subparsers.add_parser(
+        "doctor",
+        help="Diagnose the Cascade convention memory file",
+    )
+    cascade_doctor_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_doctor_cmd.add_argument("--report-out")
+    cascade_doctor_cmd.set_defaults(func=_handle_cascade_doctor)
+
+    cascade_init_cmd = cascade_subparsers.add_parser(
+        "init",
+        help="Create ~/.cascade-bourdon/memory.md with a starter template",
+    )
+    cascade_init_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_init_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing memory.md.",
+    )
+    cascade_init_cmd.set_defaults(func=_handle_cascade_init)
+
+    # ---- top-level doctor / export-all --------------------------------------
+    doctor_cmd = subparsers.add_parser(
+        "doctor",
+        help="Run health checks across all installed adapters",
+    )
+    doctor_cmd.add_argument("--report-out")
+    doctor_cmd.set_defaults(func=_handle_doctor)
+
+    export_all_cmd = subparsers.add_parser(
+        "export-all",
+        help="Export L5 manifests for all healthy adapters",
+    )
+    export_all_cmd.add_argument("--since")
+    export_all_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    export_all_cmd.add_argument(
+        "--library",
+        type=Path,
+        default=DEFAULT_LIBRARY_PATH,
+        help=f"Path to agent-library (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    export_all_cmd.add_argument("--report-out")
+    export_all_cmd.set_defaults(func=_handle_export_all)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")

@@ -208,6 +208,7 @@ Bourdon is an open-source memory protocol and reference implementation seeded by
 - Codex -- Codex adapter expansion, CLI implementation, timing-artifact generation, access-level model
 - OpenAI Codex 5.3 -- hybrid memory cycle tooling, MCP smoke assertions, CI/report automation, starter template packaging
 - GitHub Copilot -- Copilot adapter (convention-based memory layer), CLI `bourdon copilot` subcommands, test suite
+- Cascade -- Cascade adapter (convention-based memory layer), CLI `bourdon cascade` subcommands, unified `bourdon doctor` and `bourdon export-all`, test suite
 
 ## Other RADLAB Projects
 
