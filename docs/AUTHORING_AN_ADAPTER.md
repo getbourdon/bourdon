@@ -228,6 +228,40 @@ A new adapter is shipped when ALL of these are true:
 - [ ] CI green on all 12 matrix entries
 - [ ] Release notes drafted
 
+## Paginating `list_recent_work` (issue #48)
+
+`L6Store.list_recent_work` returns one **page** of sessions, capped at 20 by default and 100 by `MAX_LIMIT`. Adapters or external clients that want the full history walk pages via the `cursor` token in the response:
+
+```python
+from core.l6_store import L6Store
+from pathlib import Path
+
+store = L6Store(Path("~/agent-library").expanduser())
+cursor = None
+while True:
+    page = store.list_recent_work(
+        # Pass the same since/agent/access_level on every page so the
+        # query stays consistent across the loop.
+        since=some_datetime,
+        agent="claude-code",
+        access_level="team",
+        limit=100,        # max per page
+        cursor=cursor,    # None on the first call; carry forward on subsequent
+    )
+    for session in page:
+        ...               # consume page.sessions
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+```
+
+Two adapter-author pitfalls worth knowing about:
+
+- **The 14-day default window.** If you call `list_recent_work()` with no `since` and no `cursor`, the store applies a 14-day default window. Adapter integration tests that hard-code dates older than 14 days will look like they pass locally on the day of writing and silently empty out later. Pass an explicit `since` (e.g. `datetime(2020, 1, 1, tzinfo=timezone.utc)`) in tests.
+- **Pass `since` on every paginated call.** The cursor only encodes pagination offset, not the original filter. If you drop `since` after the first page, the default-window logic would re-apply mid-loop. The convention is: same filter args on every page.
+
+The MCP surface (`bourdon serve` → `list_recent_work` tool) exposes the same parameters one-to-one and wraps the response in `{sessions, next_cursor, has_more, ...}`.
+
 ## Contributing back
 
 If you ship an adapter, please open a PR to `getbourdon/bourdon` with the adapter module + tests + agent-integration-status update. We'll review against this guide and the spec doc. Adapters that follow this guide tend to merge in one round; adapters that skip the visibility-test category or roll their own redaction tend to need a second pass.

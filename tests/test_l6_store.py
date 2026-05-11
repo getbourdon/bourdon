@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -234,6 +234,14 @@ def test_find_entity_aggregates_tags_across_agents(library):
 # -- list_recent_work ----------------------------------------------------------
 
 
+# All list_recent_work tests pass an explicit ``since`` covering the
+# fixture dates. The store now applies a 14-day default-since window when
+# ``since`` is None, so naked calls against hard-coded historical dates
+# would return empty and the assertions would also rot when the absolute
+# clock advances past their window. Explicit ``since`` is deterministic.
+_TEST_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
 def test_list_recent_work_across_all_agents(library):
     library["write"](
         "a",
@@ -244,7 +252,7 @@ def test_list_recent_work_across_all_agents(library):
         _manifest("b", sessions=[{"date": "2026-04-13", "key_actions": ["refactor"]}]),
     )
     store = L6Store(library["path"])
-    results = store.list_recent_work()
+    results = store.list_recent_work(since=_TEST_EPOCH)
     assert len(results) == 2
     # Newest first
     assert results[0].date == "2026-04-15"
@@ -261,7 +269,7 @@ def test_list_recent_work_filtered_by_agent(library):
         _manifest("b", sessions=[{"date": "2026-04-14", "key_actions": ["b work"]}]),
     )
     store = L6Store(library["path"])
-    only_b = store.list_recent_work(agent="b")
+    only_b = store.list_recent_work(since=_TEST_EPOCH, agent="b")
     assert len(only_b) == 1
     assert only_b[0].agent == "b"
 
@@ -300,10 +308,10 @@ def test_list_recent_work_skips_private_sessions(library):
         ),
     )
     store = L6Store(library["path"])
-    public = store.list_recent_work()
+    public = store.list_recent_work(since=_TEST_EPOCH)
     assert len(public) == 1
     assert public[0].key_actions == ["public"]
-    with_private = store.list_recent_work(include_private=True)
+    with_private = store.list_recent_work(since=_TEST_EPOCH, include_private=True)
     assert len(with_private) == 2
 
 
@@ -322,8 +330,8 @@ def test_list_recent_work_team_hidden_from_public_visible_to_team(library):
         ),
     )
     store = L6Store(library["path"])
-    assert store.list_recent_work() == []
-    assert len(store.list_recent_work(access_level="team")) == 1
+    assert len(store.list_recent_work(since=_TEST_EPOCH)) == 0
+    assert len(store.list_recent_work(since=_TEST_EPOCH, access_level="team")) == 1
 
 
 def test_list_recent_work_skips_malformed_dates(library):
@@ -338,13 +346,173 @@ def test_list_recent_work_skips_malformed_dates(library):
         ),
     )
     store = L6Store(library["path"])
-    # With cutoff, bad dates are dropped; without cutoff, they still appear
-    # (we include them so they're visible, just un-sortable by date)
     results = store.list_recent_work(
         since=datetime(2026, 4, 1, tzinfo=timezone.utc)
     )
     assert len(results) == 1
     assert results[0].key_actions == ["good"]
+
+
+# -- list_recent_work pagination + payload bounds (issue #48) ----------------
+
+
+def _seed_dated_sessions(library, agent_id: str, count: int) -> None:
+    """Seed ``count`` sessions on consecutive dates starting at 2026-04-30."""
+    sessions = [
+        {
+            "date": (date(2026, 4, 30) - timedelta(days=i)).isoformat(),
+            "key_actions": [f"action {i}"],
+            "files_touched": [f"file{i}.py"],
+        }
+        for i in range(count)
+    ]
+    library["write"](agent_id, _manifest(agent_id, sessions=sessions))
+
+
+def test_list_recent_work_default_limit_caps_payload(library):
+    """First call with no args returns at most DEFAULT_LIMIT sessions."""
+    _seed_dated_sessions(library, "a", 30)
+    store = L6Store(library["path"])
+    # Explicit far-past since so the 14-day default-since window doesn't
+    # also drop these test dates; we're testing the limit independently.
+    page = store.list_recent_work(since=_TEST_EPOCH)
+    assert len(page) == 20  # DEFAULT_LIMIT
+    assert page.has_more is True
+    assert page.next_cursor is not None
+
+
+def test_list_recent_work_limit_caps_at_max(library):
+    """An explicit limit above MAX_LIMIT is clamped to MAX_LIMIT (100)."""
+    _seed_dated_sessions(library, "a", 150)
+    store = L6Store(library["path"])
+    page = store.list_recent_work(since=_TEST_EPOCH, limit=500)
+    assert len(page) == 100  # MAX_LIMIT, not 500
+
+
+def test_list_recent_work_limit_under_one_is_coerced_up(library):
+    """``limit=0`` and negative values are coerced to 1 -- never silently empty."""
+    _seed_dated_sessions(library, "a", 5)
+    store = L6Store(library["path"])
+    assert len(store.list_recent_work(since=_TEST_EPOCH, limit=0)) == 1
+    assert len(store.list_recent_work(since=_TEST_EPOCH, limit=-5)) == 1
+
+
+def test_list_recent_work_cursor_walks_through_all_pages(library):
+    """Paginating with cursor returns every session exactly once, in order."""
+    _seed_dated_sessions(library, "a", 25)
+    store = L6Store(library["path"])
+    collected: list[str] = []
+    cursor: str | None = None
+    pages = 0
+    while True:
+        pages += 1
+        assert pages < 10, "pagination loop should terminate well before this"
+        page = store.list_recent_work(
+            since=_TEST_EPOCH,
+            limit=10,
+            cursor=cursor,
+        )
+        collected.extend(s.date for s in page)
+        if not page.has_more:
+            break
+        cursor = page.next_cursor
+    # All 25 sessions, no duplicates, newest-first.
+    assert len(collected) == 25
+    assert collected == sorted(collected, reverse=True)
+
+
+def test_list_recent_work_last_page_has_no_cursor(library):
+    """``has_more`` is False and ``next_cursor`` is None on the terminal page."""
+    _seed_dated_sessions(library, "a", 5)
+    store = L6Store(library["path"])
+    page = store.list_recent_work(since=_TEST_EPOCH, limit=10)
+    assert len(page) == 5
+    assert page.has_more is False
+    assert page.next_cursor is None
+
+
+def test_list_recent_work_default_since_window_filters_old_sessions(library):
+    """Without explicit ``since`` or ``cursor``, sessions older than 14 days
+    are filtered out -- this is the throttle that prevents the unbounded-payload
+    stall observed in the Layer 3 acceptance demo (issue #48)."""
+    today = datetime.now(timezone.utc).date()
+    library["write"](
+        "a",
+        _manifest(
+            "a",
+            sessions=[
+                {"date": today.isoformat(), "key_actions": ["fresh"]},
+                {
+                    "date": (today - timedelta(days=30)).isoformat(),
+                    "key_actions": ["old"],
+                },
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    page = store.list_recent_work()  # no args -> default-since-14-days applies
+    dates = [s.date for s in page]
+    assert today.isoformat() in dates
+    assert (today - timedelta(days=30)).isoformat() not in dates
+
+
+def test_list_recent_work_explicit_since_bypasses_default_window(library):
+    """Passing an explicit ``since`` overrides the 14-day default."""
+    today = datetime.now(timezone.utc).date()
+    library["write"](
+        "a",
+        _manifest(
+            "a",
+            sessions=[
+                {
+                    "date": (today - timedelta(days=60)).isoformat(),
+                    "key_actions": ["older than default-since"],
+                },
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    # The default-since would hide this; explicit since=epoch must show it.
+    page = store.list_recent_work(since=_TEST_EPOCH)
+    assert len(page) == 1
+
+
+def test_list_recent_work_invalid_cursor_raises(library):
+    """A malformed cursor surfaces as ValueError rather than silent reset."""
+    _seed_dated_sessions(library, "a", 3)
+    store = L6Store(library["path"])
+    with pytest.raises(ValueError, match="invalid cursor"):
+        store.list_recent_work(since=_TEST_EPOCH, cursor="not-base64-or-json")
+
+
+def test_paginated_sessions_to_dict_summary_omits_narrative_fields():
+    """``PaginatedSessions.to_dict(summary=True)`` drops the verbose fields."""
+    from core.l6_store import PaginatedSessions, SessionRef
+
+    page = PaginatedSessions(
+        sessions=[
+            SessionRef(
+                agent="a",
+                date="2026-04-15",
+                key_actions=["lots of narrative"],
+                files_touched=["a.py", "b.py"],
+                project_focus=["proj"],
+            )
+        ],
+        next_cursor=None,
+        has_more=False,
+    )
+    full = page.to_dict()
+    assert "key_actions" in full["sessions"][0]
+    assert "files_touched" in full["sessions"][0]
+
+    summary = page.to_dict(summary=True)
+    assert "key_actions" not in summary["sessions"][0]
+    assert "files_touched" not in summary["sessions"][0]
+    # Identifying fields stay.
+    assert summary["sessions"][0]["agent"] == "a"
+    assert summary["sessions"][0]["date"] == "2026-04-15"
+    assert summary["sessions"][0]["project_focus"] == ["proj"]
 
 
 # -- get_agent_manifest --------------------------------------------------------

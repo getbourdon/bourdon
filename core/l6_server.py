@@ -277,17 +277,33 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         agent: str | None = None,
         access_level: str = "public",
         include_private: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+        summary: bool = False,
     ) -> dict:
         """
-        Return sessions across agents (or a single agent) since a given date.
+        Return a page of sessions across agents (or a single agent).
 
         Parameters
         ----------
         since : str, optional
-            ISO 8601 date (``YYYY-MM-DD``) or datetime. When omitted,
-            returns everything the store knows.
+            ISO 8601 date (``YYYY-MM-DD``) or datetime. When omitted AND
+            ``cursor`` is omitted, the store applies a 14-day default
+            window so the first call from a naive caller doesn't pull
+            the entire history.
         agent : str, optional
             Filter to one agent's sessions.
+        limit : int, optional
+            Page size. Defaults to 20, capped at 100.
+        cursor : str, optional
+            Opaque token from a previous response's ``next_cursor``.
+            Pagination loop: call once, then keep passing the most recent
+            ``next_cursor`` until ``has_more`` is false. Re-pass any
+            ``since`` / ``agent`` filters on each page.
+        summary : bool, optional
+            When true, omit ``key_actions`` and ``files_touched`` from
+            each session row. Useful for timeline/dashboard callers that
+            only need date + agent + project focus.
         """
         cutoff: datetime | None = None
         if since:
@@ -304,18 +320,42 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
                     cutoff = datetime.combine(parsed, _time.min)
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
-        results = store.list_recent_work(
-            since=cutoff,
-            agent=agent,
-            include_private=include_private,
-            access_level=access_level,
-        )
+        try:
+            page = store.list_recent_work(
+                since=cutoff,
+                agent=agent,
+                include_private=include_private,
+                access_level=access_level,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as exc:
+            # Bad cursor token -- surface to the caller rather than silently
+            # treating it as a fresh first page.
+            return {
+                "error": str(exc),
+                "since": since,
+                "agent": agent,
+                "access_level": access_level,
+                "include_private": include_private,
+                "limit": limit,
+                "cursor": cursor,
+                "summary": summary,
+                "sessions": [],
+                "next_cursor": None,
+                "has_more": False,
+            }
         return {
             "since": since,
             "agent": agent,
             "access_level": access_level,
             "include_private": include_private,
-            "sessions": [s.to_dict() for s in results],
+            "limit": limit,
+            "cursor": cursor,
+            "summary": summary,
+            "sessions": [s.to_dict(summary=summary) for s in page.sessions],
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
         }
 
     @mcp.tool()
