@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -231,13 +232,40 @@ def _session_visibility(session: dict) -> str:
 def _resolve_access_level(
     include_private: bool = False, access_level: str | None = None
 ) -> str:
-    """Resolve access level, keeping `include_private` as a compatibility shim."""
-    if access_level is None:
-        return "private" if include_private else "public"
-    normalized = access_level.strip().lower()
-    if normalized not in {"public", "team", "private"}:
-        raise ValueError(f"unsupported access_level: {access_level}")
-    return normalized
+    """Resolve access level, keeping `include_private` as a compatibility shim.
+
+    Default is ``public`` (most restrictive view of federation content).
+    For single-user federations where the user trusts their own agents,
+    set ``BOURDON_DEFAULT_ACCESS_LEVEL=team`` (or ``private``) in the
+    environment. Without this override, three of five shipping adapters
+    (Codex always, Copilot + Cursor by default policy) tag entities
+    ``team``, which are silently filtered from default ``public`` queries.
+    Finding #2 from the Layer 1 federation work.
+
+    Precedence:
+      1. Explicit `access_level=` argument
+      2. `include_private=True` -> "private"
+      3. `BOURDON_DEFAULT_ACCESS_LEVEL` env var
+      4. "public" (existing default)
+    """
+    if access_level is not None:
+        normalized = access_level.strip().lower()
+        if normalized not in {"public", "team", "private"}:
+            raise ValueError(f"unsupported access_level: {access_level}")
+        return normalized
+    if include_private:
+        return "private"
+    env_default = os.environ.get("BOURDON_DEFAULT_ACCESS_LEVEL")
+    if env_default:
+        normalized = env_default.strip().lower()
+        if normalized in {"public", "team", "private"}:
+            return normalized
+        logger.warning(
+            "BOURDON_DEFAULT_ACCESS_LEVEL=%r is not public/team/private; "
+            "falling back to public.",
+            env_default,
+        )
+    return "public"
 
 
 def _visibility_rank(value: str) -> int:
@@ -387,15 +415,32 @@ class L6Store:
         Build a visibility-filtered manifest for recognition-time matching.
 
         The result is intentionally small: known entities are merged across
-        agents by name/type, with aliases and source-agent summaries preserved.
-        It is shaped like an L5 manifest so ``recognition_first`` can consume it
-        directly without knowing about the federation store.
+        agents by **name only** (case-insensitive), with aliases, types,
+        and source-agent summaries preserved. It is shaped like an L5
+        manifest so ``recognition_first`` can consume it directly without
+        knowing about the federation store.
+
+        Each merged entity row carries:
+            - ``type``: canonical (first-seen) type for backward compat
+            - ``types``: full list of types seen across agents (Finding #1)
+            - ``source_agents``: every agent that contributed to this row
+            - ``summaries``: per-agent summary strings keyed by agent_id
+
+        Finding #1 from Layer 1 federation work: previously dedupe was by
+        ``(name, type)``, so Cursor's inferred ``project`` and Copilot's
+        ``concept`` for the same name produced two rows. Now they
+        produce one row whose ``types`` lists both, matching the
+        same-name-is-same-entity intuition.
+
+        Finding #3 from Layer 1: this also brings ``build_recognition_manifest``
+        in line with ``find_entity``, which already dedupes by name only.
+        The two surfaces no longer disagree on row counts.
         """
         resolved_access = _resolve_access_level(
             include_private=include_private,
             access_level=access_level,
         )
-        entities_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        entities_by_key: dict[str, dict[str, Any]] = {}
         recent_sessions: list[dict[str, Any]] = []
 
         for agent_id, manifest in sorted(self._manifests.items()):
@@ -409,12 +454,18 @@ class L6Store:
                     continue
 
                 entity_type = str(entity.get("type") or "topic")
-                key = (name.strip().lower(), entity_type.lower())
+                key = name.strip().lower()
                 merged = entities_by_key.setdefault(
                     key,
                     {
                         "name": name.strip(),
+                        # type stays as the first-seen value for backward
+                        # compatibility (recognition_runtime + downstream
+                        # consumers read entity["type"] as a single string).
                         "type": entity_type,
+                        # types is the new federation-aware field: every
+                        # distinct type any agent applied to this name.
+                        "types": [],
                         "aliases": [],
                         "summary": str(entity.get("summary") or ""),
                         "summaries": {},
@@ -424,6 +475,7 @@ class L6Store:
                     },
                 )
 
+                _append_unique(merged["types"], entity_type)
                 _append_unique(merged["source_agents"], agent_id)
                 for alias in entity.get("aliases") or []:
                     if isinstance(alias, str) and alias.strip():
