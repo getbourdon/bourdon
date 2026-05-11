@@ -34,10 +34,12 @@ Design invariants
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,58 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_LIBRARY_PATH = Path.home() / "agent-library"
+
+# Pagination bounds for list_recent_work.
+# - DEFAULT_LIMIT shipped at 20 to keep first-call payloads cheap; this is the
+#   number that prevented the Layer 3 acceptance stall in Claude Desktop where
+#   an unbounded 83-session response was choking the chat UI on serialize +
+#   context inject.
+# - MAX_LIMIT caps explicit asks to keep a hostile caller from pulling the
+#   whole store in one go.
+# - DEFAULT_SINCE_DAYS is the time-window throttle when the caller passes
+#   neither `since` nor `cursor`. Callers who genuinely want everything pass
+#   `since=2020-01-01` (or earlier) explicitly.
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 100
+DEFAULT_SINCE_DAYS = 14
+
+
+def _encode_cursor(offset: int) -> str:
+    """Encode a pagination position as an opaque base64 token.
+
+    The cursor encodes an integer offset into the post-sort, post-filter
+    session list. Sessions are sorted newest-first, deterministically
+    within the same date by (agent, source index). The opaque format is
+    base64-encoded JSON ``{"offset": N}`` so it stays both URL-safe and
+    debuggable if anyone needs to look at one.
+
+    Stale-cursor caveat: ``L6Store`` reload between paginated calls can
+    shift offsets. For a single-user federation paginating quickly
+    through a stable snapshot, this is fine. Callers paginating across
+    reloads should re-issue the first call.
+    """
+    payload = json.dumps({"offset": offset}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str | None) -> int:
+    """Decode a cursor back to its offset. Returns 0 for None.
+
+    Raises ``ValueError`` if the cursor is non-empty and unreadable -- the
+    caller will surface that to the MCP client rather than silently
+    pretending it was a fresh first page.
+    """
+    if cursor is None or cursor == "":
+        return 0
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        data = json.loads(raw)
+        offset = int(data["offset"])
+        if offset < 0:
+            raise ValueError("negative offset")
+        return offset
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid cursor: {cursor!r}") from exc
 
 
 # -- Result types --------------------------------------------------------------
@@ -83,15 +137,53 @@ class SessionRef:
     key_actions: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, summary: bool = False) -> dict[str, Any]:
+        """Serialize. ``summary=True`` omits the narrative-weight fields
+        (``key_actions`` and ``files_touched``) for lightweight callers
+        that only need the timeline shape."""
+        base: dict[str, Any] = {
             "agent": self.agent,
             "date": self.date,
             "cwd": self.cwd,
             "project_focus": self.project_focus,
-            "key_actions": self.key_actions,
-            "files_touched": self.files_touched,
         }
+        if not summary:
+            base["key_actions"] = self.key_actions
+            base["files_touched"] = self.files_touched
+        return base
+
+
+@dataclass
+class PaginatedSessions:
+    """Result of a paginated :meth:`L6Store.list_recent_work` call.
+
+    ``sessions`` is one page of newest-first results. ``next_cursor`` is
+    the opaque token to pass back for the next page, or ``None`` when
+    this is the last page. ``has_more`` is the boolean form of the same
+    signal for clients that prefer not to inspect the cursor.
+    """
+
+    sessions: list[SessionRef] = field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+    def to_dict(self, summary: bool = False) -> dict[str, Any]:
+        return {
+            "sessions": [s.to_dict(summary=summary) for s in self.sessions],
+            "next_cursor": self.next_cursor,
+            "has_more": self.has_more,
+        }
+
+    # Lightweight iteration / indexing / len support so call sites that just
+    # want the session list keep working without explicit `.sessions` access.
+    def __iter__(self):
+        return iter(self.sessions)
+
+    def __len__(self) -> int:
+        return len(self.sessions)
+
+    def __getitem__(self, index):
+        return self.sessions[index]
 
 
 @dataclass
@@ -434,26 +526,60 @@ class L6Store:
         agent: str | None = None,
         include_private: bool = False,
         access_level: str | None = None,
-    ) -> list[SessionRef]:
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> PaginatedSessions:
         """
-        Flatten sessions from one or all agents into a unified list.
+        Flatten sessions from one or all agents into a unified, paginated list.
+
+        Returns a :class:`PaginatedSessions` (iterable + len-aware) so simple
+        callers can ``for s in result:`` while pagination-aware callers read
+        ``result.next_cursor`` / ``result.has_more``.
 
         Parameters
         ----------
         since : datetime, optional
-            Drop sessions whose ``date`` is earlier than this. ``date`` is
-            ISO 8601 date-only; we compare against ``since.date()``.
+            Drop sessions whose ``date`` is earlier than this. When both
+            ``since`` and ``cursor`` are ``None`` the store applies a
+            14-day default window (``DEFAULT_SINCE_DAYS``) to keep first
+            calls from pulling the entire store. Callers who genuinely
+            want everything pass an explicit ``since`` far in the past.
         agent : str, optional
-            Limit to this agent's sessions. If None, include all agents.
+            Filter to one agent's sessions.
         include_private : bool
-            Whether to include PRIVATE-tagged sessions. Default False.
+            Compatibility shim: ``True`` is equivalent to ``access_level="private"``.
+        access_level : str, optional
+            ``public`` / ``team`` / ``private``. See class docstring for invariants.
+        limit : int, optional
+            Max sessions to return for this page. Defaults to
+            ``DEFAULT_LIMIT`` (20); caps at ``MAX_LIMIT`` (100). Values
+            below 1 are coerced to 1.
+        cursor : str, optional
+            Opaque token from a previous call's ``next_cursor`` field.
+            When present, the default-since window is NOT applied -- the
+            caller is responsible for re-passing ``since`` if they want
+            to keep the same filter across pages.
         """
+        # Apply the default since window only on a fresh first call, not
+        # mid-pagination. Pagination relies on caller passing the same
+        # filter args; if they only pass cursor, we don't want to re-apply
+        # the default-since on top of an in-flight cursor offset.
+        if since is None and cursor is None:
+            since = datetime.now(timezone.utc) - timedelta(days=DEFAULT_SINCE_DAYS)
+
+        # Normalize limit -- clamp [1, MAX_LIMIT].
+        effective_limit = DEFAULT_LIMIT if limit is None else int(limit)
+        if effective_limit < 1:
+            effective_limit = 1
+        if effective_limit > MAX_LIMIT:
+            effective_limit = MAX_LIMIT
+
         cutoff: date | None = since.date() if since is not None else None
         resolved_access = _resolve_access_level(
             include_private=include_private,
             access_level=access_level,
         )
-        results: list[SessionRef] = []
+        all_results: list[SessionRef] = []
         manifests = (
             {agent: self._manifests[agent]}
             if agent and agent in self._manifests
@@ -473,7 +599,7 @@ class L6Store:
                         parsed = None
                     if parsed is None or parsed < cutoff:
                         continue
-                results.append(
+                all_results.append(
                     SessionRef(
                         agent=agent_id,
                         date=str(session_date or ""),
@@ -483,8 +609,24 @@ class L6Store:
                         files_touched=list(session.get("files_touched") or []),
                     )
                 )
-        results.sort(key=lambda s: s.date, reverse=True)
-        return results
+        # Stable sort: primary key date (newest-first), secondary key agent
+        # (lexicographic) so same-date sessions paginate in a predictable
+        # order. Cursor reliability depends on this ordering being stable
+        # across reloads of the same store contents.
+        all_results.sort(key=lambda s: (s.date, s.agent), reverse=True)
+
+        # Slice the requested page off.
+        offset = _decode_cursor(cursor)
+        page = all_results[offset : offset + effective_limit]
+        next_offset = offset + len(page)
+        has_more = next_offset < len(all_results)
+        next_cursor = _encode_cursor(next_offset) if has_more else None
+
+        return PaginatedSessions(
+            sessions=page,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
     def get_cross_agent_summary(
         self,
