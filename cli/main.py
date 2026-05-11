@@ -323,6 +323,64 @@ def _handle_dogfood(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def _handle_serve(args: argparse.Namespace) -> int:
+    """Launch the L6 federation MCP server.
+
+    Thin wrapper around ``python -m core.l6_server`` that prints an
+    onboarding banner (library path, agents loaded, transport, paste-ready
+    MCP config snippet) before handing off to the underlying server.
+    Stdio transport blocks until the connecting MCP client disconnects;
+    HTTP transport blocks until interrupted. Either way, this handler
+    returns the server's exit code, or 1 if startup fails.
+    """
+    from core.l6_server import L6Store, create_l6_server  # type: ignore[attr-defined]
+
+    library_path = Path(args.library) if getattr(args, "library", None) else None
+    if library_path is None:
+        from core.l6_store import DEFAULT_LIBRARY_PATH
+        library_path = DEFAULT_LIBRARY_PATH
+
+    transport = getattr(args, "transport", "stdio")
+    port = getattr(args, "port", 7500)
+
+    store = L6Store(library_path)
+    agents = store.list_agents()
+
+    if getattr(args, "quiet", False) is False:
+        # Banner goes to stderr so stdio transport (which uses stdout for the
+        # MCP protocol) stays clean.
+        print(f"Bourdon L6 server", file=sys.stderr)
+        print(f"  library:   {library_path}", file=sys.stderr)
+        print(f"  agents:    {len(agents)} loaded ({', '.join(agents) if agents else 'none'})", file=sys.stderr)
+        print(f"  transport: {transport}", file=sys.stderr)
+        if transport == "http":
+            print(f"  port:      {port}", file=sys.stderr)
+        print("", file=sys.stderr)
+        if transport == "stdio":
+            print("MCP client config (stdio):", file=sys.stderr)
+            print('  {"command": "bourdon", "args": ["serve"]}', file=sys.stderr)
+        else:
+            print(f"MCP client config (http): http://127.0.0.1:{port}/", file=sys.stderr)
+        print("", file=sys.stderr)
+
+    server = create_l6_server(store)
+    try:
+        if transport == "stdio":
+            server.run()
+        else:
+            try:
+                server.run(transport="http", port=port)
+            except TypeError:
+                print(
+                    "WARN: this fastmcp version does not accept transport='http'; falling back to stdio.",
+                    file=sys.stderr,
+                )
+                server.run()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def _handle_export_all(args: argparse.Namespace) -> int:
     """Export L5 manifests for all healthy adapters."""
     access_level = args.access_level
@@ -1025,6 +1083,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the machine-readable YAML report to this path as well as stdout",
     )
     dogfood_cmd.set_defaults(func=_handle_dogfood)
+
+    serve_cmd = subparsers.add_parser(
+        "serve",
+        help="Launch the L6 federation MCP server (stdio by default)",
+    )
+    serve_cmd.add_argument(
+        "--library",
+        type=Path,
+        default=None,
+        help=f"Path to agent-library (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    serve_cmd.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="MCP transport (default: stdio -- the MCP default)",
+    )
+    serve_cmd.add_argument(
+        "--port",
+        type=int,
+        default=7500,
+        help="Port for HTTP transport (ignored for stdio, default: 7500)",
+    )
+    serve_cmd.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the onboarding banner",
+    )
+    serve_cmd.set_defaults(func=_handle_serve)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")

@@ -103,12 +103,23 @@ This generic Codex path is designed for org-wide distribution: local Codex memor
 ```bash
 bourdon prepare-turn "Can we keep working on Bourdon?" --access-level team
 bourdon deeper-context "Can we keep working on Bourdon?" --access-level team
-python -m core.l6_server --transport stdio
+bourdon serve   # launches the L6 MCP server with an onboarding banner
 ```
 
 `prepare-turn` reads the L6 federation library and returns immediate recognition
 plus a bounded prompt fragment. `deeper-context` is the companion L2 retrieval
-surface; it returns empty context when L2 is disabled.
+surface; it returns empty context when L2 is disabled. `bourdon serve` is a
+wrapper around `python -m core.l6_server` with a friendlier banner and the
+same `--transport` / `--port` flags.
+
+### See it work end-to-end
+
+The acceptance demo — one agent writes, a different agent reads via Bourdon
+MCP — is documented step-by-step in [`docs/PROOF.md`](docs/PROOF.md). Per-host
+MCP wiring lives in [`docs/integrations/`](docs/integrations/) (Claude Desktop,
+OpenManus, more on the way). The `bourdon dogfood` command runs the same
+round-trip against your local stores and prints a per-adapter matrix — useful
+for verifying the federation is healthy before standing up the demo.
 
 ## Quick Start (Hybrid Memory Cycle)
 

@@ -1,0 +1,124 @@
+# Bourdon × Claude Desktop
+
+Claude Desktop is Anthropic's MCP host with the simplest setup story: a single JSON config file, no plugin marketplace, no per-workspace surface. That makes it the lowest-friction reader for cross-agent federation. **If you only wire one MCP host, wire this one** — it's the demo described in [`docs/PROOF.md`](../PROOF.md).
+
+Claude Desktop is a **reader**. It doesn't write its own L5 manifests yet (no Claude Desktop adapter ships in Bourdon as of v0.4.1). You federate other agents' content *into* Claude Desktop.
+
+## What this gives you
+
+Once configured, the Bourdon tools become callable from any Claude Desktop conversation. Ask the model anything that needs cross-session or cross-agent memory and it'll call into Bourdon transparently. Concrete queries that work after a single `bourdon claude-code export`:
+
+- *"What projects has Claude Code touched this week?"*
+- *"Find everything across my agents that mentions <project name>."*
+- *"What was the most recent session focused on <topic>?"*
+
+The full tool inventory matches the OpenManus integration; see the table in [`docs/integrations/openmanus.md`](openmanus.md#why-this-works) for what each tool does. Same server, same surface.
+
+## Prerequisites
+
+1. **Bourdon installed in a Python environment Claude Desktop can launch.** `pip install 'bourdon[server]'` in the global Python is the simplest path. If you use a venv, you'll need the absolute path to the venv's `bourdon` binary in the config — see "PATH gotcha" below.
+2. **At least one L5 manifest.** Run `bourdon claude-code export` once to seed `~/agent-library/agents/claude-code.l5.yaml`. Verify with `bourdon serve` — the banner should show `agents: 1 loaded`.
+3. **Claude Desktop installed and at least once-launched** so its config directory exists.
+
+## The config
+
+Locate Claude Desktop's MCP config file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json` (path may vary; check Claude Desktop's docs)
+
+If the file doesn't exist, create it. Add a `bourdon` entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "bourdon": {
+      "command": "bourdon",
+      "args": ["serve", "--quiet"]
+    }
+  }
+}
+```
+
+If Claude Desktop already had other MCP servers configured, just add the `bourdon` key alongside them — don't replace the whole object.
+
+Restart Claude Desktop. The Bourdon tools should appear in the model's tool list.
+
+## PATH gotcha
+
+Claude Desktop launches MCP servers as subprocesses with a minimal PATH — often just system defaults, not your interactive shell's PATH. If `bourdon` lives in a venv, the bare `"command": "bourdon"` won't resolve and the MCP server will silently fail to start.
+
+Symptom: Bourdon tools never appear in the conversation, no obvious error, and Claude Desktop's MCP log says something like `command not found` or the server process exits immediately.
+
+Fix: use the absolute path.
+
+```json
+{
+  "mcpServers": {
+    "bourdon": {
+      "command": "/Users/you/path/to/.venv/bin/bourdon",
+      "args": ["serve", "--quiet"]
+    }
+  }
+}
+```
+
+To find the right path: `which bourdon` in the shell where you ran `pip install bourdon`.
+
+## Custom library path
+
+If your `agent-library/` lives somewhere other than `~/agent-library/` (rare, but the `bourdon serve --library` flag supports it):
+
+```json
+{
+  "mcpServers": {
+    "bourdon": {
+      "command": "bourdon",
+      "args": ["serve", "--quiet", "--library", "/path/to/agent-library"]
+    }
+  }
+}
+```
+
+## Visibility (the access-level question)
+
+Three of five adapters tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
+
+There are two ways to handle this from Claude Desktop:
+
+1. **Ask the model to pass the access level explicitly.** Most calls accept an `access_level` parameter. Phrase queries like *"Call `list_recent_work` with `access_level='team'`."*
+2. **Wait for v0.5.0**, which is expected to add a config flag that flips the L6 default to `team` for single-user installs. Tracked in claude-brain Finding 2.
+
+The second is friendlier but isn't shipped yet.
+
+## Verifying it works
+
+The full diagnostic flow:
+
+```
+# 1. Verify Bourdon can see at least one manifest.
+bourdon serve --quiet
+# Expect: "agents: N loaded (claude-code, ...)"
+# Ctrl-C to stop.
+
+# 2. Verify the round-trip works on real data (without Claude Desktop in the loop).
+bourdon dogfood
+# Expect: PASS for any plantable adapter you have set up.
+
+# 3. In Claude Desktop, ask:
+"Call the Bourdon MCP tool `list_recent_work` with `access_level='team'` and show me the raw result."
+# Expect: a structured response with sessions from your federated agents.
+
+# 4. If step 3 works but natural-language queries don't, the model isn't choosing
+# to invoke Bourdon. That's a prompting / instructions issue, not an integration
+# issue. Add a system prompt fragment like:
+#   "When the user asks about past work or cross-agent context, call the
+#   Bourdon MCP tools (`list_recent_work`, `find_entity`, etc.)."
+```
+
+## Known limitations
+
+- **No write side yet.** Claude Desktop doesn't have a Bourdon adapter; it can't *contribute* to the federation, only read from it. If you want what happens in Claude Desktop sessions to be part of the federation, you'd need to either (a) wait for a future Claude Desktop adapter or (b) manually summarize and feed back into another agent's store.
+- **No automatic refresh.** The L6 server reads `~/agent-library/` on startup. New manifests written *while* Claude Desktop has the MCP server running won't show up until you restart Claude Desktop. (Future: file-watching in `L6Store`, tracked but not scheduled.)
+- **Subprocess lifecycle quirks.** If Claude Desktop's MCP subprocess management gets confused, the Bourdon server can end up in a half-attached state. `pkill -f "core.l6_server"` clears it; restarting Claude Desktop respawns cleanly.
