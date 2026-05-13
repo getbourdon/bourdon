@@ -18,14 +18,15 @@ Once Bourdon's L6 is registered, every tool the L6 server exposes becomes a tool
 | `get_cross_agent_summary` | Summarize a project's state across every agent that's worked on it |
 | `prepare_recognition_context` | Format a Bourdon recognition payload for a given prompt — the recognition-first runtime hook |
 | `get_deeper_context` | Pull deeper episodic context (L2) for a prompt when the agent has the response time |
+| `commit_to_federation` | (v0.6.0+) Write-side tool — the OpenManus agent can contribute its own entities and sessions to the federation, not just read from it |
 
 Plus the `agent-library://` MCP resources (`agent-library://agents`, `agent-library://agents/{id}/memory`, `agent-library://entities/{name}`).
 
 ## Prerequisites
 
-1. **Install Bourdon.** `pip install bourdon` (currently 0.3.0). The `bourdon` and `python -m core.l6_server` commands must both work in the same Python environment your OpenManus agent runs in (or in a Python that's on PATH for the OpenManus user).
-2. **Have at least one L5 manifest.** Bourdon needs something to federate. The fastest path: enable Bourdon's Claude Code adapter via the SessionEnd hook (see [`docs/agent-integration-status.md`](../agent-integration-status.md)) so that ending a Claude Code session writes `~/agent-library/agents/claude-code.l5.yaml`. After one session, you have something to query.
-3. **Verify the L6 server starts.** Run `python -m core.l6_server --library ~/agent-library` once in a terminal. You should see `Bourdon L6 server starting -- library=...` and the process should stay attached on stdio.
+1. **Install Bourdon.** `pip install 'bourdon[server]'` (latest release; see [GitHub Releases](https://github.com/getbourdon/bourdon/releases) for the current version). The `bourdon` CLI must be on PATH for the OpenManus user — see the [PATH gotcha](#path-gotcha) note below if it isn't.
+2. **Have at least one L5 manifest.** Bourdon needs something to federate. The fastest path: enable Bourdon's Claude Code adapter via the SessionEnd hook (see [`docs/integrations/claude-code.md`](claude-code.md) or [`docs/agent-integration-status.md`](../agent-integration-status.md)) so that ending a Claude Code session writes `~/agent-library/agents/claude-code.l5.yaml`. After one session, you have something to query.
+3. **Verify the L6 server starts.** Run `bourdon serve --quiet` once in a terminal. The process should start and stay attached on stdio. Press Ctrl-C to stop.
 
 ## The config block
 
@@ -36,8 +37,8 @@ Add Bourdon to your OpenManus `config/mcp.json` (create the file if it doesn't e
   "mcpServers": {
     "bourdon": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "core.l6_server"]
+      "command": "bourdon",
+      "args": ["serve", "--quiet"]
     }
   }
 }
@@ -52,8 +53,8 @@ If you want to point at a specific agent-library directory (e.g., a shared NAS m
   "mcpServers": {
     "bourdon": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "core.l6_server", "--library", "/mnt/nas/agent-library"]
+      "command": "bourdon",
+      "args": ["serve", "--quiet", "--library", "/mnt/nas/agent-library"]
     }
   }
 }
@@ -62,7 +63,7 @@ If you want to point at a specific agent-library directory (e.g., a shared NAS m
 If you'd rather run L6 as a long-lived HTTP service (useful when OpenManus runs in a container that can't spawn subprocesses), start it separately and use the `sse` transport:
 
 ```sh
-python -m core.l6_server --transport http --port 7500 --library ~/agent-library
+bourdon serve --transport http --port 7500 --library ~/agent-library
 ```
 
 ```json
@@ -84,8 +85,30 @@ python -m core.l6_server --transport http --port 7500 --library ~/agent-library
 
 If the agent says it has no memory tools, double-check:
 - The config file location matches what OpenManus reads on startup (`config/mcp.json` by default; verify against `app/config.py` in your OpenManus version).
-- The `python` command in the `command` field is the same Python that has `bourdon` installed (`which python` should resolve to a Python where `python -m core.l6_server` works).
+- The `bourdon` binary is on the PATH OpenManus inherits when it spawns the MCP subprocess. See the [PATH gotcha](#path-gotcha) below — replacing `"command": "bourdon"` with the absolute path to the venv's `bourdon` binary is the standard fix.
 - `~/agent-library/agents/` contains at least one `.l5.yaml` file. Empty libraries return nothing, which the agent might describe as "no memory available."
+
+## PATH gotcha
+
+MCP hosts launch stdio servers as subprocesses with a minimal PATH — often just system defaults, not the user's shell PATH. If `bourdon` lives in a venv, the bare `"command": "bourdon"` won't resolve and the server will silently fail to start.
+
+Symptom: Bourdon tools never appear in OpenManus's tool list, no obvious error in OpenManus's logs, and the MCP subprocess exits immediately.
+
+Fix: use the absolute path to the venv's `bourdon` binary.
+
+```json
+{
+  "mcpServers": {
+    "bourdon": {
+      "type": "stdio",
+      "command": "/Users/you/path/to/.venv/bin/bourdon",
+      "args": ["serve", "--quiet"]
+    }
+  }
+}
+```
+
+To find the right path: run `which bourdon` (macOS/Linux) or `Get-Command bourdon` (Windows PowerShell) in the shell where you ran `pip install bourdon`.
 
 ## Visibility model
 
