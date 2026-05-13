@@ -21,6 +21,14 @@ compatibility_date = "2026-04-27"
 # while custom-domain DNS migration is in flight.
 workers_dev = true
 
+# Workers Observability -- server-side request logs at 100% sampling.
+# Powers the in-dashboard analytics view (requests, status codes, geo,
+# top paths) without adding any client-side JavaScript, cookies, or
+# third-party trackers. This is bourdon.ai's only analytics surface;
+# see web/privacy.html for the disclosure.
+[observability]
+enabled = true
+
 [assets]
 directory = "./web"
 not_found_handling = "single-page-application"
