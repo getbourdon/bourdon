@@ -116,8 +116,8 @@ same `--transport` / `--port` flags.
 
 The acceptance demo — one agent writes, a different agent reads via Bourdon
 MCP — is documented step-by-step in [`docs/PROOF.md`](docs/PROOF.md). Per-host
-MCP wiring lives in [`docs/integrations/`](docs/integrations/) (Claude Desktop,
-OpenManus, more on the way). The `bourdon dogfood` command runs the same
+MCP wiring lives in [`docs/integrations/`](docs/integrations/) (Claude Code,
+Claude Desktop, Cursor, OpenManus, more on the way). The `bourdon dogfood` command runs the same
 round-trip against your local stores and prints a per-adapter matrix — useful
 for verifying the federation is healthy before standing up the demo.
 
