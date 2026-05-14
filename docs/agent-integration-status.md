@@ -51,13 +51,15 @@ an MCP source.
   `python -m core.l6_server` (stdio) — see
   [`docs/integrations/openmanus.md`](integrations/openmanus.md) for the literal
   config block and walkthrough.
-- After wiring, the OpenManus agent gets all six L6 tools
+- After wiring, the OpenManus agent gets all seven L6 tools
   (`query_agent_memory`, `list_recent_work`, `find_entity`,
+  `commit_to_federation`,
   `get_cross_agent_summary`, `prepare_recognition_context`,
   `get_deeper_context`) plus the `agent-library://` resources.
-- OpenManus currently consumes Bourdon but does not publish into it. A future
-  Python adapter (per `docs/AUTHORING_AN_ADAPTER.md`) would close the loop once
-  OpenManus's distilled-memory model stabilizes upstream.
+- OpenManus consumes Bourdon by default via read tools and can **publish**
+  federation updates through `commit_to_federation` whenever the orchestrator
+  surfaces that MCP surface to its model loop (same pattern documented in
+  `docs/AUTHORING_AN_ADAPTER.md` for other cloud-first agents).
 
 ## Cascade (Windsurf)
 

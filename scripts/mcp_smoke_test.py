@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,37 @@ def _parse_args() -> argparse.Namespace:
         default=sys.executable,
         help="Python executable used to launch the Bourdon L6 server.",
     )
+    parser.add_argument(
+        "--federation-write-roundtrip",
+        action="store_true",
+        help=(
+            "Exercise commit_to_federation then verify read-back via find_entity "
+            "(v0.6.0 write path). Prefer --library-path on a disposable directory "
+            "so probes do not accumulate under ~/agent-library."
+        ),
+    )
+    parser.add_argument(
+        "--skip-seeded-library-assertions",
+        action="store_true",
+        help=(
+            "Skip assertions that require a populated federation (e.g. find_entity "
+            "matches for entity-name, entities in get_cross_agent_summary, non-empty "
+            "prepare_recognition_context). Use with a disposable --library-path so an "
+            "empty store can still prove tool wiring or write round-trips."
+        ),
+    )
+    parser.add_argument(
+        "--isolate-federation-write-smoke",
+        action="store_true",
+        help=(
+            "Shorthand: enable --federation-write-roundtrip plus "
+            "--skip-seeded-library-assertions — intended for throwaway --library-path dirs."
+        ),
+    )
     args = parser.parse_args()
+    if args.isolate_federation_write_smoke:
+        args.federation_write_roundtrip = True
+        args.skip_seeded_library_assertions = True
     if not args.recognition_prompt:
         args.recognition_prompt = f"Tell me about {args.entity_name}."
     return args
@@ -104,6 +135,33 @@ async def _run(args: argparse.Namespace) -> int:
             {"prompt": args.recognition_prompt, "access_level": "team"},
         )
 
+        roundtrip_agent_id = ""
+        roundtrip_entity_name = ""
+        commit_result: Any = None
+        verify_roundtrip_result: Any = None
+        if args.federation_write_roundtrip:
+            token = uuid.uuid4().hex[:12]
+            roundtrip_agent_id = f"mcp_smoke_{token}"
+            roundtrip_entity_name = f"McpSmokeEntity_{token}"
+            commit_result = await session.call_tool(
+                "commit_to_federation",
+                {
+                    "agent_id": roundtrip_agent_id,
+                    "agent_type": "other",
+                    "entities": [
+                        {
+                            "name": roundtrip_entity_name,
+                            "summary": "Bourdon MCP write/read-back probe via mcp_smoke_test.",
+                        },
+                    ],
+                    "mode": "merge",
+                },
+            )
+            verify_roundtrip_result = await session.call_tool(
+                "find_entity",
+                {"name": roundtrip_entity_name, "access_level": "team"},
+            )
+
         print("TOOLS:", ", ".join(sorted(tool_names)))
         for label, result in [
             ("FIND_ENTITY_RAW", find_result),
@@ -112,6 +170,14 @@ async def _run(args: argparse.Namespace) -> int:
             ("LIST_RECENT_WORK_RAW", recent_result),
             ("PREPARE_RECOGNITION_CONTEXT_RAW", recognition_result),
             ("GET_DEEPER_CONTEXT_RAW", deeper_result),
+            *(
+                [
+                    ("COMMIT_TO_FEDERATION_RAW", commit_result),
+                    ("FIND_ENTITY_VERIFY_ROUNDTRIP_RAW", verify_roundtrip_result),
+                ]
+                if args.federation_write_roundtrip
+                else []
+            ),
         ]:
             print(f"{label}:")
             for item in result.content:
@@ -124,6 +190,10 @@ async def _run(args: argparse.Namespace) -> int:
         recent_payload = _first_json_payload(recent_result)
         recognition_payload = _first_json_payload(recognition_result)
         deeper_payload = _first_json_payload(deeper_result)
+        commit_payload = _first_json_payload(commit_result) if commit_result else {}
+        verify_roundtrip_payload = (
+            _first_json_payload(verify_roundtrip_result) if verify_roundtrip_result else {}
+        )
         report["payloads"] = {
             "find_entity": find_payload,
             "get_cross_agent_summary": summary_payload,
@@ -132,6 +202,9 @@ async def _run(args: argparse.Namespace) -> int:
             "prepare_recognition_context": recognition_payload,
             "get_deeper_context": deeper_payload,
         }
+        if args.federation_write_roundtrip:
+            report["payloads"]["commit_to_federation"] = commit_payload
+            report["payloads"]["find_entity_verification_roundtrip"] = verify_roundtrip_payload
 
         if args.assertions:
             required_tools = {
@@ -141,48 +214,52 @@ async def _run(args: argparse.Namespace) -> int:
                 "list_recent_work",
                 "prepare_recognition_context",
                 "query_agent_memory",
+                "commit_to_federation",
             }
             missing_tools = sorted(required_tools.difference(set(tool_names)))
             report["checks"]["required_tools"] = len(missing_tools) == 0
             if missing_tools:
                 raise AssertionError(f"Missing MCP tools: {missing_tools}")
 
-            report["checks"]["find_entity_has_matches"] = bool(
-                find_payload.get("matches")
-            )
-            if not report["checks"]["find_entity_has_matches"]:
-                raise AssertionError(
-                    f"find_entity returned no matches for {args.entity_name}."
+            if not args.skip_seeded_library_assertions:
+                report["checks"]["find_entity_has_matches"] = bool(
+                    find_payload.get("matches")
                 )
-
-            cursor_summary = find_payload["matches"][0].get("summaries", {}).get(
-                "cursor", ""
-            )
-            if args.expected_bourdon_summary:
-                report["checks"]["bourdon_summary_matches_expected"] = (
-                    cursor_summary == args.expected_bourdon_summary
-                )
-                if not report["checks"]["bourdon_summary_matches_expected"]:
+                if not report["checks"]["find_entity_has_matches"]:
                     raise AssertionError(
-                        "Unexpected summary. Expected "
-                        f"{args.expected_bourdon_summary!r}, got {cursor_summary!r}"
+                        f"find_entity returned no matches for {args.entity_name}."
+                    )
+
+                cursor_summary = find_payload["matches"][0].get("summaries", {}).get(
+                    "cursor", ""
+                )
+                if args.expected_bourdon_summary:
+                    report["checks"]["bourdon_summary_matches_expected"] = (
+                        cursor_summary == args.expected_bourdon_summary
+                    )
+                    if not report["checks"]["bourdon_summary_matches_expected"]:
+                        raise AssertionError(
+                            "Unexpected summary. Expected "
+                            f"{args.expected_bourdon_summary!r}, got {cursor_summary!r}"
+                        )
+                else:
+                    report["checks"]["bourdon_summary_matches_expected"] = True
+
+                report["checks"]["cross_agent_summary_has_entities"] = bool(
+                    summary_payload.get("entities")
+                )
+                if not report["checks"]["cross_agent_summary_has_entities"]:
+                    raise AssertionError("get_cross_agent_summary returned no entities.")
+
+                report["checks"]["query_agent_memory_has_matches"] = bool(
+                    query_payload.get("matches")
+                )
+                if not report["checks"]["query_agent_memory_has_matches"]:
+                    raise AssertionError(
+                        f"query_agent_memory returned no matches for {args.query_topic}."
                     )
             else:
-                report["checks"]["bourdon_summary_matches_expected"] = True
-
-            report["checks"]["cross_agent_summary_has_entities"] = bool(
-                summary_payload.get("entities")
-            )
-            if not report["checks"]["cross_agent_summary_has_entities"]:
-                raise AssertionError("get_cross_agent_summary returned no entities.")
-
-            report["checks"]["query_agent_memory_has_matches"] = bool(
-                query_payload.get("matches")
-            )
-            if not report["checks"]["query_agent_memory_has_matches"]:
-                raise AssertionError(
-                    f"query_agent_memory returned no matches for {args.query_topic}."
-                )
+                report["checks"]["seeded_library_skipped"] = True
 
             report["checks"]["list_recent_work_has_sessions_field"] = (
                 "sessions" in recent_payload
@@ -190,24 +267,34 @@ async def _run(args: argparse.Namespace) -> int:
             if not report["checks"]["list_recent_work_has_sessions_field"]:
                 raise AssertionError("list_recent_work response is missing sessions field.")
 
-            recognition_check = bool(recognition_payload.get("recognition"))
-            report["checks"]["prepare_recognition_context_has_recognition"] = (
-                recognition_check
-            )
-            if not recognition_check:
-                raise AssertionError(
-                    "prepare_recognition_context returned no recognition "
-                    f"for {args.recognition_prompt!r}."
+            if not args.skip_seeded_library_assertions:
+                recognition_check = bool(recognition_payload.get("recognition"))
+                report["checks"]["prepare_recognition_context_has_recognition"] = (
+                    recognition_check
                 )
+                if not recognition_check:
+                    raise AssertionError(
+                        "prepare_recognition_context returned no recognition "
+                        f"for {args.recognition_prompt!r}."
+                    )
 
-            prompt_context_check = bool(recognition_payload.get("prompt_context"))
-            report["checks"]["prepare_recognition_context_has_prompt_context"] = (
-                prompt_context_check
-            )
-            if not prompt_context_check:
-                raise AssertionError(
-                    "prepare_recognition_context response is missing prompt_context."
+                prompt_context_check = bool(recognition_payload.get("prompt_context"))
+                report["checks"]["prepare_recognition_context_has_prompt_context"] = (
+                    prompt_context_check
                 )
+                if not prompt_context_check:
+                    raise AssertionError(
+                        "prepare_recognition_context response is missing prompt_context."
+                    )
+            else:
+                has_pc = "prompt_context" in recognition_payload
+                report["checks"]["prepare_recognition_context_has_prompt_context_key"] = (
+                    has_pc
+                )
+                if not has_pc:
+                    raise AssertionError(
+                        "prepare_recognition_context response is missing prompt_context key."
+                    )
 
             deeper_context_check = "context" in deeper_payload
             report["checks"]["get_deeper_context_has_context_field"] = (
@@ -215,6 +302,24 @@ async def _run(args: argparse.Namespace) -> int:
             )
             if not deeper_context_check:
                 raise AssertionError("get_deeper_context response is missing context.")
+
+            if args.federation_write_roundtrip:
+                commit_err = commit_payload.get("error")
+                report["checks"]["commit_to_federation_succeeded"] = commit_err is None
+                if commit_err:
+                    raise AssertionError(
+                        f"commit_to_federation failed: {commit_err!r}; "
+                        f"payload keys={sorted(commit_payload)}"
+                    )
+                roundtrip_matches = verify_roundtrip_payload.get("matches") or []
+                report["checks"]["find_entity_verifies_commit_roundtrip"] = bool(
+                    roundtrip_matches
+                )
+                if not roundtrip_matches:
+                    raise AssertionError(
+                        "find_entity found no matches after commit_to_federation "
+                        f"for {roundtrip_entity_name!r} (agent {roundtrip_agent_id!r})."
+                    )
 
     if args.json_report:
         report_path = Path(args.json_report)
