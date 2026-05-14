@@ -209,18 +209,14 @@ def test_adapter_constants():
 # -- Path resolution -----------------------------------------------------------
 
 
-def test_normalize_local_path_converts_windows_path_on_wsl(monkeypatch):
-    monkeypatch.setattr(codex_module.os, "name", "posix")
-
-    path = _normalize_local_path(r"C:\Users\cumul\.codex")
+def test_normalize_local_path_converts_windows_path_on_wsl():
+    path = _normalize_local_path(r"C:\Users\cumul\.codex", os_name="posix")
 
     assert str(path).replace("\\", "/") == "/mnt/c/Users/cumul/.codex"
 
 
-def test_normalize_local_path_converts_wsl_path_for_windows_python(monkeypatch):
-    monkeypatch.setattr(codex_module.os, "name", "nt")
-
-    path = _normalize_local_path("/mnt/c/Users/cumul/.codex")
+def test_normalize_local_path_converts_wsl_path_for_windows_python():
+    path = _normalize_local_path("/mnt/c/Users/cumul/.codex", os_name="nt")
 
     assert str(path).replace("/", "\\") == r"C:\Users\cumul\.codex"
 

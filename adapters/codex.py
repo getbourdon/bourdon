@@ -289,10 +289,11 @@ def _dedupe_preserve(
     return result
 
 
-def _normalize_local_path(path_value: str | Path) -> Path:
+def _normalize_local_path(path_value: str | Path, os_name: str | None = None) -> Path:
     """Normalize Windows/WSL path spellings for the current Python runtime."""
+    runtime_os_name = os.name if os_name is None else os_name
     raw = str(path_value).strip()
-    if os.name == "nt":
+    if runtime_os_name == "nt":
         match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", raw)
         if match:
             drive = match.group(1).upper()
