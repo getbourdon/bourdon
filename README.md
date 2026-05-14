@@ -1,6 +1,6 @@
 # Bourdon
 
-**[bourdon.ai](https://bourdon.ai)** · Cross-agent memory federation for human-AI collaboration.
+**[bourdon.ai](https://bourdon.ai)** · Recognition-first runtime + agent federation memory for human-AI collaboration.
 
 Current AI memory systems are **call-and-repeat** — discrete turns with nothing happening in between. Real human language is **concurrent** — listeners recognize, recall, and formulate *while* speakers are still speaking. Bourdon is the engineering translation of that concurrent structure into AI systems.
 

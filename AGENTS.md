@@ -4,7 +4,7 @@ Guidance for AI agents (Cursor Cloud, Codex Cloud, Claude Code background agents
 
 ## Project overview
 
-Bourdon is a Python 3.10+ cross-agent memory federation protocol (v0.4.1, BSL 1.1 pre-alpha). See `README.md` for the full L0–L6 memory stack architecture and `CONTRIBUTING.md` for contributor setup. Adapter authoring guide at `docs/AUTHORING_AN_ADAPTER.md`; formal contract at `spec/ADAPTER_CONTRACT.md`. The end-to-end cross-agent demo lives at `docs/PROOF.md`.
+Bourdon is a Python 3.10+ **recognition-first runtime + agent federation memory** stack (L0–L6; see `README.md`). See `CONTRIBUTING.md` for contributor setup. Adapter authoring guide at `docs/AUTHORING_AN_ADAPTER.md`; formal contract at `spec/ADAPTER_CONTRACT.md`. The end-to-end cross-agent demo lives at `docs/PROOF.md`.
 
 ## Development environment
 

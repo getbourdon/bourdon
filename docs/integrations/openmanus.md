@@ -16,7 +16,7 @@ Once Bourdon's L6 is registered, every tool the L6 server exposes becomes a tool
 | `list_recent_work` | List recent sessions across all agents (or filtered to one) since a date |
 | `find_entity` | Look up an entity (project, file, concept) across agents and return everywhere it's been touched |
 | `get_cross_agent_summary` | Summarize a project's state across every agent that's worked on it |
-| `prepare_recognition_context` | Format a Bourdon recognition payload for a given prompt — the recognition-first runtime hook |
+| `prepare_recognition_context` | Recognition-first runtime hook — format Bourdon recognition + prompt fragment for federation-backed memory |
 | `get_deeper_context` | Pull deeper episodic context (L2) for a prompt when the agent has the response time |
 | `commit_to_federation` | (v0.6.0+) Write-side tool — the OpenManus agent can contribute its own entities and sessions to the federation, not just read from it |
 
