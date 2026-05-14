@@ -7,7 +7,7 @@ Portable starter kit for projects that want:
 - preflight doctor checks
 - short-index migration and validation
 - short-index regression matrix with fixtures
-- MCP smoke assertions
+- MCP smoke assertions (optionally `--isolate-federation-write-smoke` once you sync the Bourdon copy of `mcp_smoke_test.py`)
 - CI wiring and JSON reports
 
 ## Copy into a new repo

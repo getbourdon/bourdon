@@ -142,6 +142,8 @@ Docs:
 - [`docs/getting-started-memory-cycle.md`](docs/getting-started-memory-cycle.md)
 - [`docs/good-first-issues.md`](docs/good-first-issues.md)
 - [`docs/agent-integration-status.md`](docs/agent-integration-status.md)
+- [`docs/v0.6-status-and-recovery.md`](docs/v0.6-status-and-recovery.md)
+- [`docs/development-workflow.md`](docs/development-workflow.md)
 
 ## Hybrid Memory Tooling
 
@@ -152,7 +154,8 @@ Helper scripts:
 - `scripts/migrate_short_index.py`
 - `scripts/validate_short_index.py`
 - `scripts/build_bourdon_l5.py`
-- `scripts/mcp_smoke_test.py`
+- `scripts/mcp_smoke_test.py` (see `--isolate-federation-write-smoke` for a disposable-library
+  `commit_to_federation` probe; `--federation-write-roundtrip` alone still expects seeded data)
 - `scripts/regression_matrix.ps1`
 - `scripts/run_memory_cycle.ps1`
 

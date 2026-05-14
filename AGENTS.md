@@ -25,6 +25,7 @@ Bourdon is a Python 3.10+ cross-agent memory federation protocol (v0.4.1, BSL 1.
 | L6 MCP server | `bourdon serve` (or `python -m core.l6_server --transport stdio`; both require `fastmcp>=2.0` from `.[server]`) |
 | Federation smoke test | `bourdon dogfood` — plants marker in convention-file adapters, exports all, queries L6, prints round-trip matrix |
 | Doctor preflight | `python scripts/doctor.py --workspace-root "."` |
+| MCP smoke (stdio) | `python scripts/mcp_smoke_test.py --assertions` · disposable write probe: `... --isolate-federation-write-smoke --library-path <tmp>` · full seeded checks omit isolate flag |
 | Regression matrix | `python scripts/regression_matrix.py --workspace-root "."` |
 | Short-index check | `python scripts/migrate_short_index.py --workspace-root "." --check && python scripts/validate_short_index.py --workspace-root "."` |
 
@@ -45,6 +46,8 @@ Two GitHub Actions workflows run on PRs and pushes to `main`:
 
 ## Non-obvious caveats
 
+- **`docs/v0.6-status-and-recovery.md`** — use when reconciling interrupted release work (tags vs `main` vs open GitHub PRs).
+- **`docs/development-workflow.md`** — canonical branch + PR expectations for this repo.
 - **CI vs local test parity**: CI's `test.yml` installs `.[dev,llama-cpp]` but NOT `.[server]`. L6 server tests (in `test_l6_server.py`) skip in CI when `fastmcp` is absent but pass locally with the full install. Local runs a superset of CI.
 - **`tests/test_llama_cpp_backend.py`** requires the `httpx` package (installed via `.[llama-cpp]` extra). Without it, pytest collection fails with `ModuleNotFoundError`.
 - **Entry points**: Adapters are registered via `[project.entry-points."bourdon.adapters"]` in `pyproject.toml`. After installing new adapter code, verify registration with: `python -c "from importlib.metadata import entry_points; print([ep.name for ep in entry_points(group='bourdon.adapters')])"`.
