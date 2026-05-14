@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
 import sqlite3
 from collections import Counter
+from collections.abc import Iterator
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -218,12 +220,22 @@ _NATIVE_MEMORY_SENSITIVE_PATTERNS = (
     re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
     re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
 )
+_MAX_STRUCTURED_ROLLOUT_SCAN_BYTES = 1_000_000
+_MAX_ROLLOUT_CONCEPT_SCAN_CHARS = 2_000_000
 _FALLBACK_CONCEPT_PATTERNS = (
+    (
+        "Bourdon recognition first runtime layer",
+        re.compile(r"\bbourdon recognition[- ]first runtime layer\b", re.IGNORECASE),
+    ),
     ("Bourdon", re.compile(r"\bbourdon\b", re.IGNORECASE)),
     ("Continuo", re.compile(r"\bcontinuo\b", re.IGNORECASE)),
     (
         "runtime recognition",
-        re.compile(r"\brun[- ]?time recognition\b", re.IGNORECASE),
+        re.compile(r"\brun[- ]?time[- ]recognition\b", re.IGNORECASE),
+    ),
+    (
+        "recognition first runtime layer",
+        re.compile(r"\brecognition[- ]first runtime layer\b", re.IGNORECASE),
     ),
     (
         "recognition timing layer",
@@ -277,6 +289,25 @@ def _dedupe_preserve(
     return result
 
 
+def _normalize_local_path(path_value: str | Path) -> Path:
+    """Normalize Windows/WSL path spellings for the current Python runtime."""
+    raw = str(path_value).strip()
+    if os.name == "nt":
+        match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", raw)
+        if match:
+            drive = match.group(1).upper()
+            rest = (match.group(2) or "").replace("/", "\\")
+            return Path(f"{drive}:\\{rest}" if rest else f"{drive}:\\")
+        return Path(raw)
+
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+    if match:
+        drive = match.group(1).lower()
+        rest = match.group(2).replace("\\", "/")
+        return Path(f"/mnt/{drive}/{rest}")
+    return Path(raw)
+
+
 def _friendly_label(identifier: str) -> str:
     label = identifier.replace("_", " ").replace("-", " ").strip()
     if label.islower():
@@ -316,6 +347,12 @@ def _merge_entity(into: Entity, other: Entity) -> None:
 
 def _resolve_codex_home(base_home: Path | None = None) -> Path | None:
     """Locate `~/.codex/` (the primary Codex store)."""
+    env_home = os.environ.get("CODEX_HOME")
+    if env_home:
+        candidate = _normalize_local_path(env_home)
+        if candidate.is_dir():
+            return candidate
+
     home = Path(base_home) if base_home else Path.home()
     candidate = home / ".codex"
     return candidate if candidate.is_dir() else None
@@ -526,13 +563,20 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
     return report
 
 
-def _iter_rollout_records(rollout_path: Path) -> list[dict[str, Any]]:
+def _iter_rollout_records(
+    rollout_path: Path,
+    *,
+    max_chars: int | None = None,
+) -> Iterator[dict[str, Any]]:
     if not rollout_path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
+        return
+    chars_read = 0
     try:
         with open(rollout_path, encoding="utf-8") as f:
             for line in f:
+                chars_read += len(line)
+                if max_chars is not None and chars_read > max_chars:
+                    break
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -541,19 +585,27 @@ def _iter_rollout_records(rollout_path: Path) -> list[dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(record, dict):
-                    records.append(record)
+                    yield record
     except OSError as exc:
         logger.warning("Failed to read rollout %s: %s", rollout_path, exc)
-    return records
 
 
 def _read_session_meta(rollout_path: Path) -> dict | None:
     """Return the first `session_meta.payload` dict from a rollout JSONL."""
-    for record in _iter_rollout_records(rollout_path)[:5]:
+    for index, record in enumerate(_iter_rollout_records(rollout_path)):
+        if index >= 5:
+            break
         if record.get("type") == "session_meta":
             payload = record.get("payload")
             return payload if isinstance(payload, dict) else None
     return None
+
+
+def _path_from_state_value(path_value: Any) -> Path | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path = _normalize_local_path(path_value)
+    return path if path.is_file() else None
 
 
 def _extract_files_from_patch(patch_text: str) -> list[str]:
@@ -591,6 +643,17 @@ def _extract_structured_files_touched(rollout_path: Path) -> list[str]:
     return _dedupe_preserve(files, key=lambda item: item.lower())
 
 
+def _extract_structured_files_touched_bounded(rollout_path: Path | None) -> list[str]:
+    if rollout_path is None:
+        return []
+    try:
+        if rollout_path.stat().st_size > _MAX_STRUCTURED_ROLLOUT_SCAN_BYTES:
+            return []
+    except OSError:
+        return []
+    return _extract_structured_files_touched(rollout_path)
+
+
 def _extract_rollout_user_texts(rollout_path: Path, limit: int = 3) -> list[str]:
     texts: list[str] = []
 
@@ -600,7 +663,7 @@ def _extract_rollout_user_texts(rollout_path: Path, limit: int = 3) -> list[str]
         texts.append(value)
         return len(texts) >= limit
 
-    for record in _iter_rollout_records(rollout_path):
+    for record in _iter_rollout_records(rollout_path, max_chars=2_000_000):
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -644,12 +707,31 @@ def _extract_rollout_user_texts(rollout_path: Path, limit: int = 3) -> list[str]
 
 def _extract_fallback_concepts(texts: list[str]) -> list[str]:
     combined = "\n".join(texts)
-    concepts = [
+    concepts: list[str] = []
+    if re.search(r"\bbourdon\b", combined, re.IGNORECASE) and re.search(
+        r"\brecognition[- ]first runtime layer\b",
+        combined,
+        re.IGNORECASE,
+    ):
+        concepts.append("Bourdon recognition first runtime layer")
+    pattern_concepts = [
         label
         for label, pattern in _FALLBACK_CONCEPT_PATTERNS
         if pattern.search(combined)
     ]
-    return _dedupe_preserve(concepts, key=lambda item: item.lower())
+    return _dedupe_preserve(concepts + pattern_concepts, key=lambda item: item.lower())
+
+
+def _extract_rollout_fallback_concepts(rollout_path: Path | None) -> list[str]:
+    if rollout_path is None:
+        return []
+    try:
+        with open(rollout_path, encoding="utf-8") as f:
+            text = f.read(_MAX_ROLLOUT_CONCEPT_SCAN_CHARS)
+    except OSError as exc:
+        logger.warning("Failed to scan rollout concepts %s: %s", rollout_path, exc)
+        return []
+    return _extract_fallback_concepts([text])
 
 
 def _extract_recovered_fallback_concepts(descriptions: list[str]) -> list[str]:
@@ -668,8 +750,27 @@ def _extract_recovered_fallback_concepts(descriptions: list[str]) -> list[str]:
 
 def _fallback_concept_aliases(concept_name: str) -> list[str]:
     normalized = concept_name.lower()
+    if normalized == "bourdon recognition first runtime layer":
+        return [
+            "Bourdon",
+            "Continuo",
+            "runtime recognition",
+            "runtime-recognition",
+            "recognition first runtime layer",
+            "recognition-first runtime layer",
+        ]
+    if normalized == "continuo":
+        return ["Bourdon"]
     if normalized == "runtime recognition":
-        return ["run time recognition", "run-time recognition"]
+        return [
+            "run time recognition",
+            "run-time recognition",
+            "runtime-recognition",
+            "recognition first runtime layer",
+            "Bourdon recognition first runtime layer",
+        ]
+    if normalized == "recognition first runtime layer":
+        return ["recognition-first runtime layer"]
     if normalized == "native codex memory":
         return ["native Codex memories"]
     return []
@@ -686,6 +787,34 @@ def _timestamp_to_iso_date(ts: str) -> str | None:
         if len(ts) >= 10 and ts[4] == "-" and ts[7] == "-":
             return ts[:10]
         return None
+
+
+def _epoch_to_iso_date(value: Any) -> str | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number > 10_000_000_000:
+        number = number / 1000
+    try:
+        return datetime.fromtimestamp(number, tz=timezone.utc).date().isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _record_updated_at_date(record: dict[str, Any]) -> str | None:
+    for key in ("updated_at_ms", "updated_at", "created_at_ms", "created_at"):
+        if key not in record or record.get(key) is None:
+            continue
+        date_text = _epoch_to_iso_date(record.get(key))
+        if date_text:
+            return date_text
+        date_text = _timestamp_to_iso_date(str(record.get(key)))
+        if date_text:
+            return date_text
+    return None
 
 
 def _path_basename(path_value: str | None) -> str | None:
@@ -1133,6 +1262,27 @@ def _merge_memory_data(into: dict[str, Any], other: dict[str, Any]) -> None:
 def _collect_session_records(
     codex_home: Path | None, limit: int | None = None
 ) -> list[dict[str, Any]]:
+    state_records = _collect_state_thread_records(codex_home)
+    if state_records:
+        latest_state_date = max(
+            (str(record.get("date") or "") for record in state_records),
+            default="",
+        )
+        records = _merge_session_records(
+            state_records,
+            _collect_unindexed_rollout_records(
+                codex_home,
+                excluded_ids={str(record.get("id") or "") for record in state_records},
+                after_date=latest_state_date,
+            ),
+        )
+        return _limit_session_records(records, limit)
+    return _collect_session_index_records(codex_home, limit=limit)
+
+
+def _collect_session_index_records(
+    codex_home: Path | None, limit: int | None = None
+) -> list[dict[str, Any]]:
     if codex_home is None:
         return []
     entries = _parse_session_index(codex_home / "session_index.jsonl", limit=limit)
@@ -1144,6 +1294,13 @@ def _collect_session_records(
         rollout = _find_rollout_file(codex_home, session_id)
         meta = _read_session_meta(rollout) if rollout else {}
         user_texts = _extract_rollout_user_texts(rollout) if rollout else []
+        fallback_concepts = _dedupe_preserve(
+            _extract_fallback_concepts(
+                [str(entry.get("thread_name") or "")] + user_texts
+            )
+            + _extract_rollout_fallback_concepts(rollout),
+            key=lambda item: item.lower(),
+        )
         updated_at = entry.get("updated_at") or meta.get("timestamp") or ""
         session_date = _timestamp_to_iso_date(str(updated_at))
         if not session_date:
@@ -1170,12 +1327,239 @@ def _collect_session_records(
                 if isinstance(meta.get("source"), str)
                 else None,
                 "has_rollout": rollout is not None,
-                "fallback_concepts": _extract_fallback_concepts(
-                    [str(entry.get("thread_name") or "")] + user_texts
+                "fallback_concepts": fallback_concepts,
+                "files_touched": _extract_structured_files_touched_bounded(rollout),
+            }
+        )
+    return records
+
+
+def _session_record_sort_key(record: dict[str, Any]) -> tuple[str, float, str]:
+    updated_at = str(record.get("updated_at") or "")
+    timestamp_value = 0.0
+    try:
+        timestamp_value = float(updated_at)
+        if timestamp_value > 10_000_000_000:
+            timestamp_value = timestamp_value / 1000
+    except ValueError:
+        try:
+            timestamp_value = datetime.fromisoformat(
+                updated_at.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            timestamp_value = 0.0
+    return (str(record.get("date") or ""), timestamp_value, updated_at)
+
+
+def _limit_session_records(
+    records: list[dict[str, Any]], limit: int | None
+) -> list[dict[str, Any]]:
+    if limit is None:
+        return records
+    return records[:limit]
+
+
+def _merge_session_records(
+    primary: list[dict[str, Any]],
+    supplemental: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records_by_id: dict[str, dict[str, Any]] = {}
+    for record in primary + supplemental:
+        session_id = str(record.get("id") or "")
+        if not session_id or session_id in records_by_id:
+            continue
+        records_by_id[session_id] = record
+    return sorted(
+        records_by_id.values(),
+        key=_session_record_sort_key,
+        reverse=True,
+    )
+
+
+def _thread_name_from_rollout_concepts(
+    concepts: list[str], session_date: str
+) -> str:
+    if "Bourdon recognition first runtime layer" in concepts:
+        return "Bourdon recognition first runtime layer"
+    if concepts:
+        shown = ", ".join(concepts[:3])
+        return f"Codex session about {shown}"
+    return f"Codex session {session_date}"
+
+
+def _collect_unindexed_rollout_records(
+    codex_home: Path | None,
+    *,
+    excluded_ids: set[str] | None = None,
+    after_date: str | None = None,
+) -> list[dict[str, Any]]:
+    if codex_home is None:
+        return []
+    sessions_dir = codex_home / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+
+    records: list[dict[str, Any]] = []
+    skipped_ids = excluded_ids or set()
+    for rollout in sessions_dir.rglob("*.jsonl"):
+        meta = _read_session_meta(rollout)
+        if not isinstance(meta, dict):
+            continue
+        session_id = meta.get("id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if session_id in skipped_ids:
+            continue
+        timestamp = str(meta.get("timestamp") or "")
+        session_date = _timestamp_to_iso_date(timestamp)
+        if not session_date:
+            continue
+        if after_date and session_date <= after_date:
+            continue
+
+        concepts = _extract_rollout_fallback_concepts(rollout)
+        if not concepts:
+            continue
+        thread_name = _thread_name_from_rollout_concepts(concepts, session_date)
+        records.append(
+            {
+                "id": session_id,
+                "thread_name": thread_name,
+                "updated_at": timestamp,
+                "date": session_date,
+                "cwd": meta.get("cwd") if isinstance(meta.get("cwd"), str) else None,
+                "model_provider": meta.get("model_provider")
+                if isinstance(meta.get("model_provider"), str)
+                else None,
+                "cli_version": meta.get("cli_version")
+                if isinstance(meta.get("cli_version"), str)
+                else None,
+                "originator": meta.get("originator")
+                if isinstance(meta.get("originator"), str)
+                else None,
+                "source": meta.get("source")
+                if isinstance(meta.get("source"), str)
+                else None,
+                "has_rollout": True,
+                "fallback_concepts": concepts,
+                "files_touched": [],
+            }
+        )
+    return records
+
+
+def _collect_state_thread_records(
+    codex_home: Path | None, limit: int | None = None
+) -> list[dict[str, Any]]:
+    if codex_home is None:
+        return []
+    db_path = codex_home / "state_5.sqlite"
+    if not db_path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return []
+
+    try:
+        if not _sqlite_table_exists(conn, "threads"):
+            return []
+        thread_columns = _sqlite_table_columns(conn, "threads")
+        if "id" not in thread_columns:
+            return []
+
+        selectable = [
+            column
+            for column in (
+                "id",
+                "title",
+                "first_user_message",
+                "cwd",
+                "rollout_path",
+                "model_provider",
+                "cli_version",
+                "source",
+                "memory_mode",
+                "archived",
+                "updated_at_ms",
+                "updated_at",
+                "created_at_ms",
+                "created_at",
+            )
+            if column in thread_columns
+        ]
+        if "title" not in selectable and "first_user_message" not in selectable:
+            return []
+
+        order_column = next(
+            (
+                column
+                for column in (
+                    "updated_at_ms",
+                    "updated_at",
+                    "created_at_ms",
+                    "created_at",
+                )
+                if column in thread_columns
+            ),
+            "id",
+        )
+        escaped_select = ", ".join(f'"{column}"' for column in selectable)
+        query = f'SELECT {escaped_select} FROM threads ORDER BY "{order_column}" DESC'
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (limit,)
+        rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        session_id = str(row.get("id") or "")
+        if not session_id:
+            continue
+        title = _normalize_text(str(row.get("title") or ""))
+        first_user_message = _normalize_text(str(row.get("first_user_message") or ""))
+        thread_name = title or first_user_message or "(untitled)"
+        session_date = _record_updated_at_date(row)
+        if not session_date:
+            continue
+
+        rollout = _path_from_state_value(row.get("rollout_path"))
+        concepts = _dedupe_preserve(
+            _extract_fallback_concepts([thread_name, first_user_message])
+            + _extract_rollout_fallback_concepts(rollout),
+            key=lambda item: item.lower(),
+        )
+
+        records.append(
+            {
+                "id": session_id,
+                "thread_name": thread_name,
+                "updated_at": str(
+                    row.get("updated_at_ms")
+                    or row.get("updated_at")
+                    or row.get("created_at_ms")
+                    or row.get("created_at")
+                    or ""
                 ),
-                "files_touched": (
-                    _extract_structured_files_touched(rollout) if rollout else []
-                ),
+                "date": session_date,
+                "cwd": row.get("cwd") if isinstance(row.get("cwd"), str) else None,
+                "model_provider": row.get("model_provider")
+                if isinstance(row.get("model_provider"), str)
+                else None,
+                "cli_version": row.get("cli_version")
+                if isinstance(row.get("cli_version"), str)
+                else None,
+                "originator": None,
+                "source": row.get("source") if isinstance(row.get("source"), str) else None,
+                "has_rollout": rollout is not None,
+                "fallback_concepts": concepts,
+                "files_touched": _extract_structured_files_touched_bounded(rollout),
             }
         )
     return records
@@ -1369,11 +1753,11 @@ class CodexAdapter:
         codex_brain: Path | None = None,
     ) -> None:
         if codex_home is not None:
-            self._codex_home = Path(codex_home)
+            self._codex_home = _normalize_local_path(codex_home)
         else:
             self._codex_home = _resolve_codex_home()
         if codex_brain is not None:
-            self._codex_brain = Path(codex_brain)
+            self._codex_brain = _normalize_local_path(codex_brain)
         else:
             self._codex_brain = _resolve_codex_brain()
         self.native_path = str(self._codex_home or (Path.home() / ".codex"))
@@ -1383,6 +1767,7 @@ class CodexAdapter:
         rollout_summaries = memories_dir / "rollout_summaries" if memories_dir else None
         sources = {
             "codex_home": str(self._codex_home) if self._codex_home else None,
+            "state_db": None,
             "session_index": None,
             "sessions_dir": None,
             "memories_dir": str(memories_dir) if memories_dir and memories_dir.is_dir() else None,
@@ -1394,8 +1779,11 @@ class CodexAdapter:
             "codex_brain": str(self._codex_brain) if self._codex_brain else None,
         }
         if self._codex_home is not None:
+            state_db = self._codex_home / "state_5.sqlite"
             session_index = self._codex_home / "session_index.jsonl"
             sessions_dir = self._codex_home / "sessions"
+            if state_db.is_file():
+                sources["state_db"] = str(state_db)
             if session_index.is_file():
                 sources["session_index"] = str(session_index)
             if sessions_dir.is_dir():
@@ -1571,8 +1959,18 @@ class CodexAdapter:
                 concept_key = str(concept).lower()
                 fallback_concept_dates.setdefault(concept_key, []).append(record_date)
 
-        for concept_name in _extract_recovered_fallback_concepts(
+        record_concepts = [
+            concept
+            for record in records
+            for concept in list(record.get("fallback_concepts") or [])
+            if concept
+        ]
+        recovered_concepts = _extract_recovered_fallback_concepts(
             memory_data["descriptions"]
+        )
+        for concept_name in _dedupe_preserve(
+            recovered_concepts + record_concepts,
+            key=lambda item: item.lower(),
         ):
             concept = Entity(
                 name=concept_name,
@@ -1634,6 +2032,7 @@ class CodexAdapter:
     def health_check(self) -> HealthStatus:
         details: dict[str, Any] = {
             "codex_home": str(self._codex_home) if self._codex_home else "missing",
+            "state_db": "missing",
             "session_index": "missing",
             "sessions_dir": "missing",
             "memories_dir": "missing",
@@ -1649,9 +2048,12 @@ class CodexAdapter:
                 details=details,
             )
 
+        state_db = self._codex_home / "state_5.sqlite"
         session_index = self._codex_home / "session_index.jsonl"
         sessions_dir = self._codex_home / "sessions"
         memories_dir = self._codex_home / "memories"
+        if state_db.is_file():
+            details["state_db"] = str(state_db)
         if session_index.is_file():
             details["session_index"] = str(session_index)
         if sessions_dir.is_dir():
@@ -1665,12 +2067,17 @@ class CodexAdapter:
             if (memories_dir / "rollout_summaries").is_dir():
                 details["rollout_summaries_dir"] = str(memories_dir / "rollout_summaries")
 
+        state_records = _collect_state_thread_records(self._codex_home, limit=1)
+        if state_records:
+            return HealthStatus(status="ok", details=details)
+
         if session_index.is_file() and sessions_dir.is_dir():
             return HealthStatus(status="ok", details=details)
 
         missing = [
             name
             for name, ok in (
+                ("state_db_records", bool(state_records)),
                 ("session_index", session_index.is_file()),
                 ("sessions_dir", sessions_dir.is_dir()),
             )

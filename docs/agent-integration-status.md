@@ -13,9 +13,12 @@ Status: export hook available.
 
 ## Codex
 
-Status: fallback and turn preparation available; native distilled memory currently blocked upstream.
+Status: SQLite-backed fallback and turn preparation available.
 
-- `bourdon codex doctor` diagnoses `~/.codex/state_5.sqlite` and fallback recall.
+- `bourdon codex doctor` diagnoses `~/.codex/state_5.sqlite`, stale-index fallback,
+  and fallback recall.
+- `bourdon codex export` prefers live `state_5.sqlite` thread metadata and falls
+  back to `session_index.jsonl` on older Codex installs.
 - `bourdon codex prepare-turn` refreshes Codex fallback memory surfaces and emits
   prompt-ready recognition context.
 - Native Codex Stage 1 distilled memory is not relied on when it reports no

@@ -19,15 +19,18 @@ from adapters.base import (
 )
 from adapters.codex import (
     CodexAdapter,
+    _collect_session_records,
     _extract_project_candidates,
     _find_rollout_file,
     _inspect_codex_fallback_recall,
     _inspect_codex_state_db,
+    _normalize_local_path,
     _parse_memory_text,
     _parse_session_index,
     _project_key_from_cwd,
     _read_session_meta,
     _render_codex_native_memory_text,
+    _resolve_codex_home,
     _timestamp_to_iso_date,
 )
 
@@ -40,6 +43,7 @@ def isolated_home(tmp_path, monkeypatch):
     host machine's real ~/.codex/."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: fake_home)
 
     def create_codex_home():
@@ -137,6 +141,55 @@ def isolated_home(tmp_path, monkeypatch):
     }
 
 
+def _write_state_thread(
+    codex_home: Path,
+    *,
+    session_id: str,
+    title: str,
+    updated_at: str = "2026-05-13T12:00:00Z",
+    first_user_message: str = "",
+    cwd: str = "/workspace/bourdon",
+    rollout_path: str | None = None,
+) -> None:
+    db_path = codex_home / "state_5.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS threads ("
+            "id TEXT PRIMARY KEY, "
+            "title TEXT, "
+            "first_user_message TEXT, "
+            "cwd TEXT, "
+            "rollout_path TEXT, "
+            "model_provider TEXT, "
+            "cli_version TEXT, "
+            "source TEXT, "
+            "memory_mode TEXT, "
+            "archived INTEGER, "
+            "updated_at TEXT, "
+            "created_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads "
+            "(id, title, first_user_message, cwd, rollout_path, model_provider, "
+            "cli_version, source, memory_mode, archived, updated_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                title,
+                first_user_message,
+                cwd,
+                rollout_path,
+                "openai",
+                "0.130.0-alpha.5",
+                "vscode",
+                "enabled",
+                0,
+                updated_at,
+                updated_at,
+            ),
+        )
+
+
 # -- Protocol + constants ------------------------------------------------------
 
 
@@ -151,6 +204,33 @@ def test_adapter_constants():
     assert isinstance(codex_module.ROLE_NARRATIVE, str)
     assert len(codex_module.ROLE_NARRATIVE) <= 500
     assert "lead" in codex_module.ROLE_NARRATIVE.lower()
+
+
+# -- Path resolution -----------------------------------------------------------
+
+
+def test_normalize_local_path_converts_windows_path_on_wsl(monkeypatch):
+    monkeypatch.setattr(codex_module.os, "name", "posix")
+
+    path = _normalize_local_path(r"C:\Users\cumul\.codex")
+
+    assert str(path).replace("\\", "/") == "/mnt/c/Users/cumul/.codex"
+
+
+def test_normalize_local_path_converts_wsl_path_for_windows_python(monkeypatch):
+    monkeypatch.setattr(codex_module.os, "name", "nt")
+
+    path = _normalize_local_path("/mnt/c/Users/cumul/.codex")
+
+    assert str(path).replace("/", "\\") == r"C:\Users\cumul\.codex"
+
+
+def test_resolve_codex_home_prefers_codex_home_env(isolated_home, monkeypatch):
+    env_codex_home = isolated_home["home"] / "env-codex"
+    env_codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(env_codex_home))
+
+    assert _resolve_codex_home() == env_codex_home
 
 
 # -- discover + health_check ---------------------------------------------------
@@ -754,6 +834,82 @@ def test_export_sessions_resolves_cwd_from_rollout(isolated_home):
     assert "Work thread" in sessions[0].key_actions[0]
 
 
+def test_collect_session_records_prefers_live_sqlite_over_stale_session_index(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "stale",
+        "Old April thread",
+        "2026-04-15T12:00:00Z",
+    )
+    _write_state_thread(
+        codex_home,
+        session_id="live",
+        title="Bourdon recognition first runtime layer",
+        updated_at="2026-05-13T12:00:00Z",
+        first_user_message=(
+            "Continuo became Bourdon and needs runtime recognition."
+        ),
+    )
+
+    records = _collect_session_records(codex_home)
+
+    assert [record["id"] for record in records] == ["live"]
+    assert records[0]["date"] == "2026-05-13"
+    assert records[0]["thread_name"] == "Bourdon recognition first runtime layer"
+    assert "Bourdon" in records[0]["fallback_concepts"]
+    assert "runtime recognition" in records[0]["fallback_concepts"]
+
+
+def test_collect_session_records_keeps_newer_unindexed_rollouts(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "stale",
+        "Old April thread",
+        "2026-04-15T12:00:00Z",
+    )
+    _write_state_thread(
+        codex_home,
+        session_id="state-thread",
+        title="Known SQLite thread",
+        updated_at="2026-04-20T12:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 13),
+        "current-rollout",
+        "/workspace/bourdon",
+        "2026-05-13T13:09:40Z",
+        extra_records=[
+            {
+                "timestamp": "2026-05-13T13:10:00Z",
+                "type": "user_input",
+                "payload": {
+                    "text": (
+                        "Bourdon used to be Continuo. It is a recognition first "
+                        "runtime layer."
+                    )
+                },
+            }
+        ],
+    )
+
+    records = _collect_session_records(codex_home)
+
+    assert [record["id"] for record in records] == [
+        "current-rollout",
+        "state-thread",
+    ]
+    assert records[0]["thread_name"] == "Bourdon recognition first runtime layer"
+    assert "Continuo" in records[0]["fallback_concepts"]
+    assert "recognition first runtime layer" in records[0]["fallback_concepts"]
+
+
 def test_export_sessions_since_filter(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](codex_home, "new", "New", "2026-04-15T00:00:00Z")
@@ -863,6 +1019,50 @@ def test_export_l5_produces_valid_manifest(isolated_home):
     # Two unique thread_names -> two entities
     names = {e.name for e in manifest.known_entities}
     assert names == {"Set up CI", "Debug auth"}
+
+
+def test_export_l5_uses_sqlite_thread_entities_for_current_recognition(
+    isolated_home,
+):
+    codex_home = isolated_home["create_codex_home"]()
+    _write_state_thread(
+        codex_home,
+        session_id="live-bourdon",
+        title="Bourdon recognition first runtime layer",
+        updated_at="2026-05-13T12:00:00Z",
+        first_user_message=(
+            "Continuo became Bourdon and needs runtime recognition as a "
+            "recognition timing layer."
+        ),
+    )
+    memories = isolated_home["create_memories"]()
+    (memories / "MEMORY.md").write_text(
+        "# Task Group: Existing Codex context\n\n"
+        "## Task 1: Prior unrelated memory\n\n"
+        "### keywords\n\n"
+        "- ShipStable\n",
+        encoding="utf-8",
+    )
+    (memories / "raw_memories.md").write_text(
+        "# Raw Memories\n\nNo raw memories yet.\n",
+        encoding="utf-8",
+    )
+    for summary_file in (memories / "rollout_summaries").glob("*.md"):
+        summary_file.unlink()
+
+    manifest = CodexAdapter().export_l5()
+    topics = {
+        entity.name: entity
+        for entity in manifest.known_entities
+        if entity.type == "topic"
+    }
+
+    assert manifest.recent_sessions[0].date == "2026-05-13"
+    assert "Bourdon recognition first runtime layer" in topics
+    assert "Bourdon" in topics
+    assert "Continuo" in topics
+    assert "runtime recognition" in topics
+    assert "recognition timing layer" in topics
 
 
 def test_export_l5_dedupes_thread_names_case_insensitive(isolated_home):
