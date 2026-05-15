@@ -92,6 +92,51 @@ ai: replies.         ai: replies.</pre>
     </section>
 
     <section>
+      <h2>The cross-account test</h2>
+      <p>
+        On 2026-05-15 a Bourdon user&rsquo;s Codex account became uneditable mid-week
+        (a stuck plan-upgrade flow). They created a new email and signed back in fresh
+        on the same Windows machine. Same machine, new vendor identity. The Codex App
+        still surfaced the prior chat list &mdash; probably native local-cache behavior,
+        not Bourdon. The interesting question was whether project recognition would
+        survive the account boundary on the brand-new account&rsquo;s first turn.
+      </p>
+      <p>
+        It did. Asked &ldquo;do you remember what bourdon is?&rdquo; on the new
+        account&rsquo;s first conversation, Codex correctly recovered the active
+        project &mdash; Bourdon, including the lineage from its prior name (Continuo)
+        and Codex&rsquo;s own contributing role on the Codex adapter &mdash; purely
+        from local recognition substrate (<code>~/.codex</code> state, plus
+        Bourdon&rsquo;s fallback memory section, plus the Codex L5 manifest Bourdon
+        publishes). First-turn latency: ~5 minutes at extra-high reasoning (the
+        high-reasoning cost dominates; standard-reasoning latency is the next thing
+        to measure).
+      </p>
+      <p>
+        Codex&rsquo;s own self-attribution made the distinction unprompted:
+      </p>
+      <blockquote>
+        Bourdon did generate a local fallback memory block from Codex session and
+        rollout metadata, with your Bourdon thread and concepts present. So: native
+        UI persistence may be Codex; the &ldquo;ah, this is Bourdon/Continuo/runtime
+        recognition&rdquo; recall is Bourdon doing its job. The account changed, but
+        the local recognition layer still found the project identity, the
+        Bourdon/Continuo lineage, and the current conceptual frame.
+      </blockquote>
+      <p>
+        That distinction &mdash; the one we don&rsquo;t make ourselves, the one Codex
+        made unprompted &mdash; is what makes this a real finding rather than a
+        marketing anecdote. Until 2026-05-15, &ldquo;agent continuity around the
+        work, not the vendor account&rdquo; was a stated thesis. As of 2026-05-15
+        it is a measured outcome with a reproducible substrate. Three honest gaps
+        the same transcript surfaced &mdash; latency under standard reasoning,
+        whether recognition surfaces without an explicit prompt, source attribution
+        that distinguishes Bourdon-supplied vs. native context &mdash; are tracked
+        as Phase 1.5 work.
+      </p>
+    </section>
+
+    <section>
       <h2>How Bourdon differs</h2>
       <table>
         <thead>
