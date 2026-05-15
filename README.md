@@ -49,6 +49,32 @@ A tiered, timing-aware memory protocol for any human-AI collaboration where cont
 
 One architecture, many domains. Content is always domain-specific; cognition is universal.
 
+## Validated Outcomes
+
+### 2026-05-15 — Cross-account continuity (Codex)
+
+The core thesis Bourdon ships against is **agent continuity around the work, not around a vendor account.** On 2026-05-15, that thesis was validated unprompted in real-world conditions:
+
+A user's Codex account became uneditable (a stuck plan-upgrade flow). They created a new email and logged in fresh on the same Windows PC. The Codex App still showed the prior chat list (probably native local-cache behavior, not Bourdon). Then on the **first conversation of the brand-new account**, Codex correctly recognized the active project — Bourdon, including the lineage from its prior name (Continuo) and Codex's own contributing role on the integration — purely from local recognition substrate (`~/.codex` state + Bourdon's fallback memory section + the Codex L5 manifest Bourdon publishes).
+
+Codex's own self-attribution, when asked what was happening:
+
+> "Bourdon did generate a local fallback memory block from Codex session and rollout metadata, with your Bourdon thread and concepts present. So: native UI persistence may be Codex; the 'ah, this is Bourdon/Continuo/runtime recognition' recall is Bourdon doing its job."
+>
+> [...]
+>
+> "The account changed, but the local recognition layer still found the project identity, the Bourdon/Continuo lineage, and the current conceptual frame. That means Bourdon is doing the thing it is supposed to do: preserving agent continuity around the work, not around a vendor account."
+
+— Codex (5.5, extra-high reasoning, first turn on the new account)
+
+**Honest gaps the same transcript surfaced** (now tracked as Phase 1.5 work):
+
+1. **Latency.** ~5 minutes for first-turn recognition with extra-high reasoning. Need a repeatable measurement matrix at standard reasoning settings before claiming numbers publicly.
+2. **Trigger surface.** Recognition surfaced only when directly prompted ("do you remember what bourdon is?"). Whether it would have surfaced on an unrelated first question is an open empirical question.
+3. **Source attribution.** Codex couldn't cleanly partition Bourdon-supplied vs. native context in its own answer. Future Bourdon turn-prep responses should mark their contributions explicitly (e.g., `[bourdon]` prefix on synthesized recognition lines).
+
+This wasn't a planned demo. It happened because the user's old Codex plan was broken — exactly the kind of accidental real-world conditions that exposes whether a system actually works or whether the demo was rigged. This wasn't rigged.
+
 ## The Memory Stack
 
 ```
