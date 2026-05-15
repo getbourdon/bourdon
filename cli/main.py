@@ -15,6 +15,14 @@ from typing import Any
 import yaml
 
 from adapters.base import AdapterDiscoveryError
+from adapters.cascade import (
+    CascadeAdapter,
+    _inspect_cascade_memory,
+    default_cascade_memory_path,
+)
+from adapters.cascade import (
+    init_memory_file as cascade_init_memory_file,
+)
 from adapters.claude_code import ClaudeCodeAdapter
 from adapters.codex import (
     CodexAdapter,
@@ -26,12 +34,6 @@ from adapters.codex import (
     _merge_bourdon_memory_md_section,
     _safe_native_memory_text,
 )
-from adapters.cascade import (
-    CascadeAdapter,
-    _inspect_cascade_memory,
-    default_cascade_memory_path,
-    init_memory_file as cascade_init_memory_file,
-)
 from adapters.copilot import (
     CopilotAdapter,
     _inspect_copilot_memory,
@@ -39,7 +41,10 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
-from core.codex_context import filter_manifest_for_access, write_codex_context_artifacts
+from core.codex_context import (
+    filter_manifest_for_access,
+    write_codex_context_artifacts,
+)
 from core.codex_fixtures import create_sample_codex_sources
 from core.l2 import query_l2
 from core.l5_io import write_l5_dict
@@ -349,9 +354,10 @@ def _handle_serve(args: argparse.Namespace) -> int:
     if getattr(args, "quiet", False) is False:
         # Banner goes to stderr so stdio transport (which uses stdout for the
         # MCP protocol) stays clean.
-        print(f"Bourdon L6 server", file=sys.stderr)
+        print("Bourdon L6 server", file=sys.stderr)
         print(f"  library:   {library_path}", file=sys.stderr)
-        print(f"  agents:    {len(agents)} loaded ({', '.join(agents) if agents else 'none'})", file=sys.stderr)
+        agent_names = ", ".join(agents) if agents else "none"
+        print(f"  agents:    {len(agents)} loaded ({agent_names})", file=sys.stderr)
         print(f"  transport: {transport}", file=sys.stderr)
         if transport == "http":
             print(f"  port:      {port}", file=sys.stderr)
@@ -372,7 +378,8 @@ def _handle_serve(args: argparse.Namespace) -> int:
                 server.run(transport="http", port=port)
             except TypeError:
                 print(
-                    "WARN: this fastmcp version does not accept transport='http'; falling back to stdio.",
+                    "WARN: this fastmcp version does not accept transport='http'; "
+                    "falling back to stdio.",
                     file=sys.stderr,
                 )
                 server.run()
@@ -660,6 +667,7 @@ def _source_coverage(adapter: CodexAdapter) -> dict[str, Any]:
     details = health.details or {}
     return {
         "status": health.status,
+        "state_db": details.get("state_db") != "missing",
         "session_index": details.get("session_index") != "missing",
         "sessions_dir": details.get("sessions_dir") != "missing",
         "memory_md": details.get("memory_md") != "missing",

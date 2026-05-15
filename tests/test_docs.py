@@ -20,7 +20,8 @@ def test_agent_integration_status_documents_current_layers():
     assert "export hook available" in status_doc
     assert "Codex" in status_doc
     assert "prepare-turn" in status_doc
-    assert "native distilled memory currently blocked upstream" in status_doc
+    assert "SQLite-backed fallback and turn preparation available" in status_doc
+    assert "state_5.sqlite" in status_doc
     assert "Cursor" in status_doc
     assert "cursor export" in status_doc
     assert "Cline" in status_doc

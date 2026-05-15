@@ -35,8 +35,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pytest
 
@@ -237,6 +237,7 @@ def _plant_codex(tmp_path: Path, monkeypatch) -> CodexAdapter:
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: fake_home)
 
     codex_home = fake_home / ".codex"

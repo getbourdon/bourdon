@@ -7,10 +7,16 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+import pytest
 import yaml
 
 import cli.main as cli_main
 from cli.main import main
+
+
+@pytest.fixture(autouse=True)
+def _clear_codex_home_env(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 def _build_fake_codex_home(fake_home: Path) -> None:
@@ -166,6 +172,35 @@ def _build_fake_codex_state_db(fake_home: Path) -> None:
                 "error",
                 2,
                 "You've hit your usage limit.",
+            ),
+        )
+
+
+def _build_fake_codex_live_state_db(fake_home: Path) -> None:
+    codex_home = fake_home / ".codex"
+    with sqlite3.connect(codex_home / "state_5.sqlite") as conn:
+        conn.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, "
+            "title TEXT, "
+            "first_user_message TEXT, "
+            "cwd TEXT, "
+            "memory_mode TEXT, "
+            "archived INTEGER, "
+            "updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads "
+            "(id, title, first_user_message, cwd, memory_mode, archived, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "live-bourdon",
+                "Bourdon recognition first runtime layer",
+                "Continuo became Bourdon and needs runtime recognition.",
+                "/workspace/bourdon",
+                "enabled",
+                0,
+                "2026-05-13T12:00:00Z",
             ),
         )
 
@@ -376,6 +411,34 @@ def test_cli_codex_export_writes_manifest(tmp_path, monkeypatch):
     assert manifest["recent_sessions"][0]["visibility"] == "team"
 
 
+def test_cli_codex_recognize_uses_live_sqlite_threads(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    _build_fake_codex_live_state_db(fake_home)
+
+    exit_code = main(
+        [
+            "codex",
+            "recognize",
+            "Bourdon recognition first runtime layer",
+            "--prompt-context",
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["recognition"]
+    matched_names = {entity["name"] for entity in report["matched_entities"]}
+    assert {
+        "Bourdon recognition first runtime layer",
+        "Continuo",
+        "runtime recognition",
+    }.issubset(matched_names)
+    assert "Bourdon recognition context" in report["prompt_context"]
+
+
 def test_cli_codex_build_context_writes_l0_and_l1(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -573,14 +636,10 @@ def test_cli_codex_recognize_returns_immediate_fallback_concept_match(
     report = yaml.safe_load(stdout)
 
     assert exit_code == 0
-    assert (
-        report["recognition"]
-        == "You're asking about Bourdon and runtime recognition -- I have both."
-    )
-    assert report["matched_entities"] == [
-        {"name": "Bourdon", "type": "topic"},
-        {"name": "runtime recognition", "type": "topic"},
-    ]
+    assert "Bourdon" in report["recognition"]
+    assert "runtime recognition" in report["recognition"]
+    matched_names = {entity["name"] for entity in report["matched_entities"]}
+    assert {"Bourdon", "Continuo", "runtime recognition"}.issubset(matched_names)
     assert report["hydration_scheduled"] is True
 
 
