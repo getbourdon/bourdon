@@ -1263,7 +1263,7 @@ def _merge_memory_data(into: dict[str, Any], other: dict[str, Any]) -> None:
 def _collect_session_records(
     codex_home: Path | None, limit: int | None = None
 ) -> list[dict[str, Any]]:
-    state_records = _collect_state_thread_records(codex_home)
+    state_records = _collect_state_thread_records(codex_home, limit=limit)
     if state_records:
         latest_state_date = max(
             (str(record.get("date") or "") for record in state_records),
@@ -1416,7 +1416,11 @@ def _collect_unindexed_rollout_records(
         session_date = _timestamp_to_iso_date(timestamp)
         if not session_date:
             continue
-        if after_date and session_date <= after_date:
+        # Use < not <=: excluded_ids already prevents true duplicates, so
+        # rollouts on the same calendar day as the latest state record but
+        # with a different ID (e.g., a session created later that day not yet
+        # indexed) must still be included. <= silently drops them.
+        if after_date and session_date < after_date:
             continue
 
         concepts = _extract_rollout_fallback_concepts(rollout)

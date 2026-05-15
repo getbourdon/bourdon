@@ -944,6 +944,71 @@ def test_collect_session_records_keeps_unindexed_rollouts_without_known_concepts
     assert records[0]["fallback_concepts"] == []
 
 
+def test_collect_session_records_keeps_same_day_unindexed_rollouts(
+    isolated_home,
+):
+    """Regression: when an unindexed rollout shares the latest state-DB record's
+    calendar date but has a different ID (e.g., a session created later that
+    same day, not yet indexed), it must still appear in the merged output.
+    excluded_ids already prevents true duplicates; the date filter must use
+    < not <=, otherwise active same-day sessions get silently dropped --
+    a recognition gap on the exact in-flight work Bourdon should be best at."""
+    codex_home = isolated_home["create_codex_home"]()
+    _write_state_thread(
+        codex_home,
+        session_id="state-thread-day13",
+        title="Indexed thread",
+        updated_at="2026-05-13T10:00:00Z",
+    )
+    isolated_home["add_rollout"](
+        codex_home,
+        (2026, 5, 13),
+        "later-rollout-day13",
+        "/workspace/bourdon",
+        "2026-05-13T18:00:00Z",
+    )
+
+    records = _collect_session_records(codex_home)
+    record_ids = {record["id"] for record in records}
+
+    assert "state-thread-day13" in record_ids
+    assert "later-rollout-day13" in record_ids, (
+        "same-day unindexed rollout was dropped by overly conservative <= "
+        "after_date filter (excluded_ids already prevents true duplicates)"
+    )
+
+
+def test_collect_session_records_pushes_limit_into_state_thread_query(
+    isolated_home, monkeypatch
+):
+    """Regression: limit must be pushed down into _collect_state_thread_records
+    so SQLite truncates with LIMIT instead of fetching all rows + doing
+    expensive per-row I/O before _limit_session_records truncates in Python."""
+    captured: dict[str, object] = {}
+    original = codex_module._collect_state_thread_records
+
+    def spy(codex_home, limit=None):
+        captured["limit"] = limit
+        return original(codex_home, limit=limit)
+
+    monkeypatch.setattr(codex_module, "_collect_state_thread_records", spy)
+
+    codex_home = isolated_home["create_codex_home"]()
+    _write_state_thread(
+        codex_home,
+        session_id="t1",
+        title="T1",
+        updated_at="2026-04-20T12:00:00Z",
+    )
+
+    _collect_session_records(codex_home, limit=5)
+
+    assert captured["limit"] == 5, (
+        "limit was not pushed into _collect_state_thread_records; "
+        "SQLite query will fetch all rows + do expensive I/O before truncating"
+    )
+
+
 def test_export_sessions_since_filter(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](codex_home, "new", "New", "2026-04-15T00:00:00Z")
