@@ -1,0 +1,34 @@
+# Bourdon L6 peer federation — declarative peer list.
+#
+# Drop this file at one of:
+#   - ~/.bourdon/peers.yaml          (default loaded by `bourdon serve`)
+#   - any path passed via `--peers-config /path/to/peers.yaml`
+#
+# Each peer becomes a RemoteL6Client wired into the local L6Store. Federated
+# query tools (find_entity, list_recent_work, get_cross_agent_summary,
+# list_agents) merge peer responses with local results at call time. Agents
+# sourced from a peer are tagged `peer:<peer-name>:<agent>` in the response so
+# provenance stays clear.
+#
+# Auth: each peer's server must run with the matching Bearer token. By
+# default the client reads `BOURDON_PEER_TOKEN` from the environment; per-peer
+# override via `token_env` below. The peer server reads its expected token
+# from `BOURDON_PEER_TOKEN_SERVER`. Same-Tailnet but different tokens per
+# direction is fine — and recommended.
+
+peers:
+  # Example: federation peer on PC reachable over Tailscale.
+  - name: pc
+    url: http://bourdon-pc.tailnet:7500
+    # The client reads this env var when calling pc.
+    token_env: BOURDON_PEER_TOKEN_PC
+
+  # Example: federation peer on Mac reachable over Tailscale.
+  # - name: mac
+  #   url: http://bourdon-mac.tailnet:7500
+  #   token_env: BOURDON_PEER_TOKEN_MAC
+
+  # Example: localhost peer for two-process testing on one machine.
+  # - name: dev-local
+  #   url: http://localhost:7501
+  #   token_env: BOURDON_PEER_TOKEN

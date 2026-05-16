@@ -49,6 +49,13 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Forward reference: federation client. Imported under TYPE_CHECKING only so
+# the store has no hard runtime dep on the MCP SDK / httpx.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from core.l6_remote import RemoteL6Client
+
 
 DEFAULT_LIBRARY_PATH = Path.home() / "agent-library"
 
@@ -295,8 +302,13 @@ class L6Store:
         ``neurolayer init`` creates the parent dir).
     """
 
-    def __init__(self, library_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        library_path: Path | None = None,
+        peers: list["RemoteL6Client"] | None = None,
+    ) -> None:
         self.library_path = Path(library_path) if library_path else DEFAULT_LIBRARY_PATH
+        self.peers: list["RemoteL6Client"] = list(peers or [])
         self._manifests: dict[str, dict] = {}
         self._entity_index: dict[str, set[str]] = defaultdict(set)
         self.reload_all()
@@ -737,6 +749,284 @@ class L6Store:
             agents=sorted(agent_set),
             recent_sessions=sessions,
             entities=entities,
+        )
+
+    # ------------------------------------------------------------------
+    # Federated async surfaces (Phase 1.6)
+    # ------------------------------------------------------------------
+    #
+    # These mirror the sync query methods above but, when ``self.peers`` is
+    # non-empty, fan out to each peer via ``asyncio.gather`` and merge the
+    # results back together.
+    #
+    # Merge rules (locked in ROADMAP Phase 1.6):
+    # - Entities dedupe by ``name.lower()``; newest ``last_touched`` wins on
+    #   conflicting summary/type. Agent lists, tags, summaries are unioned.
+    # - Sessions dedupe by ``(date, cwd, agent)`` and unioned.
+    # - All list-typed scalar fields (tags, aliases, project_focus,
+    #   key_actions, files_touched) union on dedupe.
+    #
+    # Peer failures are logged and silently dropped — federation must
+    # degrade gracefully when one peer is offline.
+
+    async def list_agents_federated(self) -> list[str]:
+        """Local + peer agent IDs, unioned and sorted."""
+        agents: set[str] = set(self.list_agents())
+        if not self.peers:
+            return sorted(agents)
+        import asyncio
+
+        peer_results = await asyncio.gather(
+            *(peer.list_agents() for peer in self.peers),
+            return_exceptions=True,
+        )
+        for peer, result in zip(self.peers, peer_results):
+            if isinstance(result, Exception):
+                logger.warning("peer %s list_agents raised: %s", peer.name, result)
+                continue
+            for a in result or []:
+                if isinstance(a, str):
+                    agents.add(a)
+        return sorted(agents)
+
+    async def find_entity_federated(
+        self,
+        name: str,
+        include_private: bool = False,
+        access_level: str | None = None,
+    ) -> list[EntityMatch]:
+        """Local + peer entity matches, deduped by name and unioned across agents."""
+        local = self.find_entity(name, include_private=include_private, access_level=access_level)
+        if not self.peers:
+            return local
+        import asyncio
+
+        peer_results = await asyncio.gather(
+            *(
+                peer.find_entity(
+                    name,
+                    access_level=access_level or ("private" if include_private else "public"),
+                    include_private=include_private,
+                )
+                for peer in self.peers
+            ),
+            return_exceptions=True,
+        )
+        # Dedupe by entity .name (case-insensitive), union .agents / .types /
+        # .tags / .summaries.
+        by_key: dict[str, EntityMatch] = {m.name.lower(): m for m in local}
+        for peer, peer_payload in zip(self.peers, peer_results):
+            if isinstance(peer_payload, Exception):
+                logger.warning("peer %s find_entity raised: %s", peer.name, peer_payload)
+                continue
+            for entry in peer_payload or []:
+                if not isinstance(entry, dict):
+                    continue
+                ent_name = (entry.get("name") or "").strip()
+                if not ent_name:
+                    continue
+                key = ent_name.lower()
+                target = by_key.get(key)
+                if target is None:
+                    target = EntityMatch(name=ent_name)
+                    by_key[key] = target
+                # Tag agents with "peer:<name>" prefix to keep provenance clear.
+                for a in entry.get("agents") or []:
+                    if isinstance(a, str):
+                        tagged = a if a.startswith("peer:") else f"peer:{peer.name}:{a}"
+                        if tagged not in target.agents:
+                            target.agents.append(tagged)
+                for t in entry.get("types") or []:
+                    if isinstance(t, str) and t not in target.types:
+                        target.types.append(t)
+                for tag in entry.get("tags") or []:
+                    if isinstance(tag, str) and tag not in target.tags:
+                        target.tags.append(tag)
+                for agent_id, summary in (entry.get("summaries") or {}).items():
+                    if isinstance(agent_id, str) and isinstance(summary, str):
+                        tagged = f"peer:{peer.name}:{agent_id}"
+                        target.summaries.setdefault(tagged, summary)
+        return list(by_key.values())
+
+    async def list_recent_work_federated(
+        self,
+        since: datetime | None = None,
+        agent: str | None = None,
+        include_private: bool = False,
+        access_level: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> "PaginatedSessions":
+        """Local + peer sessions, deduped by (date, cwd, agent)."""
+        local = self.list_recent_work(
+            since=since,
+            agent=agent,
+            include_private=include_private,
+            access_level=access_level,
+            limit=limit,
+            cursor=cursor,
+        )
+        if not self.peers:
+            return local
+        import asyncio
+
+        # Convert datetime to ISO string for peer protocol.
+        since_str = since.isoformat() if since is not None else None
+        peer_results = await asyncio.gather(
+            *(
+                peer.list_recent_work(
+                    since=since_str,
+                    agent=agent,
+                    access_level=access_level or ("private" if include_private else "public"),
+                    include_private=include_private,
+                    limit=limit,
+                    cursor=cursor,
+                )
+                for peer in self.peers
+            ),
+            return_exceptions=True,
+        )
+        seen: set[tuple[str, str | None, str]] = set()
+        merged: list[SessionRef] = []
+        for s in local.sessions:
+            key = (s.date, s.cwd, s.agent)
+            seen.add(key)
+            merged.append(s)
+        for peer, payload in zip(self.peers, peer_results):
+            if isinstance(payload, Exception):
+                logger.warning("peer %s list_recent_work raised: %s", peer.name, payload)
+                continue
+            sessions = (payload or {}).get("sessions") or []
+            for s in sessions:
+                if not isinstance(s, dict):
+                    continue
+                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                date_str = str(s.get("date") or "")
+                cwd = s.get("cwd")
+                key = (date_str, cwd, tagged_agent)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(
+                    SessionRef(
+                        agent=tagged_agent,
+                        date=date_str,
+                        cwd=cwd,
+                        project_focus=list(s.get("project_focus") or []),
+                        key_actions=list(s.get("key_actions") or []),
+                        files_touched=list(s.get("files_touched") or []),
+                    )
+                )
+        merged.sort(key=lambda s: (s.date, s.agent), reverse=True)
+        # Pagination after merge — re-apply limit if caller specified.
+        effective_limit = (
+            DEFAULT_LIMIT if limit is None else max(1, min(int(limit), MAX_LIMIT))
+        )
+        page = merged[:effective_limit]
+        return PaginatedSessions(
+            sessions=page,
+            next_cursor=None,  # cross-peer cursoring not in v0
+            has_more=len(merged) > len(page),
+        )
+
+    async def get_cross_agent_summary_federated(
+        self,
+        project: str,
+        include_private: bool = False,
+        access_level: str | None = None,
+    ) -> "ProjectSummary":
+        """Local + peer aggregates merged into one ProjectSummary."""
+        local = self.get_cross_agent_summary(
+            project,
+            include_private=include_private,
+            access_level=access_level,
+        )
+        if not self.peers:
+            return local
+        import asyncio
+
+        peer_results = await asyncio.gather(
+            *(
+                peer.get_cross_agent_summary(
+                    project,
+                    access_level=access_level or ("private" if include_private else "public"),
+                    include_private=include_private,
+                )
+                for peer in self.peers
+            ),
+            return_exceptions=True,
+        )
+        agent_set: set[str] = set(local.agents)
+        # Deepen sessions union (dedupe by (date, cwd, agent)).
+        seen: set[tuple[str, str | None, str]] = set()
+        merged_sessions: list[SessionRef] = []
+        for s in local.recent_sessions:
+            seen.add((s.date, s.cwd, s.agent))
+            merged_sessions.append(s)
+        # Entities by name.lower().
+        merged_entities: dict[str, EntityMatch] = {
+            m.name.lower(): m for m in local.entities
+        }
+        for peer, payload in zip(self.peers, peer_results):
+            if isinstance(payload, Exception):
+                logger.warning("peer %s get_cross_agent_summary raised: %s", peer.name, payload)
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for a in payload.get("agents") or []:
+                if isinstance(a, str):
+                    agent_set.add(f"peer:{peer.name}:{a}")
+            for s in payload.get("recent_sessions") or []:
+                if not isinstance(s, dict):
+                    continue
+                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                key = (str(s.get("date") or ""), s.get("cwd"), tagged_agent)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_sessions.append(
+                    SessionRef(
+                        agent=tagged_agent,
+                        date=str(s.get("date") or ""),
+                        cwd=s.get("cwd"),
+                        project_focus=list(s.get("project_focus") or []),
+                        key_actions=list(s.get("key_actions") or []),
+                        files_touched=list(s.get("files_touched") or []),
+                    )
+                )
+            for entry in payload.get("entities") or []:
+                if not isinstance(entry, dict):
+                    continue
+                ent_name = (entry.get("name") or "").strip()
+                if not ent_name:
+                    continue
+                key2 = ent_name.lower()
+                target = merged_entities.get(key2)
+                if target is None:
+                    target = EntityMatch(name=ent_name)
+                    merged_entities[key2] = target
+                for a in entry.get("agents") or []:
+                    if isinstance(a, str):
+                        tagged = f"peer:{peer.name}:{a}"
+                        if tagged not in target.agents:
+                            target.agents.append(tagged)
+                for t in entry.get("types") or []:
+                    if isinstance(t, str) and t not in target.types:
+                        target.types.append(t)
+                for tag in entry.get("tags") or []:
+                    if isinstance(tag, str) and tag not in target.tags:
+                        target.tags.append(tag)
+                for agent_id, summary in (entry.get("summaries") or {}).items():
+                    if isinstance(agent_id, str) and isinstance(summary, str):
+                        target.summaries.setdefault(
+                            f"peer:{peer.name}:{agent_id}", summary
+                        )
+        merged_sessions.sort(key=lambda s: s.date, reverse=True)
+        return ProjectSummary(
+            project=project,
+            agents=sorted(agent_set),
+            recent_sessions=merged_sessions,
+            entities=list(merged_entities.values()),
         )
 
     def commit_l5(

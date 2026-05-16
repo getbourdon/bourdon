@@ -73,6 +73,15 @@ bench = [
     "anthropic>=0.40",
     "httpx>=0.27",
 ]
+# Phase 1.6 peer L6 federation: cross-machine federation over Tailscale/HTTP.
+# Required to use `bourdon serve --peer URL` or `peers.yaml` config.
+# Pulls in the MCP streamable-HTTP client (already shipped with the [server]
+# extras) and uvicorn for hosting the authenticated HTTP transport.
+federation = [
+    "fastmcp>=2.0",
+    "httpx>=0.27",
+    "uvicorn>=0.30",
+]
 
 # Entry points for adapter plugins.
 # Third-party adapters register here via their own pyproject.toml.

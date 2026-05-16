@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import time as time_module
 from datetime import datetime
@@ -276,7 +277,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         }
 
     @mcp.tool()
-    def list_recent_work(
+    async def list_recent_work(
         since: str | None = None,
         agent: str | None = None,
         access_level: str = "public",
@@ -325,14 +326,27 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
         try:
-            page = store.list_recent_work(
-                since=cutoff,
-                agent=agent,
-                include_private=include_private,
-                access_level=access_level,
-                limit=limit,
-                cursor=cursor,
-            )
+            if store.peers and not cursor:
+                # Federated path: merge local + peer sessions. Cursoring across
+                # peers is not supported in v0; a non-None cursor falls back to
+                # local-only paging (where the cursor encoding is valid).
+                page = await store.list_recent_work_federated(
+                    since=cutoff,
+                    agent=agent,
+                    include_private=include_private,
+                    access_level=access_level,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            else:
+                page = store.list_recent_work(
+                    since=cutoff,
+                    agent=agent,
+                    include_private=include_private,
+                    access_level=access_level,
+                    limit=limit,
+                    cursor=cursor,
+                )
         except ValueError as exc:
             # Bad cursor token -- surface to the caller rather than silently
             # treating it as a fresh first page.
@@ -363,7 +377,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         }
 
     @mcp.tool()
-    def find_entity(
+    async def find_entity(
         name: str,
         access_level: str = "public",
         include_private: bool = False,
@@ -374,8 +388,12 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         ``include_private`` defaults to False. Callers that genuinely need
         unredacted output must pass ``True`` explicitly -- this is a second
         line of defense on top of per-manifest visibility policy.
+
+        When the server has peer L6 servers configured (``--peer`` flag),
+        the result also merges matches from each peer's library, tagging
+        peer-sourced agents as ``peer:<peer-name>:<agent>``.
         """
-        matches = store.find_entity(
+        matches = await store.find_entity_federated(
             name,
             include_private=include_private,
             access_level=access_level,
@@ -386,6 +404,17 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             "include_private": include_private,
             "matches": [m.to_dict() for m in matches],
         }
+
+    @mcp.tool()
+    async def list_agents() -> dict:
+        """
+        List agent IDs known to this L6 server, plus any peers' agents.
+
+        Peer-sourced agents are NOT prefix-tagged here — call sites that need
+        provenance use the more detailed ``find_entity`` / ``get_cross_agent_summary``
+        tools where each agent is tagged ``peer:<peer-name>:<agent>``.
+        """
+        return {"agents": await store.list_agents_federated()}
 
     @mcp.tool()
     def commit_to_federation(
@@ -460,7 +489,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             }
 
     @mcp.tool()
-    def get_cross_agent_summary(
+    async def get_cross_agent_summary(
         project: str,
         access_level: str = "public",
         include_private: bool = False,
@@ -469,9 +498,11 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         Aggregate everything the federation knows about a project.
 
         Returns agents that touched it, recent sessions whose
-        ``project_focus`` references it, and entity matches.
+        ``project_focus`` references it, and entity matches. When peers are
+        configured (``--peer`` flag), peer libraries are merged in with
+        agents tagged as ``peer:<peer-name>:<agent>``.
         """
-        summary = store.get_cross_agent_summary(
+        summary = await store.get_cross_agent_summary_federated(
             project,
             include_private=include_private,
             access_level=access_level,
@@ -524,6 +555,9 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
 # -- CLI entry point -----------------------------------------------------------
 
 
+DEFAULT_PEERS_CONFIG = Path.home() / ".bourdon" / "peers.yaml"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="bourdon-l6-server",
@@ -547,34 +581,168 @@ def _parse_args() -> argparse.Namespace:
         default=7500,
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
     )
+    parser.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        help=(
+            "Peer L6 server URL (e.g. http://pc.tailnet:7500). Repeatable. "
+            "Combined with peers loaded from --peers-config. See "
+            "config/peers.example.yaml for the declarative format."
+        ),
+    )
+    parser.add_argument(
+        "--peers-config",
+        type=Path,
+        default=DEFAULT_PEERS_CONFIG,
+        help=(
+            "Path to a YAML file listing peer L6 servers. Loaded if it "
+            "exists. Per-peer entries: name, url, token_env. Skipped "
+            "silently if the file is absent."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help=(
+            "Serve HTTP transport without Bearer-token auth. Off by default "
+            "(server requires Authorization: Bearer <env BOURDON_PEER_TOKEN_SERVER> "
+            "on /mcp). Only safe on a closed network (Tailnet, localhost)."
+        ),
+    )
     return parser.parse_args()
 
 
+def _load_peers(
+    config_path: Path,
+    inline_urls: list[str],
+) -> list["RemoteL6Client"]:
+    """Build the peers list from CLI flags + optional config file.
+
+    Returns an empty list if no peers are configured. Import of
+    :class:`RemoteL6Client` is local so importing this module without the
+    ``[federation]`` extras stays cheap.
+    """
+    from core.l6_remote import RemoteL6Client
+
+    peers: list[RemoteL6Client] = []
+    seen_urls: set[str] = set()
+    if config_path.exists():
+        try:
+            import yaml as _yaml
+
+            data = _yaml.safe_load(config_path.read_text()) or {}
+            for entry in data.get("peers") or []:
+                if not isinstance(entry, dict):
+                    continue
+                url = entry.get("url")
+                if not isinstance(url, str) or not url:
+                    continue
+                name = entry.get("name") or url
+                token_env = entry.get("token_env") or "BOURDON_PEER_TOKEN"
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                peers.append(RemoteL6Client(url=url, name=name, token_env=token_env))
+        except Exception as exc:  # noqa: BLE001 -- config errors degrade to "no peers"
+            logger.warning("Failed to load peers config %s: %s", config_path, exc)
+    for url in inline_urls:
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        peers.append(RemoteL6Client(url=url, name=url))
+    return peers
+
+
+def _build_auth_middleware():
+    """Starlette middleware enforcing Authorization: Bearer <token>.
+
+    Token is read from env ``BOURDON_PEER_TOKEN_SERVER`` at process start.
+    If the env var is unset and the server is launched without
+    ``--allow-unauthenticated``, the middleware refuses every request with
+    503 — failing closed is the safer default.
+    """
+    expected = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+
+    try:
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import JSONResponse
+    except ImportError as exc:  # pragma: no cover -- starlette ships with fastmcp
+        raise RuntimeError("starlette is required for HTTP transport") from exc
+
+    class _BearerAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if expected is None:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Server has no BOURDON_PEER_TOKEN_SERVER set and was "
+                            "launched without --allow-unauthenticated."
+                        )
+                    },
+                    status_code=503,
+                )
+            header = request.headers.get("authorization") or ""
+            if not header.lower().startswith("bearer "):
+                return JSONResponse({"error": "missing Bearer token"}, status_code=401)
+            token = header.split(" ", 1)[1].strip()
+            if token != expected:
+                return JSONResponse({"error": "invalid Bearer token"}, status_code=401)
+            return await call_next(request)
+
+    return _BearerAuth
+
+
 def main() -> None:
+    import os as _os  # local to avoid top-level shuffle
+
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    peers = _load_peers(args.peers_config, args.peer)
     logger.info(
-        "Bourdon L6 server starting -- library=%s, transport=%s",
+        "Bourdon L6 server starting -- library=%s, transport=%s, peers=%d",
         args.library,
         args.transport,
+        len(peers),
     )
-    store = L6Store(args.library)
+    for p in peers:
+        logger.info("  peer: %s -> %s", p.name, p.url)
+    store = L6Store(args.library, peers=peers)
     logger.info("Loaded %d agent(s): %s", len(store.list_agents()), store.list_agents())
     server = create_l6_server(store)
     if args.transport == "stdio":
         server.run()  # fastmcp default: stdio
-    else:
-        # HTTP transport -- fastmcp exposes this via run_http or similar.
-        # We keep this surface thin because stdio is the MCP default and
-        # HTTP setup varies by fastmcp version.
+        return
+
+    # HTTP transport ----------------------------------------------------------
+    if args.allow_unauthenticated:
+        logger.warning(
+            "Serving HTTP transport WITHOUT auth (--allow-unauthenticated). "
+            "Restrict to localhost / Tailnet only."
+        )
         try:
             server.run(transport="http", port=args.port)
         except TypeError:
-            # Older fastmcp signatures: fall back to stdio with a warning.
             logger.warning(
                 "This fastmcp version does not accept transport='http'; falling back to stdio."
             )
             server.run()
+        return
+
+    # Authenticated HTTP path: build the Starlette ASGI app, wrap with bearer
+    # middleware, run under uvicorn ourselves so we own the middleware stack.
+    try:
+        import uvicorn
+        from starlette.middleware import Middleware
+    except ImportError as exc:
+        raise RuntimeError(
+            "uvicorn + starlette are required for HTTP transport. "
+            "Install via: pip install 'bourdon[server,federation]'"
+        ) from exc
+
+    auth_cls = _build_auth_middleware()
+    app = server.http_app(middleware=[Middleware(auth_cls)])
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
