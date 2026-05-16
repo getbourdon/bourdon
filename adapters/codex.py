@@ -222,6 +222,10 @@ _NATIVE_MEMORY_SENSITIVE_PATTERNS = (
 )
 _MAX_STRUCTURED_ROLLOUT_SCAN_BYTES = 1_000_000
 _MAX_ROLLOUT_CONCEPT_SCAN_CHARS = 2_000_000
+_MAX_L5_KEY_ACTION_CHARS = 300
+_MAX_L5_TOPIC_NAME_CHARS = 120
+_MAX_L5_PREFERENCE_NAME_CHARS = 80
+_MAX_L5_PREFERENCE_SUMMARY_CHARS = 320
 _FALLBACK_CONCEPT_PATTERNS = (
     (
         "Bourdon recognition first runtime layer",
@@ -266,6 +270,10 @@ def _safe_native_memory_text(value: str, limit: int = 180) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _bounded_l5_text(value: str, limit: int) -> str:
+    return _safe_native_memory_text(value, limit=limit)
+
+
 def _split_csv(value: str) -> list[str]:
     return [
         part.strip().strip("`")
@@ -307,6 +315,28 @@ def _normalize_local_path(path_value: str | Path, os_name: str | None = None) ->
         rest = match.group(2).replace("\\", "/")
         return Path(f"/mnt/{drive}/{rest}")
     return Path(raw)
+
+
+def _path_compare_text(path_value: str | Path) -> str:
+    raw = str(path_value).strip()
+    if raw.startswith("\\\\?\\") or raw.startswith("//?/"):
+        raw = raw[4:]
+    return str(_normalize_local_path(raw)).replace("\\", "/").rstrip("/").lower()
+
+
+def _is_codex_memory_cwd(cwd: str | None, codex_home: Path | None) -> bool:
+    if not cwd or codex_home is None:
+        return False
+    cwd_text = _path_compare_text(cwd)
+    memories_text = _path_compare_text(codex_home / "memories")
+    return cwd_text == memories_text or cwd_text.startswith(f"{memories_text}/")
+
+
+def _looks_like_codex_memories_path(cwd: str | None) -> bool:
+    if not isinstance(cwd, str) or not cwd.strip():
+        return False
+    cwd_text = str(cwd).replace("\\", "/").rstrip("/").lower()
+    return cwd_text.endswith("/.codex/memories") or "/.codex/memories/" in cwd_text
 
 
 def _friendly_label(identifier: str) -> str:
@@ -777,6 +807,127 @@ def _fallback_concept_aliases(concept_name: str) -> list[str]:
     return []
 
 
+def _memory_session_action(files_touched: list[str]) -> str:
+    if not files_touched:
+        return "Updated Codex memory artifacts"
+
+    shown_files = [
+        _bounded_l5_text(str(path), limit=90)
+        for path in files_touched[:5]
+        if str(path).strip()
+    ]
+    if not shown_files:
+        return "Updated Codex memory artifacts"
+    suffix = ", ..." if len(files_touched) > len(shown_files) else ""
+    return _bounded_l5_text(
+        f"Updated Codex memory artifacts: {', '.join(shown_files)}{suffix}",
+        limit=_MAX_L5_KEY_ACTION_CHARS,
+    )
+
+
+def _session_action_from_record(
+    record: dict[str, Any],
+    codex_home: Path | None,
+) -> str:
+    if _is_codex_memory_cwd(record.get("cwd"), codex_home):
+        return _memory_session_action(list(record.get("files_touched") or []))
+    return _bounded_l5_text(
+        str(record.get("thread_name") or "(untitled)"),
+        limit=_MAX_L5_KEY_ACTION_CHARS,
+    )
+
+
+def _topic_name_from_record(
+    record: dict[str, Any],
+    codex_home: Path | None,
+) -> str:
+    if _is_codex_memory_cwd(record.get("cwd"), codex_home):
+        return "Codex memory artifacts"
+    return _bounded_l5_text(
+        str(record.get("thread_name") or "(untitled)"),
+        limit=_MAX_L5_TOPIC_NAME_CHARS,
+    )
+
+
+def _clean_preference_text(preference_text: str) -> str:
+    text = _normalize_text(preference_text)
+    text = re.sub(r"\s*\[Task\s+\d+\]\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" .")
+
+
+def _canonical_preference_name(preference_text: str) -> str:
+    clean_text = _clean_preference_text(preference_text)
+    lower = clean_text.lower()
+
+    if "backend-first" in lower or "backend first" in lower:
+        return "backend-first delivery preference"
+    if "cross-machine" in lower or (
+        "commit" in lower
+        and "push" in lower
+        and any(token in lower for token in ("mac", "ios", "xcode"))
+    ):
+        return "cross-machine handoff workflow"
+    if "machine switch" in lower and "branch" in lower and "checkpoint" in lower:
+        return "machine-switch checkpoint workflow"
+    if "old-to-new letter translation" in lower or "drive letter" in lower:
+        return "drive-letter translation"
+    if "handoff playbook" in lower:
+        return "reusable handoff playbook"
+    if "implemented architecture" in lower and "intended architecture" in lower:
+        return "architecture stage reporting"
+    if "full native ios" in lower or "full rewrite" in lower:
+        return "full-platform migration planning"
+    if "reinstall" in lower and any(
+        token in lower for token in ("handoff", "recovery", "offline")
+    ):
+        return "reinstall recovery handoff"
+    if "exact path" in lower or "exact paths" in lower:
+        return "exact-path operational guidance"
+    if re.search(r"\b(wait|stop)\b", lower):
+        return "stop/wait interruption preference"
+    if "git" in lower and "commit" in lower and "push" in lower:
+        return "git checkpoint workflow"
+
+    candidate = lower.split("->", 1)[1].strip() if "->" in lower else lower
+    candidate = re.sub(r"^for\s+", "", candidate)
+    candidate = re.sub(r"^future\s+", "", candidate)
+    candidate = re.sub(r"^the user (?:wants|prefers|gave|says|likes)\s+", "", candidate)
+    candidate = re.sub(r"^user (?:wants|prefers|gave|says|likes)\s+", "", candidate)
+    candidate = re.sub(r"^prefer(?:s|red)?\s+", "", candidate)
+    candidate = re.sub(r"^default to\s+", "", candidate)
+    candidate = re.split(r"[:.;]", candidate, maxsplit=1)[0]
+    candidate = re.sub(r"[^a-z0-9][\"'`][^a-z0-9]", " ", candidate)
+    tokens = [
+        token
+        for token in re.findall(r"[a-z][a-z0-9-]{2,}", candidate)
+        if token not in _GENERIC_PROJECT_NAMES
+    ]
+    if not tokens:
+        return "codex preference"
+    name = " ".join(tokens[:6])
+    if not name.endswith("preference"):
+        name = f"{name} preference"
+    return _bounded_l5_text(name, limit=_MAX_L5_PREFERENCE_NAME_CHARS)
+
+
+def _preference_entity(preference_text: str) -> Entity:
+    clean_text = _clean_preference_text(preference_text)
+    name = _canonical_preference_name(clean_text)
+    tags = ["codex-preference"]
+    if "workflow" in name or "handoff" in name:
+        tags.append("workflow")
+    return Entity(
+        name=name,
+        type="preference",
+        summary=_bounded_l5_text(
+            f"User preference: {clean_text}",
+            limit=_MAX_L5_PREFERENCE_SUMMARY_CHARS,
+        ),
+        tags=tags,
+        visibility=Visibility.TEAM,
+    )
+
+
 def _timestamp_to_iso_date(ts: str) -> str | None:
     """Extract `YYYY-MM-DD` from an ISO-ish timestamp string."""
     if not ts:
@@ -1210,7 +1361,12 @@ def _collect_rollout_fallback_memory_data(
         thread_data = _empty_memory_sections()
         thread_name = str(record.get("thread_name") or "").strip()
         if thread_name and thread_name != "(untitled)":
-            thread_data["task_titles"].append(thread_name)
+            if _looks_like_codex_memories_path(record.get("cwd")):
+                thread_data["task_titles"].append("Codex memory artifacts")
+            else:
+                thread_data["task_titles"].append(
+                    _bounded_l5_text(thread_name, limit=_MAX_L5_TOPIC_NAME_CHARS)
+                )
 
         project_key = _project_key_from_cwd(record.get("cwd"))
         if project_key:
@@ -1730,13 +1886,17 @@ def _build_codex_native_memory_payload(
     }
 
 
-def _record_to_session(record: dict[str, Any], project_label: str | None = None) -> Session:
+def _record_to_session(
+    record: dict[str, Any],
+    project_label: str | None = None,
+    codex_home: Path | None = None,
+) -> Session:
     project_focus = [project_label] if project_label else []
     return Session(
         date=record["date"],
         cwd=record.get("cwd"),
         project_focus=project_focus,
-        key_actions=[record["thread_name"]],
+        key_actions=[_session_action_from_record(record, codex_home)],
         files_touched=list(record.get("files_touched") or []),
         visibility=Visibility.TEAM,
     )
@@ -1818,7 +1978,13 @@ class CodexAdapter:
                 continue
             project_key = _project_key_from_cwd(record.get("cwd"))
             project_label = _friendly_label(project_key) if project_key else None
-            sessions.append(_record_to_session(record, project_label=project_label))
+            sessions.append(
+                _record_to_session(
+                    record,
+                    project_label=project_label,
+                    codex_home=self._codex_home,
+                )
+            )
         return sessions
 
     def export_l5(self, since: datetime | None = None) -> L5Manifest:
@@ -1926,12 +2092,19 @@ class CodexAdapter:
                 preferred_projects,
                 thread_context=memory_data["thread_contexts"].get(record["id"]),
             )
-            sessions.append(_record_to_session(record, project_label=project_label))
+            sessions.append(
+                _record_to_session(
+                    record,
+                    project_label=project_label,
+                    codex_home=self._codex_home,
+                )
+            )
 
+            topic_name = _topic_name_from_record(record, self._codex_home)
             topic = Entity(
-                name=record["thread_name"],
+                name=topic_name,
                 type="topic",
-                summary=f"Codex thread: {record['thread_name']}",
+                summary=f"Codex thread: {topic_name}",
                 last_touched=record["date"],
                 tags=["codex-thread"],
                 visibility=Visibility.TEAM,
@@ -1942,7 +2115,8 @@ class CodexAdapter:
             else:
                 entity_map[key] = topic
 
-        for topic_name in memory_data["task_groups"] + memory_data["task_titles"]:
+        for topic_text in memory_data["task_groups"] + memory_data["task_titles"]:
+            topic_name = _bounded_l5_text(topic_text, limit=_MAX_L5_TOPIC_NAME_CHARS)
             topic = Entity(
                 name=topic_name,
                 type="topic",
@@ -1998,13 +2172,7 @@ class CodexAdapter:
                 entity_map[key] = concept
 
         for preference_text in memory_data["preferences"]:
-            preference = Entity(
-                name=preference_text,
-                type="preference",
-                summary=preference_text,
-                tags=["codex-preference"],
-                visibility=Visibility.TEAM,
-            )
+            preference = _preference_entity(preference_text)
             key = (preference.type or "topic", preference.name.lower())
             if key in entity_map:
                 _merge_entity(entity_map[key], preference)

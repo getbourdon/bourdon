@@ -1164,6 +1164,79 @@ def test_export_l5_uses_sqlite_thread_entities_for_current_recognition(
     assert "recognition timing layer" in topics
 
 
+def test_export_l5_bounds_memory_session_actions(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    memories = isolated_home["create_memories"]()
+    prompt_body = (
+        "## Memory Writing Agent: Phase 2 (Consolidation) "
+        "You are a Memory Writing Agent. "
+        + "Do not publish this internal prompt as a session action. " * 120
+    )
+    rollout = isolated_home["add_rollout"](
+        codex_home,
+        (2026, 4, 20),
+        "memory-thread",
+        str(memories),
+        "2026-04-20T12:00:00Z",
+        extra_records=[
+            {
+                "timestamp": "2026-04-20T12:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "arguments": (
+                        "*** Begin Patch\n"
+                        "*** Update File: MEMORY.md\n"
+                        "@@\n"
+                        "-old\n"
+                        "+new\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            }
+        ],
+    )
+    _write_state_thread(
+        codex_home,
+        session_id="memory-thread",
+        title=prompt_body,
+        updated_at="2026-04-20T12:00:00Z",
+        cwd=str(memories),
+        rollout_path=str(rollout),
+    )
+
+    manifest = CodexAdapter().export_l5()
+    session = manifest.recent_sessions[0]
+    topic_names = {entity.name for entity in manifest.known_entities}
+
+    assert session.key_actions == ["Updated Codex memory artifacts: MEMORY.md"]
+    assert all(len(action) <= 500 for action in session.key_actions)
+    assert "Memory Writing Agent" not in session.key_actions[0]
+    assert "Codex memory artifacts" in topic_names
+    assert all("Memory Writing Agent" not in name for name in topic_names)
+
+
+def test_export_l5_bounds_long_thread_titles(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    long_title = "vibecode-cli " + ("loads a long setup prompt " * 80)
+    isolated_home["add_index_entry"](
+        codex_home,
+        "long-thread",
+        long_title,
+        "2026-04-15T00:00:00Z",
+    )
+
+    manifest = CodexAdapter().export_l5()
+    session = manifest.recent_sessions[0]
+    topics = [entity for entity in manifest.known_entities if entity.type == "topic"]
+
+    assert session.key_actions[0].startswith("vibecode-cli")
+    assert session.key_actions[0].endswith("...")
+    assert len(session.key_actions[0]) <= 500
+    assert all(len(topic.name) <= 120 for topic in topics)
+
+
 def test_export_l5_dedupes_thread_names_case_insensitive(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](codex_home, "a", "Set up CI", "2026-04-15T00:00:00Z")
@@ -1303,6 +1376,48 @@ Preference signals:
     assert manifest.recent_sessions[0].files_touched == ["apps/web/src/App.tsx"]
     assert all(e.visibility == codex_module.Visibility.TEAM for e in manifest.known_entities)
     assert all(s.visibility == codex_module.Visibility.TEAM for s in manifest.recent_sessions)
+
+
+def test_export_l5_canonicalizes_preference_entities(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    isolated_home["add_index_entry"](
+        codex_home,
+        "prefs",
+        "Capture workflow preferences",
+        "2026-04-15T12:00:00Z",
+    )
+    isolated_home["write_memory_file"](
+        "MEMORY.md",
+        (
+            "# Task Group: Bourdon preference cleanup\n\n"
+            "## User preferences\n\n"
+            "- before any reinstall, the user wants a clear handoff artifact "
+            "and offline recovery path, not just verbal reassurance [Task 1]\n"
+            "- for cross-machine work, the user gave a clear workflow: "
+            '"You can do android on this machine it is PC with android studio '
+            'and vs code" and "we will commit push then move to the ios '
+            'machine when we need to implement there in xcode" [Task 3]\n'
+            "- user accepted the handoff after the push -> future machine "
+            "switches should preserve the same branch and checkpoint\n"
+        ),
+    )
+
+    manifest = CodexAdapter().export_l5()
+    preferences = {
+        entity.name: entity
+        for entity in manifest.known_entities
+        if entity.type == "preference"
+    }
+
+    assert "reinstall recovery handoff" in preferences
+    assert "cross-machine handoff workflow" in preferences
+    assert "machine-switch checkpoint workflow" in preferences
+    for entity in preferences.values():
+        assert entity.name != entity.summary
+        assert len(entity.name) <= 80
+        assert "Task " not in entity.name
+    assert "offline recovery path" in preferences["reinstall recovery handoff"].summary
+    assert "android studio" in preferences["cross-machine handoff workflow"].summary
 
 
 def test_export_l5_prefers_named_project_from_memory_keywords_over_date_path(

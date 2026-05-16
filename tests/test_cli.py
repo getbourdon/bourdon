@@ -487,6 +487,9 @@ def test_cli_codex_doctor_reports_sqlite_memory_health(tmp_path, monkeypatch, ca
     assert report["fallback_recall"]["active"] is False
     assert report["fallback_recall"]["session_records"] == 1
     assert report["fallback_recall"]["rollout_records"] == 1
+    assert report["l5_quality"]["status"] == "ok"
+    assert report["l5_quality"]["oversized_key_actions"] == 0
+    assert report["l5_quality"]["duplicated_name_summary_entities"] == 0
 
 
 def test_cli_codex_doctor_marks_fallback_active_when_distilled_memory_empty(

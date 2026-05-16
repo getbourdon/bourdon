@@ -9,13 +9,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MCP smoke tests against Bourdon L6 server.")
-    parser.add_argument("--library-path", default=str(Path.home() / "agent-library"))
+    parser.add_argument("--library-path")
     parser.add_argument("--entity-name", default="Bourdon MCP")
     parser.add_argument("--query-topic", default="Bourdon MCP")
     parser.add_argument(
@@ -65,6 +62,14 @@ def _parse_args() -> argparse.Namespace:
     if args.isolate_federation_write_smoke:
         args.federation_write_roundtrip = True
         args.skip_seeded_library_assertions = True
+    if args.federation_write_roundtrip and not args.library_path:
+        parser.error(
+            "--federation-write-roundtrip / --isolate-federation-write-smoke "
+            "require --library-path to be set to a disposable directory; refusing "
+            "to write probe agents into the default ~/agent-library/."
+        )
+    if args.library_path is None:
+        args.library_path = str(Path.home() / "agent-library")
     if not args.recognition_prompt:
         args.recognition_prompt = f"Tell me about {args.entity_name}."
     return args
@@ -83,6 +88,9 @@ def _first_json_payload(call_result: Any) -> dict[str, Any]:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
     report: dict[str, Any] = {
         "status": "pass",
         "tools": [],

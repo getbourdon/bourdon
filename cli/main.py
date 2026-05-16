@@ -433,8 +433,62 @@ def _handle_codex_build_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def _inspect_l5_quality(manifest: dict[str, Any]) -> dict[str, Any]:
+    oversized_actions: list[dict[str, Any]] = []
+    for session_index, session in enumerate(manifest.get("recent_sessions") or []):
+        for action_index, action in enumerate(session.get("key_actions") or []):
+            action_text = str(action)
+            if len(action_text) <= 500:
+                continue
+            oversized_actions.append(
+                {
+                    "session_index": session_index,
+                    "action_index": action_index,
+                    "bytes": len(action_text.encode("utf-8")),
+                }
+            )
+
+    duplicated_entities: list[dict[str, Any]] = []
+    for entity_index, entity in enumerate(manifest.get("known_entities") or []):
+        name = str(entity.get("name") or "").strip()
+        summary = str(entity.get("summary") or "").strip()
+        if not name or name != summary:
+            continue
+        duplicated_entities.append(
+            {
+                "entity_index": entity_index,
+                "name": _safe_native_memory_text(name, limit=120),
+            }
+        )
+
+    warnings: list[str] = []
+    if oversized_actions:
+        warnings.append("L5 contains oversized session key_actions.")
+    if duplicated_entities:
+        warnings.append("L5 contains entities with duplicated name and summary.")
+
+    return {
+        "status": "warn" if warnings else "ok",
+        "oversized_key_actions": len(oversized_actions),
+        "duplicated_name_summary_entities": len(duplicated_entities),
+        "warnings": warnings,
+        "samples": {
+            "oversized_key_actions": oversized_actions[:5],
+            "duplicated_name_summary_entities": duplicated_entities[:5],
+        },
+    }
+
+
 def _handle_codex_doctor(args: argparse.Namespace) -> int:
     adapter = _build_adapter(args)
+    try:
+        manifest = adapter.export_l5().to_dict()
+        l5_quality = _inspect_l5_quality(manifest)
+    except Exception as exc:  # noqa: BLE001
+        l5_quality = {
+            "status": "unavailable",
+            "reason": str(exc),
+        }
     report = {
         "source_coverage": _source_coverage(adapter),
         "codex_state_db": _inspect_codex_state_db(adapter._codex_home),
@@ -442,6 +496,7 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
             adapter._codex_home,
             adapter._codex_brain,
         ),
+        "l5_quality": l5_quality,
     }
     _write_yaml_if_requested(report, args.report_out)
     _print_yaml(report)
