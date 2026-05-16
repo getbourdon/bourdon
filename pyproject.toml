@@ -66,6 +66,13 @@ server = [
 llama-cpp = [
     "httpx>=0.27",
 ]
+# Phase 1.5 latency-harness: drives provider APIs for recognition-latency
+# benchmarks. Optional because most Bourdon installs do not run benchmarks.
+bench = [
+    "openai>=1.50",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+]
 
 # Entry points for adapter plugins.
 # Third-party adapters register here via their own pyproject.toml.

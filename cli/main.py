@@ -1354,7 +1354,54 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cc_export_cmd.set_defaults(func=_handle_claude_code_export)
 
+    # ---- benchmark ---------------------------------------------------------
+    benchmark_cmd = subparsers.add_parser(
+        "benchmark",
+        help="Bourdon benchmarks (Phase 1.5+)",
+    )
+    benchmark_subparsers = benchmark_cmd.add_subparsers(dest="benchmark_command")
+    latency_cmd = benchmark_subparsers.add_parser(
+        "latency",
+        help=(
+            "Run the first-turn recognition latency harness and append a row "
+            "to BENCHMARKS/latency_matrix.md. See BENCHMARKS/methodology.md."
+        ),
+    )
+    latency_cmd.add_argument(
+        "harness_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments forwarded to scripts/latency_harness.py.",
+    )
+    latency_cmd.set_defaults(func=_handle_benchmark_latency)
+
     return parser
+
+
+def _handle_benchmark_latency(args: argparse.Namespace) -> int:
+    """Run the Phase 1.5 latency harness in-process.
+
+    Forwards `harness_args` (anything after `bourdon benchmark latency --`) to
+    `scripts/latency_harness.py:main`. Lives in cli/main.py only as a convenience
+    surface; the harness is also runnable directly as a script.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    harness_path = Path(__file__).resolve().parent.parent / "scripts" / "latency_harness.py"
+    if not harness_path.exists():
+        print(f"latency harness missing at {harness_path}", file=sys.stderr)
+        return 1
+    spec = importlib.util.spec_from_file_location("latency_harness", harness_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # Register before exec so dataclasses' module-resolution sees us.
+    sys.modules["latency_harness"] = module
+    spec.loader.exec_module(module)
+    forwarded = getattr(args, "harness_args", None) or []
+    # argparse.REMAINDER on a subcommand sometimes keeps the leading "--"; drop it.
+    if forwarded and forwarded[0] == "--":
+        forwarded = forwarded[1:]
+    return int(module.main(forwarded))
 
 
 def main(argv: list[str] | None = None) -> int:
