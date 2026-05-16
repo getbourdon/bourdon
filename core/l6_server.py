@@ -166,6 +166,126 @@ def prepare_recognition_context_from_store(
     }
 
 
+async def prepare_recognition_context_federated(
+    store: L6Store,
+    prompt: str,
+    access_level: str = "team",
+    include_private: bool = False,
+    timeout_per_peer: float | None = None,
+) -> dict[str, Any]:
+    """Phase 1.7 — federated recognition with bounded per-peer latency.
+
+    Behavior:
+    1. Run local recognition first (sync, ~1.2 ms). This always produces a
+       valid response — peers can only *augment*, never block.
+    2. Fan out to every peer in parallel via ``asyncio.wait_for``, each
+       capped by ``timeout_per_peer`` (default: per-peer ``recognition_timeout``,
+       typically 200 ms).
+    3. Merge peer-returned ``matched_entities`` into the local list, tagging
+       peer-sourced agents as ``peer:<peer-name>:<agent>``. Dedupe by
+       ``name.lower()``; on dedupe, peer source_agents are appended to the
+       local entity.
+    4. Append a one-line summary of each responding peer to the
+       ``prompt_context`` so the caller can show provenance.
+    5. Return the extended payload with per-peer latency breakdown.
+
+    Slow peers (over timeout) and failed peers are logged + their latency
+    reported as ``None``. They never propagate exceptions.
+    """
+    import asyncio
+
+    # 1. Local first — guaranteed answer.
+    local = prepare_recognition_context_from_store(
+        store, prompt, access_level=access_level, include_private=include_private
+    )
+    if not store.peers:
+        # Backward-compatible: same shape, with empty peer metadata.
+        local["peer_latencies_us"] = {}
+        local["peers_queried"] = 0
+        local["peers_responded"] = 0
+        local["peers_timed_out"] = 0
+        return local
+
+    async def _one_peer(peer) -> tuple[str, dict | None, float | None, str | None]:
+        budget = timeout_per_peer if timeout_per_peer is not None else peer.recognition_timeout
+        p_start = time_module.perf_counter()
+        try:
+            payload = await asyncio.wait_for(
+                peer.prepare_recognition_context(
+                    prompt,
+                    access_level=access_level,
+                    include_private=include_private,
+                ),
+                timeout=budget,
+            )
+        except asyncio.TimeoutError:
+            return peer.name, None, None, "timeout"
+        except Exception as exc:  # noqa: BLE001 — never raise from a peer call
+            logger.warning("peer %s prepare_recognition_context raised: %s", peer.name, exc)
+            return peer.name, None, None, f"error:{exc}"
+        latency_us = (time_module.perf_counter() - p_start) * 1_000_000
+        return peer.name, payload, round(latency_us, 1), None
+
+    results = await asyncio.gather(*(_one_peer(p) for p in store.peers))
+
+    peer_latencies: dict[str, float | None] = {}
+    matched_by_key: dict[str, dict] = {
+        e["name"].lower(): e for e in local["matched_entities"] if e.get("name")
+    }
+    extra_context_lines: list[str] = []
+    peers_responded = 0
+    peers_timed_out = 0
+
+    for peer_name, payload, latency_us, err in results:
+        peer_latencies[peer_name] = latency_us
+        if err == "timeout":
+            peers_timed_out += 1
+            continue
+        if payload is None:
+            continue
+        peers_responded += 1
+        # Merge peer-matched entities, tagging the agents with peer provenance.
+        for ent in payload.get("matched_entities") or []:
+            if not isinstance(ent, dict):
+                continue
+            ent_name = (ent.get("name") or "").strip()
+            if not ent_name:
+                continue
+            tagged_agents = [
+                f"peer:{peer_name}:{a}"
+                for a in ent.get("source_agents") or []
+                if isinstance(a, str)
+            ]
+            key = ent_name.lower()
+            existing = matched_by_key.get(key)
+            if existing is None:
+                matched_by_key[key] = {
+                    "name": ent_name,
+                    "type": str(ent.get("type") or "topic"),
+                    "source_agents": tagged_agents,
+                }
+            else:
+                for a in tagged_agents:
+                    if a not in existing["source_agents"]:
+                        existing["source_agents"].append(a)
+        # Append a short peer-recognition line to prompt_context.
+        peer_recognition = (payload.get("recognition") or "").strip()
+        if peer_recognition:
+            extra_context_lines.append(f"[peer:{peer_name}] {peer_recognition}")
+
+    # Rebuild the response. Replace matched_entities with the merged set, and
+    # extend prompt_context with the peer-tagged lines.
+    local["matched_entities"] = list(matched_by_key.values())
+    if extra_context_lines:
+        existing_ctx = local.get("prompt_context") or ""
+        local["prompt_context"] = existing_ctx.rstrip() + "\n" + "\n".join(extra_context_lines)
+    local["peer_latencies_us"] = peer_latencies
+    local["peers_queried"] = len(store.peers)
+    local["peers_responded"] = peers_responded
+    local["peers_timed_out"] = peers_timed_out
+    return local
+
+
 async def get_deeper_context_for_prompt(
     prompt: str,
     access_level: str = "team",
@@ -510,7 +630,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         return summary.to_dict()
 
     @mcp.tool()
-    def prepare_recognition_context(
+    async def prepare_recognition_context(
         prompt: str,
         access_level: str = "team",
         include_private: bool = False,
@@ -521,7 +641,21 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         This is the MCP-facing timing layer: agents can call it at turn start,
         prepend the returned ``prompt_context`` to their own model prompt, and
         continue with deeper retrieval in parallel.
+
+        When peers are configured (``--peer`` flag, Phase 1.6+), the local
+        recognition fires first (~1.2 ms substrate) then peers are queried
+        in parallel under a tight per-peer timeout. Peer-matched entities
+        are merged into ``matched_entities`` with agents tagged
+        ``peer:<peer-name>:<agent>``. Slow / dead peers are dropped and
+        reported in ``peer_latencies_us`` so the response is bounded.
         """
+        if store.peers:
+            return await prepare_recognition_context_federated(
+                store,
+                prompt,
+                access_level=access_level,
+                include_private=include_private,
+            )
         return prepare_recognition_context_from_store(
             store,
             prompt,

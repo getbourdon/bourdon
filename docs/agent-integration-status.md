@@ -159,7 +159,7 @@ Or declare peers in `~/.bourdon/peers.yaml` (see
 | `find_entity` | sync | merged by entity name, peer agents tagged `peer:<name>:<agent>` |
 | `list_recent_work` | sync | merged sessions, dedupe by `(date, cwd, agent)`, peer agents tagged |
 | `get_cross_agent_summary` | sync | merged agents + sessions + entities, peer agents tagged |
-| `prepare_recognition_context` | local | local-only in v0; federated recognition lands in Phase 1.7 |
+| `prepare_recognition_context` | sync (~1.2 ms) | local fires first, peers queried in parallel with per-peer timeout (default 200 ms). Peer-matched entities merged with `peer:<name>:<agent>` tags. Slow/dead peers dropped. See `peer_latencies_us` in the response. |
 | `commit_to_federation` | local | local-only; peers commit to their own libraries |
 
 ### Out of scope for v0

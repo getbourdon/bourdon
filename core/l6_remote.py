@@ -64,6 +64,12 @@ class RemoteL6Client:
     name: str
     token_env: str = "BOURDON_PEER_TOKEN"
     timeout: float = 5.0
+    # Phase 1.7: tighter per-call budget for the recognition hot path.
+    # `prepare_recognition_context` fires at turn-start on every conversation;
+    # the bound below caps how long *one peer* can hold up the federated
+    # recognition before being dropped. Default 200 ms = ~1/6 of a sub-second
+    # turn-prep target with one healthy peer (200 + 1.2 ms substrate + network).
+    recognition_timeout: float = 0.2
 
     def __post_init__(self) -> None:
         # Normalize URL — MCP streamable-HTTP path is /mcp by convention.

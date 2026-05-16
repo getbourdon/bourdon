@@ -66,6 +66,10 @@ class StubPeer:
     find_entity_return: dict[str, list[dict]] = field(default_factory=dict)
     list_recent_work_return: dict | None = None
     cross_agent_return: dict | None = None
+    # Phase 1.7 surfaces.
+    recognition_return: dict | None = None
+    recognition_delay: float = 0.0  # seconds — sleep before returning
+    recognition_timeout: float = 0.2  # matches RemoteL6Client default
     raise_on: set[str] = field(default_factory=set)
     calls: list[tuple[str, dict]] = field(default_factory=list)
 
@@ -111,6 +115,26 @@ class StubPeer:
             "agents": [],
             "recent_sessions": [],
             "entities": [],
+        }
+
+    async def prepare_recognition_context(
+        self,
+        prompt: str,
+        access_level: str = "team",
+        include_private: bool = False,
+    ) -> dict:
+        self.calls.append(("prepare_recognition_context", {"prompt": prompt}))
+        if self.recognition_delay:
+            import asyncio as _asyncio
+            await _asyncio.sleep(self.recognition_delay)
+        if "prepare_recognition_context" in self.raise_on:
+            raise RuntimeError("peer down")
+        return self.recognition_return or {
+            "prompt": prompt,
+            "recognition": "I have no idea what that is.",
+            "matched_entities": [],
+            "recognition_latency_us": 0.0,
+            "prompt_context": "",
         }
 
 
@@ -309,3 +333,119 @@ async def test_get_cross_agent_summary_federated_failed_peer_isolated(populated_
     # Local content still there; no peer rows added.
     assert summary.agents == ["local-agent"]
     assert all(not a.startswith("peer:") for a in summary.agents)
+
+
+# ---------------------------------------------------------------------------
+# prepare_recognition_context_federated (Phase 1.7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prepare_recognition_federated_merges_peer_entities(populated_library: Path) -> None:
+    from core.l6_server import prepare_recognition_context_federated
+
+    peer = StubPeer(
+        name="pc",
+        recognition_return={
+            "prompt": "Do you remember what Bourdon is?",
+            "recognition": "Yes — Bourdon is your federation runtime.",
+            "matched_entities": [
+                {"name": "Bourdon", "type": "project", "source_agents": ["codex"]},
+                {"name": "RemoteOnly", "type": "project", "source_agents": ["codex"]},
+            ],
+            "recognition_latency_us": 1.5,
+            "prompt_context": "Bourdon recognized via codex.",
+        },
+    )
+    store = L6Store(populated_library, peers=[peer])
+    payload = await prepare_recognition_context_federated(
+        store, "Do you remember what Bourdon is?", access_level="team"
+    )
+
+    by_name = {e["name"]: e for e in payload["matched_entities"]}
+    # The local Bourdon entity exists; peer "codex" appended with peer tag.
+    assert "Bourdon" in by_name
+    assert "peer:pc:codex" in by_name["Bourdon"]["source_agents"]
+    # Peer-only entity surfaces with peer tag.
+    assert "RemoteOnly" in by_name
+    assert by_name["RemoteOnly"]["source_agents"] == ["peer:pc:codex"]
+    # Peer recognition line appears in prompt_context.
+    assert "[peer:pc]" in payload["prompt_context"]
+    assert payload["peers_queried"] == 1
+    assert payload["peers_responded"] == 1
+    assert payload["peers_timed_out"] == 0
+    assert "pc" in payload["peer_latencies_us"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_recognition_federated_peer_timeout_drops_silently(populated_library: Path) -> None:
+    from core.l6_server import prepare_recognition_context_federated
+
+    slow = StubPeer(
+        name="slow",
+        recognition_delay=0.5,  # well past the 50 ms budget below
+        recognition_return={
+            "prompt": "Q",
+            "recognition": "Should never appear",
+            "matched_entities": [{"name": "ShouldNeverAppear", "type": "project", "source_agents": ["codex"]}],
+        },
+    )
+    store = L6Store(populated_library, peers=[slow])
+    payload = await prepare_recognition_context_federated(
+        store,
+        "Do you remember what Bourdon is?",
+        access_level="team",
+        timeout_per_peer=0.05,  # 50 ms — slow peer can't make it
+    )
+
+    # Local entities still present.
+    names = {e["name"] for e in payload["matched_entities"]}
+    assert "Bourdon" in names
+    # Slow peer's entity does NOT leak in.
+    assert "ShouldNeverAppear" not in names
+    assert payload["peers_queried"] == 1
+    assert payload["peers_responded"] == 0
+    assert payload["peers_timed_out"] == 1
+    # Latency for a timed-out peer is reported as None.
+    assert payload["peer_latencies_us"]["slow"] is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_recognition_federated_peer_failure_isolated(populated_library: Path) -> None:
+    from core.l6_server import prepare_recognition_context_federated
+
+    bad = StubPeer(name="bad", raise_on={"prepare_recognition_context"})
+    store = L6Store(populated_library, peers=[bad])
+    payload = await prepare_recognition_context_federated(
+        store, "Do you remember what Bourdon is?", access_level="team"
+    )
+    # Local content still there; peer reported as not responding.
+    names = {e["name"] for e in payload["matched_entities"]}
+    assert "Bourdon" in names
+    assert payload["peers_queried"] == 1
+    assert payload["peers_responded"] == 0
+    assert payload["peer_latencies_us"]["bad"] is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_recognition_federated_no_peers_matches_sync_shape(populated_library: Path) -> None:
+    from core.l6_server import prepare_recognition_context_federated, prepare_recognition_context_from_store
+
+    store = L6Store(populated_library, peers=None)
+    sync_payload = prepare_recognition_context_from_store(
+        store, "Do you remember what Bourdon is?", access_level="team"
+    )
+    fed_payload = await prepare_recognition_context_federated(
+        store, "Do you remember what Bourdon is?", access_level="team"
+    )
+
+    # The federated path with no peers returns the same payload modulo the
+    # new peer-metadata keys.
+    for k, v in sync_payload.items():
+        if k == "recognition_latency_us":
+            continue  # measured independently, will differ
+        assert fed_payload[k] == v
+    assert fed_payload["peers_queried"] == 0
+    assert fed_payload["peers_responded"] == 0
+    assert fed_payload["peers_timed_out"] == 0
+    assert fed_payload["peer_latencies_us"] == {}
