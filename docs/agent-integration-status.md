@@ -105,3 +105,66 @@ export path.
   > "At the end of each session, append a YAML session block to the `sessions:`
   > list in `~/.copilot-bourdon/memory.md`, and add any new project or concept
   > entities to the `entities:` list."
+
+## Peer L6 federation (Phase 1.6)
+
+Status: available behind the `[federation]` extras.
+
+Bourdon's L6 server can federate with peer L6 servers on other machines over
+HTTP (designed to ride a Tailscale tailnet). Federated query tools merge peer
+responses with local results at call time. Peer-sourced agents are tagged
+`peer:<peer-name>:<agent>` so provenance stays clear.
+
+### Worked example — Mac ↔ PC over Tailscale
+
+```bash
+# On each machine:
+pip install 'bourdon[server,federation]'
+
+# Generate one shared bearer token per direction (different tokens both ways
+# is the recommended setup; same-Tailnet is not a substitute for auth).
+TOKEN_PC=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+TOKEN_MAC=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# On PC -- expose locally to the Tailnet, accept Mac's bearer:
+BOURDON_PEER_TOKEN_SERVER=$TOKEN_MAC \
+  bourdon serve --transport http --port 7500 \
+    --peer http://bourdon-mac.tailnet:7500
+
+# On Mac -- mirror:
+BOURDON_PEER_TOKEN_SERVER=$TOKEN_PC \
+BOURDON_PEER_TOKEN=$TOKEN_MAC \
+  bourdon serve --transport http --port 7500 \
+    --peer http://bourdon-pc.tailnet:7500
+```
+
+Or declare peers in `~/.bourdon/peers.yaml` (see
+[`config/peers.example.yaml`](../config/peers.example.yaml)).
+
+### Auth defaults
+
+- HTTP transport requires `BOURDON_PEER_TOKEN_SERVER` to be set; missing
+  token + missing `--allow-unauthenticated` flag returns 503 to every
+  request (fails closed).
+- `--allow-unauthenticated` exists as an explicit escape hatch for
+  localhost-only testing. Don't use it on Tailscale-exposed ports.
+- Client-side: default env is `BOURDON_PEER_TOKEN`; per-peer override via
+  `token_env:` in `peers.yaml`.
+
+### What gets federated
+
+| Tool | Local-only | Federated path |
+|---|---|---|
+| `list_agents` | sync | merged + sorted, peer agents not prefix-tagged here |
+| `find_entity` | sync | merged by entity name, peer agents tagged `peer:<name>:<agent>` |
+| `list_recent_work` | sync | merged sessions, dedupe by `(date, cwd, agent)`, peer agents tagged |
+| `get_cross_agent_summary` | sync | merged agents + sessions + entities, peer agents tagged |
+| `prepare_recognition_context` | local | local-only in v0; federated recognition lands in Phase 1.7 |
+| `commit_to_federation` | local | local-only; peers commit to their own libraries |
+
+### Out of scope for v0
+
+- Peer auth rotation / multi-tenant ACLs (Phase 1.7).
+- Conflict resolution beyond "newest wins" (Phase 1.7).
+- Per-peer rate limiting / circuit breaking.
+- Cross-peer pagination cursor (cursored calls fall back to local-only paging).
