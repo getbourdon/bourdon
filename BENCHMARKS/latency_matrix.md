@@ -19,4 +19,8 @@ and is published as such.
 | 2026-05-15T14:00Z | codex | codex-app | codex-5.5 | extra-high | fresh | pc-deskop | 0.6.0 | ~ | ~300000 | ~300000 | 5+ | 1 | **uncontrolled** — observed anecdotally during the cross-account proof. Source: `claude-brain/PROJECTS/NEUROLAYER/BENCHMARKS/2026-05-15_cross_account_recognition.md`. Listed for historical continuity; subsequent rows replace it as measurement quality improves. |
 
 <!-- New rows are appended below this marker by the harness. Do not remove. -->
+| 2026-05-17T04:15:39Z | anthropic | anthropic | claude-opus-4-7 | none | fresh | pc-deskop | 0.6.0 | 1281 / 1313 / 2640 | 2265 / 2344 / 3593 | 5094 / 6282 / 7593 | 1 | 3 | Phase 1.5 first controlled baseline; no bourdon context wired (fresh API). |
+| 2026-05-17T04:16:10Z | openai | openai | gpt-5 | none | fresh | pc-deskop | 0.6.0 | 2516 / 3078 / 3672 | ~ | 2516 / 3078 / 3672 | 0 | 3 | Phase 1.5 first controlled baseline; no bourdon context wired (fresh API). |
+| 2026-05-17T04:17:08Z | anthropic+bourdon | anthropic | claude-opus-4-7 | none | fresh | pc-deskop | 0.6.0 | 1081 / 1346 / 1412 | ~ | 5117 / 5479 / 5696 | 4 | 3 | **WITH bourdon context** — `bourdon prepare-turn` output (926 chars) injected as system message before recognition probe. Compare to 2026-05-17T04:15Z Claude row (same model + reasoning, no bourdon, score=1). Probe script kept out of repo as throwaway; if reused, promote to `--bourdon-context` flag on `latency_harness.py`. |
+
 <!-- BOURDON_LATENCY_MATRIX_APPEND_MARKER -->
