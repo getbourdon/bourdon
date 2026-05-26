@@ -99,6 +99,8 @@ pip install bourdon
 bourdon setup
 ```
 
+> Full walkthrough with troubleshooting + cross-machine sync: [`docs/quickstart.md`](docs/quickstart.md).
+
 `bourdon setup` is an interactive wizard that:
 
 - detects which AI agents are installed (Claude Code, Codex, Cursor, Copilot, Cascade)
