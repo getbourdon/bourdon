@@ -388,6 +388,23 @@ def test_health_check_never_raises(isolated_home):
     assert isinstance(CodexAdapter().health_check(), HealthStatus)
 
 
+def test_health_blocked_proposes_install(isolated_home):
+    """No ~/.codex/: proposed_fix points the user at the install + seed steps."""
+    health = CodexAdapter().health_check()
+    assert health.status == "blocked"
+    assert health.proposed_fix is not None
+    assert "sync-native --from-library" in health.proposed_fix
+
+
+def test_health_degraded_proposes_sync_native(isolated_home):
+    """Empty Codex history but ~/.codex/ exists: propose --from-library seed."""
+    isolated_home["create_codex_home"]()
+    health = CodexAdapter().health_check()
+    assert health.status == "degraded"
+    assert health.proposed_fix is not None
+    assert "sync-native --from-library" in health.proposed_fix
+
+
 # -- Parsing helpers -----------------------------------------------------------
 
 

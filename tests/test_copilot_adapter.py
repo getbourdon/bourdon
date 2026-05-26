@@ -409,6 +409,8 @@ def test_health_check_blocked_when_no_dir(tmp_path):
     health = adapter.health_check()
     assert health.status == "blocked"
     assert "expected_path" in health.details
+    assert health.proposed_fix is not None
+    assert "copilot init" in health.proposed_fix
 
 
 def test_health_check_degraded_when_no_memory_file(tmp_path):
@@ -416,6 +418,8 @@ def test_health_check_degraded_when_no_memory_file(tmp_path):
     health = CopilotAdapter(copilot_dir=d).health_check()
     assert health.status == "degraded"
     assert "memory" in (health.reason or "").lower()
+    assert health.proposed_fix is not None
+    assert "copilot init" in health.proposed_fix
 
 
 def test_health_check_ok_when_memory_file_present(tmp_path):
@@ -424,6 +428,7 @@ def test_health_check_ok_when_memory_file_present(tmp_path):
     assert health.status == "ok"
     assert health.details["entity_count"] >= 2
     assert health.details["session_count"] == 2
+    assert health.proposed_fix is None
 
 
 def test_health_check_does_not_raise_on_malformed_yaml(tmp_path):

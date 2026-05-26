@@ -2448,6 +2448,12 @@ class CodexAdapter:
                 status="blocked",
                 reason="~/.codex/ not found -- Codex CLI never used on this machine",
                 details=details,
+                proposed_fix=(
+                    "Install OpenAI Codex (https://github.com/openai/codex) and "
+                    "sign in once. Then `bourdon codex sync-native --from-library "
+                    "--memory-md --write` to seed Codex's local recognition surface "
+                    "from your federation library."
+                ),
             )
 
         state_db = self._codex_home / "state_5.sqlite"
@@ -2489,6 +2495,12 @@ class CodexAdapter:
             status="degraded",
             reason=f"Missing Codex sub-sources: {', '.join(missing)}",
             details=details,
+            proposed_fix=(
+                "If Codex was just signed in but has no chat history, this is "
+                "expected -- run `bourdon codex sync-native --from-library "
+                "--memory-md --write` to seed recognition substrate from your "
+                "federation library."
+            ),
         )
 
 

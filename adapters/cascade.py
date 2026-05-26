@@ -439,6 +439,7 @@ class CascadeAdapter(BourdonAdapter):
                 status="blocked",
                 reason="Cascade-Bourdon directory not found",
                 details={"expected_path": str(self._dir)},
+                proposed_fix="Run `bourdon cascade init` to create the convention directory + starter memory.md.",
             )
 
         report = _inspect_cascade_memory(self._dir)
@@ -447,6 +448,7 @@ class CascadeAdapter(BourdonAdapter):
                 status="degraded",
                 reason="Memory file not found; run `bourdon cascade init` to create it",
                 details=report,
+                proposed_fix="Run `bourdon cascade init` to write the starter memory.md template.",
             )
 
         if not report.get("readable"):
@@ -454,6 +456,10 @@ class CascadeAdapter(BourdonAdapter):
                 status="degraded",
                 reason=f"Memory file not readable: {report.get('error')}",
                 details=report,
+                proposed_fix=(
+                    f"Check filesystem permissions on {self._dir / 'memory.md'} "
+                    "(should be readable by your user)."
+                ),
             )
 
         if not report.get("frontmatter_valid"):
@@ -461,6 +467,12 @@ class CascadeAdapter(BourdonAdapter):
                 status="degraded",
                 reason="Memory file has no valid YAML front-matter",
                 details=report,
+                proposed_fix=(
+                    f"Inspect {self._dir / 'memory.md'} -- the opening and closing "
+                    "`---` fences must wrap a valid YAML block. Run "
+                    "`bourdon cascade init --force` to reset to the template "
+                    "(WARNING: this overwrites existing content)."
+                ),
             )
 
         return HealthStatus(

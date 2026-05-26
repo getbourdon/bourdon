@@ -426,6 +426,7 @@ class CopilotAdapter:
                     "Run `bourdon copilot init` to create it."
                 ),
                 details={"expected_path": str(path)},
+                proposed_fix="Run `bourdon copilot init` to create the convention directory.",
             )
         mem_path = path / _MEMORY_FILENAME
         if not mem_path.is_file():
@@ -436,6 +437,7 @@ class CopilotAdapter:
                     "Run `bourdon copilot init` to write a starter template."
                 ),
                 details={"expected_memory_file": str(mem_path)},
+                proposed_fix="Run `bourdon copilot init` to write the starter memory.md template.",
             )
         try:
             data = self._read()
@@ -445,6 +447,11 @@ class CopilotAdapter:
                 status="degraded",
                 reason="Memory file present but could not be parsed.",
                 details={"error": str(exc)},
+                proposed_fix=(
+                    f"Inspect {mem_path} for malformed YAML front-matter. "
+                    "The opening and closing `---` fences must wrap a valid YAML "
+                    "block. See docs/agent-integration-status.md for the schema."
+                ),
             )
         return HealthStatus(
             status="ok",

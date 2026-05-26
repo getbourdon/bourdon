@@ -711,11 +711,20 @@ class ClaudeCodeAdapter:
                 status="blocked",
                 reason="No Claude Code memory sources found on this machine",
                 details=details,
+                proposed_fix=(
+                    "Run `bourdon setup` to wire the SessionEnd hook and bootstrap "
+                    "~/agent-library/, then open Claude Code once to populate "
+                    "~/.claude/projects/."
+                ),
             )
         return HealthStatus(
             status="degraded",
             reason=f"{found}/3 Claude Code memory sources found",
             details=details,
+            proposed_fix=(
+                "Run `bourdon setup` to (re-)wire missing sources, or set the "
+                "CLAUDE_BRAIN env var to point at your claude-brain checkout."
+            ),
         )
 
 
