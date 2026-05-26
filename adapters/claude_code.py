@@ -27,7 +27,7 @@ import re
 import socket
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 import yaml
 
@@ -122,13 +122,21 @@ def _resolve_claude_brain_path() -> Optional[Path]:
 
 
 def _resolve_auto_memory_path() -> Optional[Path]:
-    """Claude Code auto-memory usually lives at ~/.claude/projects/<workspace>/memory/."""
-    base = Path.home() / ".claude" / "projects"
-    if not base.is_dir():
+    """Claude Code auto-memory usually lives at ~/.claude/projects/<workspace>/memory/.
+
+    Returns None on PermissionError / OSError reading the directory tree --
+    the CLI must stay importable even when HOME points at an unreadable path
+    (e.g. running under sudo without -H, or in a sandboxed container).
+    """
+    try:
+        base = Path.home() / ".claude" / "projects"
+        if not base.is_dir():
+            return None
+        for child in base.iterdir():
+            if (child / "memory" / "MEMORY.md").is_file():
+                return child / "memory"
+    except (PermissionError, OSError):
         return None
-    for child in base.iterdir():
-        if (child / "memory" / "MEMORY.md").is_file():
-            return child / "memory"
     return None
 
 
@@ -698,5 +706,8 @@ class ClaudeCodeAdapter:
         )
 
 
-# Protocol conformance check at import time -- catches missing methods before CI
-_: BourdonAdapter = ClaudeCodeAdapter()
+# Protocol conformance check -- evaluated by static type checkers (mypy/pyright)
+# at lint time only. Does not instantiate at import time, so the CLI stays
+# importable even when HOME points at an unreadable directory.
+if TYPE_CHECKING:
+    _: BourdonAdapter = ClaudeCodeAdapter()
