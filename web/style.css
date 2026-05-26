@@ -123,6 +123,107 @@ a {
 
 a:hover { text-decoration-thickness: 2px; }
 
+/* Test sections -- dated eyebrows */
+/* Each evidence section (OMNIvour, cross-account, cross-machine) gets a small
+ * date marker above its h2. Reuses the .eyebrow type rhythm but sits inline-flush
+ * with the heading rather than the hero treatment. */
+
+.testdate {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 0.4rem 0;
+}
+
+.testdate + h2 {
+  margin-top: 0;
+}
+
+/* Blockquote citation treatment */
+/* Quoted evidence (Codex self-attribution, Codex.app probe responses) reads
+ * as primary-source citation, not poetic flourish. Left-rule. Slight muted
+ * tone. Cite line aligns right under the quote. */
+
+blockquote {
+  margin: 1.25rem 0;
+  padding: 0.25rem 0 0.25rem 1.25rem;
+  border-left: 3px solid var(--rule);
+  color: var(--ink);
+  font-style: normal;
+  font-size: 0.97rem;
+}
+
+blockquote p {
+  margin: 0 0 0.6rem 0;
+}
+
+blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+blockquote cite {
+  display: block;
+  margin-top: 0.75rem;
+  font-style: normal;
+  font-size: 0.82rem;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+
+blockquote cite::before {
+  content: "\2014\00a0";  /* em-dash followed by non-breaking space */
+}
+
+/* Metric figures */
+/* A single empirical anchor pulled out of prose for a beat of pause.
+ * Two-column tabular layout: label on the left, measured value on the right.
+ * Tabular-nums so the numbers align. Accent color carries the value. */
+
+figure.metric {
+  margin: 1.5rem 0;
+  padding: 0.9rem 1.1rem;
+  background: var(--code-bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 3px 3px 0;
+  display: flex;
+  align-items: baseline;
+  gap: 1.25rem;
+  font-size: 0.95rem;
+}
+
+figure.metric .label {
+  flex: 1;
+  color: var(--muted);
+}
+
+figure.metric .value {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+figure.metric .value .delta {
+  color: var(--muted);
+  font-weight: 400;
+  padding: 0 0.25em;
+}
+
+/* Footer philosophy line */
+/* "No tracking. No JavaScript. No web fonts. Just text." is the page's
+ * design philosophy stated in seven words. Give it its own beat. */
+
+p.philosophy {
+  margin-top: 1.25rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  font-style: italic;
+}
+
 /* Diagrams */
 
 pre.diagram {

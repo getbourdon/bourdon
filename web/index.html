@@ -70,6 +70,7 @@ ai: replies.         ai: replies.</pre>
     </section>
 
     <section>
+      <p class="testdate">2026-04-19 &middot; field test</p>
       <h2>The OMNIvour test</h2>
       <p>
         On 2026-04-19 we wired a Codex session into a fully-populated Bourdon
@@ -86,12 +87,16 @@ ai: replies.         ai: replies.</pre>
         Bourdon&rsquo;s tiered runtime to address it directly. The recognition-first
         runtime now ships as <code>core/recognition_runtime.py</code>, and the
         full three-layer stack (recognition, interrupt-first, KV-cache splice)
-        is wired into a live agent and measured at <strong>0ms recognition vs
-        ~406ms first token</strong> on Gemma 3 27B Q4_K_M.
+        is wired into a live agent and measured end-to-end on Gemma 3 27B Q4_K_M.
       </p>
+      <figure class="metric">
+        <span class="label">First-turn recognition vs. first token</span>
+        <span class="value">0&thinsp;ms<span class="delta">&nbsp;vs&nbsp;</span>~406&thinsp;ms</span>
+      </figure>
     </section>
 
     <section>
+      <p class="testdate">2026-05-15 &middot; field test</p>
       <h2>The cross-account test</h2>
       <p>
         On 2026-05-15 a Bourdon user&rsquo;s Codex account became uneditable mid-week
@@ -116,12 +121,15 @@ ai: replies.         ai: replies.</pre>
         Codex&rsquo;s own self-attribution made the distinction unprompted:
       </p>
       <blockquote>
-        Bourdon did generate a local fallback memory block from Codex session and
-        rollout metadata, with your Bourdon thread and concepts present. So: native
-        UI persistence may be Codex; the &ldquo;ah, this is Bourdon/Continuo/runtime
-        recognition&rdquo; recall is Bourdon doing its job. The account changed, but
-        the local recognition layer still found the project identity, the
-        Bourdon/Continuo lineage, and the current conceptual frame.
+        <p>
+          Bourdon did generate a local fallback memory block from Codex session and
+          rollout metadata, with your Bourdon thread and concepts present. So: native
+          UI persistence may be Codex; the &ldquo;ah, this is Bourdon/Continuo/runtime
+          recognition&rdquo; recall is Bourdon doing its job. The account changed, but
+          the local recognition layer still found the project identity, the
+          Bourdon/Continuo lineage, and the current conceptual frame.
+        </p>
+        <cite>Codex (OpenAI) &middot; 2026-05-15, unprompted self-attribution</cite>
       </blockquote>
       <p>
         That distinction &mdash; the one we don&rsquo;t make ourselves, the one Codex
@@ -138,6 +146,7 @@ ai: replies.         ai: replies.</pre>
     </section>
 
     <section>
+      <p class="testdate">2026-05-17 &rarr; 2026-05-26 &middot; field test</p>
       <h2>The cross-machine test</h2>
       <p>
         On 2026-05-17 we ran the same recognition protocol on a brand-new macOS user
@@ -159,9 +168,12 @@ ai: replies.         ai: replies.</pre>
         <code>~/.codex/memories/bourdon_fallback.md</code>, preserving per-entity
         source attribution <code>(via &lt;agent&gt;)</code> across the multi-agent
         dedup. The same day we re-ran the cross-machine protocol on the same
-        preserved fresh user. <code>bourdon_fallback.md</code> went from a 588-byte
-        placeholder to <strong>34,482 bytes</strong> of federation content.
+        preserved fresh user.
       </p>
+      <figure class="metric">
+        <span class="label"><code>bourdon_fallback.md</code> on fresh-substrate target machine</span>
+        <span class="value">588&nbsp;B<span class="delta">&rarr;</span>34,482&nbsp;B</span>
+      </figure>
       <p>
         Asked &ldquo;What dev tools or projects am I currently working on?&rdquo;
         on the first turn of a fresh chat &mdash; no &ldquo;Bourdon&rdquo;,
@@ -169,18 +181,27 @@ ai: replies.         ai: replies.</pre>
         visible tool use, then responded:
       </p>
       <blockquote>
-        From the local Codex/Bourdon memory on this Mac, your active work right now
-        looks centered on:
-        <br>&middot; <strong>Bourdon</strong>: recognition-first runtime +
-        cross-agent memory federation. Recent work is specifically around Codex
-        native sync, <code>sync-native --from-library</code>, L5/L6 federation,
-        adapter cleanup, latency/recognition quality.
-        <br>&middot; <strong>RADLAB agent memory/tooling stack</strong>: the local
-        library has manifests for <code>claude-code</code>, <code>codex</code>,
-        <code>cursor</code>, <code>copilot</code>, and <code>cascade</code>.
-        <br>&middot; <strong>ShipStable</strong>, <strong>ILTT</strong>,
-        <strong>Castmore</strong>, <strong>ChronoCalc</strong>, <strong>Clair /
-        Note Assistant</strong>: surfaced from the federation notes.
+        <p>
+          From the local Codex/Bourdon memory on this Mac, your active work right now
+          looks centered on:
+        </p>
+        <p>
+          &middot; <strong>Bourdon</strong>: recognition-first runtime +
+          cross-agent memory federation. Recent work is specifically around Codex
+          native sync, <code>sync-native --from-library</code>, L5/L6 federation,
+          adapter cleanup, latency/recognition quality.
+        </p>
+        <p>
+          &middot; <strong>RADLAB agent memory/tooling stack</strong>: the local
+          library has manifests for <code>claude-code</code>, <code>codex</code>,
+          <code>cursor</code>, <code>copilot</code>, and <code>cascade</code>.
+        </p>
+        <p>
+          &middot; <strong>ShipStable</strong>, <strong>ILTT</strong>,
+          <strong>Castmore</strong>, <strong>ChronoCalc</strong>, <strong>Clair /
+          Note Assistant</strong>: surfaced from the federation notes.
+        </p>
+        <cite>Codex.app &middot; 2026-05-26, first turn of a fresh chat on a brand-new account</cite>
       </blockquote>
       <p>
         A follow-up probe asked Codex.app to point at the source files:
@@ -344,7 +365,8 @@ ai: replies.         ai: replies.</pre>
         Named for the <em>bourdon</em> &mdash; the deep continuous drone of a pipe
         organ, the foundational tone that holds every other voice in place.
       </p>
-      <p class="meta">Business Source License 1.1 &mdash; auto-converts to Apache 2.0 after 4 years. Commercial licensing: <a href="mailto:licensing@bourdon.ai">licensing@bourdon.ai</a>. <a href="/privacy">Privacy</a>. No tracking. No JavaScript. No web fonts. Just text.</p>
+      <p class="meta">Business Source License 1.1 &mdash; auto-converts to Apache 2.0 after 4 years. Commercial licensing: <a href="mailto:licensing@bourdon.ai">licensing@bourdon.ai</a>. <a href="/privacy">Privacy</a>.</p>
+      <p class="philosophy">No tracking. No JavaScript. No web fonts. Just text.</p>
     </footer>
   </main>
 </body>
