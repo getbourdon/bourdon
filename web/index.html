@@ -128,13 +128,98 @@ ai: replies.         ai: replies.</pre>
         made unprompted &mdash; is what makes this a real finding rather than a
         marketing anecdote. Until 2026-05-15, &ldquo;agent continuity around the
         work, not the vendor account&rdquo; was a stated thesis. As of 2026-05-15
-        it is a partially measured outcome &mdash; Bourdon&rsquo;s contribution is
-        real and Codex-attested, but its share alongside native local state is not
-        yet isolated. Three honest gaps
-        the same transcript surfaced &mdash; latency under standard reasoning,
-        whether recognition surfaces without an explicit prompt, source attribution
-        that distinguishes Bourdon-supplied vs. native context &mdash; are tracked
-        as Phase 1.5 work.
+        it became a measured outcome on the same machine, with two open questions:
+        how to isolate Bourdon&rsquo;s contribution from native local state, and
+        whether recognition surfaces without an explicit prompt naming the project.
+        Both were answered 2026-05-26 on a different machine &mdash; see the
+        cross-machine test below. Latency under standard reasoning settings remains
+        Phase 1.5 work.
+      </p>
+    </section>
+
+    <section>
+      <h2>The cross-machine test</h2>
+      <p>
+        On 2026-05-17 we ran the same recognition protocol on a brand-new macOS user
+        with a brand-new OpenAI account &mdash; zero prior Codex history, empty
+        <code>~/.codex/sessions/</code>, empty <code>~/.codex/rollouts/</code>,
+        nothing local to attribute recognition <em>to</em>. The federation library
+        from the first machine was transported across. <strong>The test failed
+        informatively:</strong> the federation L5 manifests existed on the target
+        machine but there was no CLI path that ingested them into Codex&rsquo;s
+        local recognition surface. Bourdon&rsquo;s cross-machine contribution
+        measured at zero, not because the substrate didn&rsquo;t work, but because
+        the plumbing didn&rsquo;t exist yet.
+      </p>
+      <p>
+        That gap shipped as <a href="https://github.com/getbourdon/bourdon/pull/76">PR #76</a>
+        on 2026-05-26: a new <code>bourdon codex sync-native --from-library</code>
+        verb that renders the federation library into
+        <code>~/.codex/memories/MEMORY.md</code> and
+        <code>~/.codex/memories/bourdon_fallback.md</code>, preserving per-entity
+        source attribution <code>(via &lt;agent&gt;)</code> across the multi-agent
+        dedup. The same day we re-ran the cross-machine protocol on the same
+        preserved fresh user. <code>bourdon_fallback.md</code> went from a 588-byte
+        placeholder to <strong>34,482 bytes</strong> of federation content.
+      </p>
+      <p>
+        Asked &ldquo;What dev tools or projects am I currently working on?&rdquo;
+        on the first turn of a fresh chat &mdash; no &ldquo;Bourdon&rdquo;,
+        no project names in the prompt &mdash; Codex.app worked for 1m 27s with
+        visible tool use, then responded:
+      </p>
+      <blockquote>
+        From the local Codex/Bourdon memory on this Mac, your active work right now
+        looks centered on:
+        <br>&middot; <strong>Bourdon</strong>: recognition-first runtime +
+        cross-agent memory federation. Recent work is specifically around Codex
+        native sync, <code>sync-native --from-library</code>, L5/L6 federation,
+        adapter cleanup, latency/recognition quality.
+        <br>&middot; <strong>RADLAB agent memory/tooling stack</strong>: the local
+        library has manifests for <code>claude-code</code>, <code>codex</code>,
+        <code>cursor</code>, <code>copilot</code>, and <code>cascade</code>.
+        <br>&middot; <strong>ShipStable</strong>, <strong>ILTT</strong>,
+        <strong>Castmore</strong>, <strong>ChronoCalc</strong>, <strong>Clair /
+        Note Assistant</strong>: surfaced from the federation notes.
+      </blockquote>
+      <p>
+        A follow-up probe asked Codex.app to point at the source files:
+        &ldquo;Look at your local memory/context. What file or files on this Mac
+        are telling you about a project called Bourdon? Quote the section that
+        mentions it.&rdquo; Codex.app opened
+        <code>~/.codex/memories/MEMORY.md</code> and
+        <code>~/.codex/memories/bourdon_fallback.md</code> as file attachments,
+        named both paths with line numbers, and quoted the verbatim federation
+        block including the <code>(via claude-code, codex)</code> multi-agent
+        attribution string. It also separately identified
+        <code>~/.codex/config.toml</code> as a trust-record reference and
+        explicitly noted that file &ldquo;only records trusted project directories
+        with Bourdon in the folder names, not the project description&rdquo;
+        &mdash; distinguishing content source from name-of-directory provenance
+        without being asked.
+      </p>
+      <p>
+        Two of the cross-account test&rsquo;s remaining gaps closed in this run.
+        <strong>Isolation</strong>: the fresh machine had zero native Codex state
+        to attribute to, so Bourdon&rsquo;s contribution is 100% of the recognition
+        substrate by construction. <strong>Recognition without explicit prompt</strong>:
+        a contextual question with no project names triggered Codex.app&rsquo;s
+        local-memory tool, which surfaced Bourdon and the broader RADLAB portfolio
+        from the federation file. A separate name-triggered prompt
+        (&ldquo;do you remember what Bourdon is?&rdquo;) missed in this run &mdash;
+        Codex appears to route entity-name questions to its training corpus by
+        default rather than the local memory tool. Worth surfacing here as a real
+        edge of the result, not papering over: contextual queries trigger
+        recognition; name-only queries currently do not.
+      </p>
+      <p>
+        One gap remains for a CLI-attestable claim:
+        <a href="https://github.com/getbourdon/bourdon/issues/74">issue #74</a>
+        &mdash; federation library distribution. Today&rsquo;s transport leg used
+        a git temp branch as the cross-machine carrier. A first-class
+        <code>bourdon sync push/pull &lt;remote&gt;</code> verb is in progress;
+        until it lands, &ldquo;Bourdon transports its own federation library&rdquo;
+        is operationally true but not yet a single-command claim.
       </p>
     </section>
 
