@@ -240,13 +240,17 @@ ai: replies.         ai: replies.</pre>
         should expose, not hide.
       </p>
       <p>
-        One gap remains for a CLI-attestable claim:
-        <a href="https://github.com/getbourdon/bourdon/issues/74">issue #74</a>
-        &mdash; federation library distribution. Today&rsquo;s transport leg used
-        a git temp branch as the cross-machine carrier. A first-class
-        <code>bourdon sync push/pull &lt;remote&gt;</code> verb is in progress;
-        until it lands, &ldquo;Bourdon transports its own federation library&rdquo;
-        is operationally true but not yet a single-command claim.
+        Closed on the distribution side too: as of 2026-05-26,
+        <code>bourdon sync push &lt;remote&gt;</code> and
+        <code>bourdon sync pull &lt;remote&gt;</code> ship as first-class CLI
+        verbs (<a href="https://github.com/getbourdon/bourdon/pull/86">PR #86</a>).
+        Push stages a visibility-filtered copy of <code>~/agent-library/</code>
+        and rsyncs it over SSH or rsync URL; the visibility filter
+        (<code>--access-level public|team|private</code>, default
+        <code>public</code>) drops above-threshold entries before the network leg,
+        so a misconfigured destination never sees team/private content. Cross-
+        machine federation transport is now a single command, not a manual
+        git temp branch.
       </p>
     </section>
 
