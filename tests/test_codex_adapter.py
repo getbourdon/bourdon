@@ -14,8 +14,10 @@ from adapters.base import (
     SPEC_VERSION,
     AdapterDiscoveryError,
     BourdonAdapter,
+    Entity,
     HealthStatus,
     L5Manifest,
+    Visibility,
 )
 from adapters.codex import (
     CodexAdapter,
@@ -24,6 +26,7 @@ from adapters.codex import (
     _find_rollout_file,
     _inspect_codex_fallback_recall,
     _inspect_codex_state_db,
+    _is_junk_entity,
     _normalize_local_path,
     _parse_memory_text,
     _parse_session_index,
@@ -188,6 +191,115 @@ def _write_state_thread(
                 updated_at,
             ),
         )
+
+
+# -- _is_junk_entity (issue #78) -----------------------------------------------
+
+
+def _make_entity(
+    name: str,
+    *,
+    type: str | None = "topic",
+    summary: str | None = None,
+    aliases: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> Entity:
+    return Entity(
+        name=name,
+        type=type,
+        aliases=aliases or [],
+        summary=summary,
+        tags=tags or [],
+        visibility=Visibility.TEAM,
+    )
+
+
+def test_is_junk_entity_drops_placeholder_name_patterns():
+    """Issue #78: 'Project 2', 'New Project', 'Project Name', 'untitled' are noise."""
+    for placeholder in (
+        "Project 2",
+        "Project2",
+        "New Project",
+        "New Project 3",
+        "Project Name",
+        "untitled",
+        "Brief description of the project.",
+    ):
+        assert _is_junk_entity(_make_entity(placeholder)), placeholder
+
+
+def test_is_junk_entity_drops_single_word_noise_names():
+    """Single common words ('memories', 'notes', 'temp') carry no recall signal."""
+    for noise in ("memories", "memory", "notes", "Note", "TEMP", "tests", "todo"):
+        assert _is_junk_entity(_make_entity(noise)), noise
+
+
+def test_is_junk_entity_drops_observed_across_placeholder_summary():
+    """An entity whose only signal is 'Observed across N session(s)' is junk."""
+    e = _make_entity(
+        "some-cwd-name",
+        type="project",
+        summary="Observed across 3 Codex session(s).",
+        tags=["codex-project"],
+    )
+    assert _is_junk_entity(e)
+
+
+def test_is_junk_entity_keeps_observed_across_with_descriptive_tag():
+    """If the entity carries non-canonical tags or aliases, keep it."""
+    e = _make_entity(
+        "some-cwd-name",
+        type="project",
+        summary="Observed across 3 Codex session(s).",
+        tags=["codex-project", "rust-port"],
+    )
+    assert not _is_junk_entity(e)
+
+
+def test_is_junk_entity_keeps_codex_thread_with_meaningful_name():
+    """'Codex thread: X' is fine when X is meaningful."""
+    e = _make_entity(
+        "Align workflow with Codex",
+        type="topic",
+        summary="Codex thread: Align workflow with Codex",
+        tags=["codex-thread"],
+    )
+    assert not _is_junk_entity(e)
+
+
+def test_is_junk_entity_drops_codex_thread_with_noise_name():
+    """'Codex thread: Project 2' is junk because the name is noise."""
+    e = _make_entity(
+        "Project 2",
+        type="topic",
+        summary="Codex thread: Project 2",
+        tags=["codex-thread"],
+    )
+    assert _is_junk_entity(e)
+
+
+def test_is_junk_entity_keeps_real_project_entity():
+    e = _make_entity(
+        "Bourdon",
+        type="project",
+        summary="Cross-agent memory federation protocol",
+        tags=["codex-project"],
+    )
+    assert not _is_junk_entity(e)
+
+
+def test_is_junk_entity_drops_very_short_names_except_known_acronyms():
+    assert _is_junk_entity(_make_entity("ab"))
+    assert _is_junk_entity(_make_entity("x"))
+    # Common 3-letter acronyms are kept.
+    assert not _is_junk_entity(_make_entity("NAS"))
+    assert not _is_junk_entity(_make_entity("iOS"))
+    assert not _is_junk_entity(_make_entity("git"))
+
+
+def test_is_junk_entity_drops_empty_name():
+    assert _is_junk_entity(_make_entity(""))
+    assert _is_junk_entity(_make_entity("   "))
 
 
 # -- Protocol + constants ------------------------------------------------------

@@ -374,6 +374,92 @@ def _merge_entity(into: Entity, other: Entity) -> None:
             into.tags.append(tag)
 
 
+# -- Junk-entity filter (issue #78) --------------------------------------------
+#
+# The codex adapter synthesizes entities from session titles and cwd-derived
+# project keys. When a real signal is present, these become useful federation
+# anchors. When it isn't, they become low-value noise: thread titles like
+# "Project 2" or "memories", placeholder summaries from default templates,
+# entities whose only content is the "Observed across N session(s)" boilerplate.
+#
+# These rules drop the unambiguous junk while keeping entities that carry any
+# substantive content. The bar: an entity makes it into the L5 only if a
+# downstream agent could plausibly use it as a recall anchor.
+
+_NOISE_NAME_RE = re.compile(
+    r"^(?:"
+    r"project\s*\d+"
+    r"|new\s+project(?:\s*\d+)?"
+    r"|project\s+name"
+    r"|untitled"
+    r"|brief\s+description\s+of\s+the\s+project\.?"
+    r")$",
+    re.IGNORECASE,
+)
+
+_NOISE_NAME_SINGLE_WORDS = frozenset(
+    {"memories", "memory", "notes", "note", "temp", "tmp", "test", "tests", "todo"}
+)
+
+_OBSERVED_ACROSS_SUMMARY_RE = re.compile(
+    r"^observed across \d+ codex session\(s\)\.?$",
+    re.IGNORECASE,
+)
+
+_CODEX_THREAD_SUMMARY_RE = re.compile(
+    r"^codex (?:thread|memory topic): ",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_entity(entity: Entity) -> bool:
+    """Return True if the entity should be dropped from the L5 export.
+
+    Drops:
+
+    - Names matching well-known placeholder patterns ("Project 2",
+      "New Project", "untitled", "Brief description of the project").
+    - Single-word noise names ("memories", "notes", "temp").
+    - Entities whose summary is *only* the "Observed across N session(s)"
+      placeholder AND that carry no other signal (no descriptive aliases,
+      no descriptive tags beyond the canonical "codex-project" marker).
+    - Entities whose summary is *only* the "Codex thread:" or "Codex memory
+      topic:" placeholder AND whose name matches a noise pattern.
+
+    Entities with substantive summary content are kept regardless. See #78.
+    """
+    name = (entity.name or "").strip()
+    if not name:
+        return True
+
+    name_lc = name.lower()
+    if _NOISE_NAME_RE.match(name):
+        return True
+    if name_lc in _NOISE_NAME_SINGLE_WORDS:
+        return True
+    if len(name) < 4 and name_lc not in {"nas", "ios", "css", "git", "ci"}:
+        # Drop very short noise names but keep widely-recognized 3-letter acronyms.
+        return True
+
+    summary = (entity.summary or "").strip()
+    if summary and _OBSERVED_ACROSS_SUMMARY_RE.match(summary):
+        descriptive_tags = [
+            tag for tag in entity.tags
+            if tag and tag not in {"codex-project", "codex-thread", "codex-memory"}
+        ]
+        if not entity.aliases and not descriptive_tags:
+            return True
+
+    if summary and _CODEX_THREAD_SUMMARY_RE.match(summary):
+        # "Codex thread:" / "Codex memory topic:" placeholders are only junk
+        # when paired with a noise-shaped name (handled above) -- a real topic
+        # name carrying this prefix is still useful as an anchor. So no
+        # additional drop here; the name-based rules above catch the bad cases.
+        pass
+
+    return False
+
+
 # -- Path resolution -----------------------------------------------------------
 
 
@@ -2317,8 +2403,14 @@ class CodexAdapter:
             else:
                 entity_map[key] = preference
 
+        # Issue #78: drop junk entities synthesized from session-title noise
+        # and placeholder-only summaries before federation.
         entities = sorted(
-            entity_map.values(),
+            (
+                entity
+                for entity in entity_map.values()
+                if not _is_junk_entity(entity)
+            ),
             key=lambda entity: ((entity.type or "topic"), entity.name.lower()),
         )
         visible_entities = filter_for_federation(entities, DEFAULT_POLICY)
