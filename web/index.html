@@ -205,12 +205,18 @@ ai: replies.         ai: replies.</pre>
         substrate by construction. <strong>Recognition without explicit prompt</strong>:
         a contextual question with no project names triggered Codex.app&rsquo;s
         local-memory tool, which surfaced Bourdon and the broader RADLAB portfolio
-        from the federation file. A separate name-triggered prompt
-        (&ldquo;do you remember what Bourdon is?&rdquo;) missed in this run &mdash;
-        Codex appears to route entity-name questions to its training corpus by
-        default rather than the local memory tool. Worth surfacing here as a real
-        edge of the result, not papering over: contextual queries trigger
-        recognition; name-only queries currently do not.
+        from the federation file.
+      </p>
+      <p>
+        One edge worth naming: contextual prompts
+        (&ldquo;what am I working on&rdquo;) triggered Codex&rsquo;s local-memory
+        tool and surfaced the federation content. Name-triggered prompts
+        (&ldquo;what is Bourdon?&rdquo;) routed to training corpus instead
+        &mdash; Codex&rsquo;s tool router seems to map entity-name questions to
+        fact-lookup, not local-state introspection. The substrate is present
+        either way; the open question is which prompt shapes invoke it. Worth
+        surfacing because it&rsquo;s the kind of asymmetry a research substrate
+        should expose, not hide.
       </p>
       <p>
         One gap remains for a CLI-attestable claim:
