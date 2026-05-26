@@ -425,6 +425,90 @@ def _handle_export_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_sync_push(args: argparse.Namespace) -> int:
+    """Stage a visibility-filtered library copy and rsync it to ``dest``."""
+    from core.sync import (
+        DEFAULT_PUSH_ACCESS_LEVEL,
+        RsyncMissingError,
+        SyncError,
+        sync_push,
+        visible_counts,
+    )
+
+    library_path = (
+        Path(args.library_path) if getattr(args, "library_path", None) else None
+    )
+    library = library_path or DEFAULT_LIBRARY_PATH
+    access_level = getattr(args, "access_level", DEFAULT_PUSH_ACCESS_LEVEL)
+
+    # Surface the visibility-filter outcome before the network leg.
+    try:
+        counts = visible_counts(library, access_level)
+    except SyncError as exc:
+        print(f"sync push: {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        f"sync push: library={library} access_level={access_level} dest={args.dest}",
+        file=sys.stderr,
+    )
+    for agent, c in sorted(counts.items()):
+        print(
+            f"  {agent}: {c['entities']} entities, {c['sessions']} sessions",
+            file=sys.stderr,
+        )
+
+    try:
+        result = sync_push(
+            args.dest,
+            access_level=access_level,
+            library_path=library_path,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            delete=bool(getattr(args, "delete", False)),
+            verbose=bool(getattr(args, "verbose", False)),
+        )
+    except RsyncMissingError as exc:
+        print(f"sync push: {exc}", file=sys.stderr)
+        return 127
+    except SyncError as exc:
+        print(f"sync push: {exc}", file=sys.stderr)
+        return 2
+
+    return int(result.returncode)
+
+
+def _handle_sync_pull(args: argparse.Namespace) -> int:
+    """rsync a remote library into the local one."""
+    from core.sync import RsyncMissingError, SyncError, sync_pull
+
+    library_path = (
+        Path(args.library_path) if getattr(args, "library_path", None) else None
+    )
+    library = library_path or DEFAULT_LIBRARY_PATH
+
+    print(
+        f"sync pull: library={library} src={args.src}",
+        file=sys.stderr,
+    )
+
+    try:
+        result = sync_pull(
+            args.src,
+            library_path=library_path,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            delete=bool(getattr(args, "delete", False)),
+            verbose=bool(getattr(args, "verbose", False)),
+        )
+    except RsyncMissingError as exc:
+        print(f"sync pull: {exc}", file=sys.stderr)
+        return 127
+    except SyncError as exc:
+        print(f"sync pull: {exc}", file=sys.stderr)
+        return 2
+
+    return int(result.returncode)
+
+
 def _handle_codex_build_context(args: argparse.Namespace) -> int:
     adapter = _build_adapter(args)
     manifest = _manifest_for_access(adapter, since=_parse_since(args.since), access_level="team")
@@ -1408,6 +1492,84 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to scripts/latency_harness.py.",
     )
     latency_cmd.set_defaults(func=_handle_benchmark_latency)
+
+    # ---- sync (#74) --------------------------------------------------------
+    sync_cmd = subparsers.add_parser(
+        "sync",
+        help="Push/pull the agent-library across machines via rsync.",
+    )
+    sync_subparsers = sync_cmd.add_subparsers(dest="sync_command")
+
+    sync_push_cmd = sync_subparsers.add_parser(
+        "push",
+        help=(
+            "Push the local agent-library to <dest>, filtered by visibility. "
+            "Default access-level is `public` -- pushing team/private manifests "
+            "is opt-in."
+        ),
+    )
+    sync_push_cmd.add_argument(
+        "dest",
+        help=(
+            "rsync destination: local path, user@host:path, or rsync:// URL. "
+            "Trailing slash semantics follow rsync."
+        ),
+    )
+    sync_push_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="public",
+        help="Maximum visibility to push. Default: public.",
+    )
+    sync_push_cmd.add_argument(
+        "--library-path",
+        help=f"Source library (default: {DEFAULT_LIBRARY_PATH}).",
+    )
+    sync_push_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Stage + show rsync plan without writing to dest.",
+    )
+    sync_push_cmd.add_argument(
+        "--delete",
+        action="store_true",
+        help="Mirror mode -- delete files on dest that don't exist in source.",
+    )
+    sync_push_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Pass rsync -v.",
+    )
+    sync_push_cmd.set_defaults(func=_handle_sync_push)
+
+    sync_pull_cmd = sync_subparsers.add_parser(
+        "pull",
+        help="Pull a remote agent-library into the local one.",
+    )
+    sync_pull_cmd.add_argument(
+        "src",
+        help="rsync source: local path, user@host:path, or rsync:// URL.",
+    )
+    sync_pull_cmd.add_argument(
+        "--library-path",
+        help=f"Destination library (default: {DEFAULT_LIBRARY_PATH}).",
+    )
+    sync_pull_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show rsync plan without writing to local library.",
+    )
+    sync_pull_cmd.add_argument(
+        "--delete",
+        action="store_true",
+        help="Mirror mode -- delete local files not in source.",
+    )
+    sync_pull_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Pass rsync -v.",
+    )
+    sync_pull_cmd.set_defaults(func=_handle_sync_pull)
 
     return parser
 
