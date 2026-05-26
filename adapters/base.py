@@ -151,6 +151,7 @@ class HealthStatus:
     status: str  # "ok" | "degraded" | "blocked"
     reason: Optional[str] = None
     details: dict[str, Any] = field(default_factory=dict)
+    proposed_fix: Optional[str] = None  # Human-runnable command to remedy a non-ok status
 
 
 # -- Protocol ------------------------------------------------------------------

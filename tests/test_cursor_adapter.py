@@ -171,6 +171,8 @@ def test_health_check_blocked_when_no_dir(tmp_path):
     adapter = CursorAdapter(cursor_dir=tmp_path / "missing")
     health = adapter.health_check()
     assert health.status == "blocked"
+    assert health.proposed_fix is not None
+    assert "Cursor" in health.proposed_fix
 
 
 def test_health_check_degraded_when_no_dbs(tmp_path):
@@ -179,6 +181,8 @@ def test_health_check_degraded_when_no_dbs(tmp_path):
     health = adapter.health_check()
     assert health.status == "degraded"
     assert "No Cursor SQLite stores" in (health.reason or "")
+    assert health.proposed_fix is not None
+    assert "cursor export" in health.proposed_fix
 
 
 def test_health_check_ok_when_dbs_present(tmp_path):
@@ -189,6 +193,7 @@ def test_health_check_ok_when_dbs_present(tmp_path):
     health = adapter.health_check()
     assert health.status == "ok"
     assert health.details["databases_scanned"] >= 1
+    assert health.proposed_fix is None
 
 
 def test_health_check_does_not_raise_on_corrupt_db(tmp_path):

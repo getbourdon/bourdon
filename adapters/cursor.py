@@ -169,12 +169,20 @@ class CursorAdapter:
                 status="blocked",
                 reason="Cursor data directory not resolvable on this platform.",
                 details={},
+                proposed_fix=(
+                    "Install Cursor (https://cursor.sh) and open it once. "
+                    "Set CURSOR_DIR if Cursor stores state outside the default location."
+                ),
             )
         if not path.is_dir():
             return HealthStatus(
                 status="blocked",
                 reason=f"Cursor data directory not present at {path}.",
                 details={"expected_path": str(path)},
+                proposed_fix=(
+                    "Install Cursor and open it once to create the data directory, "
+                    "or set CURSOR_DIR to the actual location."
+                ),
             )
         try:
             memories = self._extract()
@@ -184,12 +192,21 @@ class CursorAdapter:
                 status="degraded",
                 reason="Cursor data directory present but extraction failed.",
                 details={"error": str(exc)},
+                proposed_fix=(
+                    "Close Cursor (its SQLite stores may be locked) then re-run "
+                    "`bourdon cursor export`. If extraction still fails, file an "
+                    "issue with the error above."
+                ),
             )
         if memories.databases_scanned == ():
             return HealthStatus(
                 status="degraded",
                 reason="No Cursor SQLite stores found under the data directory.",
                 details={"path": str(path)},
+                proposed_fix=(
+                    "Open Cursor and use it for at least one chat session, then "
+                    "re-run `bourdon cursor export`."
+                ),
             )
         return HealthStatus(
             status="ok",

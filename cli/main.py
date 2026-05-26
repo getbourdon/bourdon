@@ -295,18 +295,26 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         try:
             adapter = adapter_cls()
             health = adapter.health_check()
-            results.append({
+            row: dict[str, Any] = {
                 "agent": agent_id,
                 "status": health.status,
                 "reason": health.reason,
                 "details": health.details,
-            })
+            }
+            if health.proposed_fix:
+                row["proposed_fix"] = health.proposed_fix
+            results.append(row)
         except Exception as exc:  # noqa: BLE001
             results.append({
                 "agent": agent_id,
                 "status": "error",
                 "reason": str(exc),
                 "details": {},
+                "proposed_fix": (
+                    "Adapter raised during health_check. Run "
+                    "`bourdon doctor --report-out doctor.yaml` and file an issue with "
+                    "the traceback."
+                ),
             })
 
     report = {"adapters": results}

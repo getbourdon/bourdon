@@ -223,6 +223,34 @@ def test_health_check_never_raises(isolated_home):
     assert isinstance(result, HealthStatus)
 
 
+def test_health_check_blocked_proposes_setup(isolated_home):
+    """A blocked status carries an actionable fix via the wizard."""
+    health = ClaudeCodeAdapter().health_check()
+    assert health.status == "blocked"
+    assert health.proposed_fix is not None
+    assert "bourdon setup" in health.proposed_fix
+
+
+def test_health_check_degraded_proposes_setup(isolated_home):
+    """A degraded status (only some sources missing) also carries a fix."""
+    isolated_home["create_brain"]()  # brain exists; auto-memory + KG don't
+    health = ClaudeCodeAdapter().health_check()
+    assert health.status == "degraded"
+    assert health.proposed_fix is not None
+    assert "bourdon setup" in health.proposed_fix
+
+
+def test_health_check_ok_has_no_proposed_fix(isolated_home):
+    """A healthy adapter doesn't suggest anything."""
+    isolated_home["create_brain"]()
+    isolated_home["create_auto_memory"]()
+    kg_path = isolated_home["create_knowledge_graph"]()
+    isolated_home["add_graph_entity"](kg_path, {"type": "entity", "name": "X", "entityType": "y", "observations": []})
+    health = ClaudeCodeAdapter().health_check()
+    assert health.status == "ok"
+    assert health.proposed_fix is None
+
+
 # -- Helper: frontmatter + credential + type ------------------------------------
 
 
