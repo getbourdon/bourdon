@@ -172,13 +172,19 @@ _FRONTMATTER_OPEN = "---\n"
 _FRONTMATTER_CLOSE = "\n---\n"
 
 
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
+def _parse_frontmatter(
+    text: str, source: Optional[Path] = None
+) -> tuple[dict, str]:
     """
     Split YAML frontmatter from body.
 
     Accepts a file content string. If the content opens with ``---\\n`` and has
     a closing ``\\n---\\n``, returns (frontmatter_dict, body). Otherwise returns
     ({}, text) with no error.
+
+    On YAML parse failure logs at WARNING with adapter id, source path (if
+    provided), and a truncated exception detail so the offending file is
+    discoverable. See issue #79.
     """
     if not text.startswith(_FRONTMATTER_OPEN):
         return {}, text
@@ -189,8 +195,15 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     body = text[end + len(_FRONTMATTER_CLOSE) :]
     try:
         parsed = yaml.safe_load(fm_text)
-    except yaml.YAMLError:
-        logger.warning("Malformed YAML frontmatter, treating as no-frontmatter")
+    except yaml.YAMLError as exc:
+        where = f" in {source}" if source is not None else ""
+        detail = str(exc).replace("\n", " ")[:200]
+        logger.warning(
+            "ClaudeCodeAdapter: malformed YAML frontmatter%s; "
+            "treating as no-frontmatter (%s)",
+            where,
+            detail,
+        )
         return {}, text
     return (parsed if isinstance(parsed, dict) else {}), body
 
@@ -286,7 +299,7 @@ def _parse_project_overview(overview_path: Path) -> Optional[Entity]:
         text = overview_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    _, body = _parse_frontmatter(text)
+    _, body = _parse_frontmatter(text, source=overview_path)
     title = _extract_h1_title(body) or overview_path.parent.name
     summary = _extract_first_paragraph(body)
     tags = _extract_status_tag(body)
@@ -347,7 +360,7 @@ def _parse_log_file(log_path: Path) -> Optional[Session]:
         text = log_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    _, body = _parse_frontmatter(text)
+    _, body = _parse_frontmatter(text, source=log_path)
     # Extract first paragraph of content as key action summary
     headline = _extract_first_paragraph(body, max_chars=250)
     key_actions = [headline] if headline else []
@@ -400,7 +413,7 @@ def _parse_auto_memory_entity(md_path: Path) -> Optional[Entity]:
         text = md_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    frontmatter, body = _parse_frontmatter(text)
+    frontmatter, body = _parse_frontmatter(text, source=md_path)
     name = frontmatter.get("name") or _extract_h1_title(body) or md_path.stem
     entity_type = frontmatter.get("type")
     summary = frontmatter.get("description") or _extract_first_paragraph(body)

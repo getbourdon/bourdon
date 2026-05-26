@@ -136,6 +136,24 @@ def test_parse_frontmatter_returns_empty_on_bad_yaml():
     assert result == {}
 
 
+def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog):
+    """Issue #79: malformed YAML should log adapter id, source path, parse-error detail.
+
+    Cascade previously swallowed the error silently. This guard asserts the new
+    behavior: a discoverable warning with adapter id + path + truncated exception.
+    """
+    bad = tmp_path / "memory.md"
+    bad.write_text("---\n[unclosed\n---\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        _parse_frontmatter(bad.read_text(encoding="utf-8"), source=bad)
+    msgs = [r.getMessage() for r in caplog.records if "frontmatter" in r.getMessage()]
+    assert msgs, "expected a frontmatter warning"
+    line = msgs[0]
+    assert "CascadeAdapter" in line
+    assert str(bad) in line
+    assert "treating as no-frontmatter" in line
+
+
 def test_parse_frontmatter_ignores_body_below_closing_fence():
     text = "---\nentities: []\n---\n\n# body\nstuff here\n"
     result = _parse_frontmatter(text)

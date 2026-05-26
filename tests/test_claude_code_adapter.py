@@ -247,6 +247,21 @@ def test_parse_frontmatter_malformed_returns_empty_gracefully():
     assert fm == {}
 
 
+def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog):
+    """Issue #79: malformed YAML should log adapter id, source path, and parse-error detail."""
+    bad = tmp_path / "PROJECTS" / "NeuroLayer" / "OVERVIEW.md"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("---\n{{not yaml{{\n---\n# body\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        _parse_frontmatter(bad.read_text(encoding="utf-8"), source=bad)
+    msgs = [r.getMessage() for r in caplog.records if "frontmatter" in r.getMessage()]
+    assert msgs, "expected a frontmatter warning"
+    line = msgs[0]
+    assert "ClaudeCodeAdapter" in line
+    assert str(bad) in line
+    assert "treating as no-frontmatter" in line
+
+
 def test_extract_h1_title_strips_separators():
     assert _extract_h1_title("# Clyde -- AI Assistant\n") == "Clyde"
     assert _extract_h1_title("# ILTT: if_lift then_that\n") == "ILTT"

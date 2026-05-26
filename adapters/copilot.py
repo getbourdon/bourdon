@@ -151,11 +151,13 @@ def default_copilot_memory_path(copilot_dir: Optional[Path] = None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _parse_frontmatter(text: str) -> dict[str, Any]:
+def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, Any]:
     """Extract and parse the YAML front-matter block from memory file text.
 
     Returns an empty dict when the file has no front-matter or when the YAML
-    cannot be parsed (logged at WARNING; never raises).
+    cannot be parsed (logged at WARNING; never raises). On parse failure logs
+    the source path (if provided) and a truncated exception so the offending
+    file is discoverable. See issue #79.
     """
     if not text.startswith(_FRONTMATTER_OPEN):
         return {}
@@ -167,7 +169,14 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
         result = yaml.safe_load(fm_text)
         return result if isinstance(result, dict) else {}
     except yaml.YAMLError as exc:
-        logger.warning("CopilotAdapter: failed to parse front-matter YAML: %s", exc)
+        where = f" in {source}" if source is not None else ""
+        detail = str(exc).replace("\n", " ")[:200]
+        logger.warning(
+            "CopilotAdapter: malformed YAML frontmatter%s; "
+            "treating as no-frontmatter (%s)",
+            where,
+            detail,
+        )
         return {}
 
 
@@ -184,7 +193,7 @@ def _read_memory_file(path: Path) -> dict[str, Any]:
     except OSError as exc:
         logger.warning("CopilotAdapter: cannot read %s: %s", path, exc)
         return {}
-    return _parse_frontmatter(text)
+    return _parse_frontmatter(text, source=path)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +297,7 @@ def _inspect_copilot_memory(copilot_dir: Optional[Path]) -> dict[str, Any]:
         report["error"] = str(exc)
         return report
 
-    data = _parse_frontmatter(text)
+    data = _parse_frontmatter(text, source=mem_path)
     if data:
         report["frontmatter_valid"] = True
     report["entity_count"] = len(data.get("entities") or [])

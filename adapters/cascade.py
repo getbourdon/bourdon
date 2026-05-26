@@ -24,7 +24,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -88,11 +88,14 @@ def default_cascade_memory_path() -> Path:
     return default_cascade_dir() / _MEMORY_FILENAME
 
 
-def _parse_frontmatter(text: str) -> dict[str, Any]:
+def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, Any]:
     """
     Extract YAML front-matter from a ``---`` fenced block.
 
-    Returns an empty dict if the text has no valid front-matter.
+    Returns an empty dict if the text has no valid front-matter. On YAML
+    parse failure logs at WARNING with adapter id, source path (if provided),
+    and a truncated exception detail so the offending file is discoverable.
+    See issue #79.
     """
     if not text.startswith("---"):
         return {}
@@ -104,7 +107,15 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
         return {}
     try:
         data = yaml.safe_load(yaml_block)
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        where = f" in {source}" if source is not None else ""
+        detail = str(exc).replace("\n", " ")[:200]
+        logger.warning(
+            "CascadeAdapter: malformed YAML frontmatter%s; "
+            "treating as no-frontmatter (%s)",
+            where,
+            detail,
+        )
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -182,7 +193,7 @@ def _inspect_cascade_memory(cascade_dir: Path) -> dict[str, Any]:
     except OSError as e:
         return {"present": True, "readable": False, "error": str(e)}
 
-    data = _parse_frontmatter(text)
+    data = _parse_frontmatter(text, source=memory_path)
     if not data:
         return {
             "present": True,
@@ -301,7 +312,7 @@ class CascadeAdapter(BourdonAdapter):
             text = path.read_text(encoding="utf-8")
         except OSError:
             return {}
-        return _parse_frontmatter(text)
+        return _parse_frontmatter(text, source=path)
 
     # -- BourdonAdapter protocol -----------------------------------------------
 
