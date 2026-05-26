@@ -191,6 +191,41 @@ def test_is_claude_code_hook_wired_handles_non_dict_root(fake_home):
     assert is_claude_code_hook_wired(settings) is False
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bourdon claude-code export",  # bare name (Unix-ish)
+        "/usr/local/bin/bourdon claude-code export",  # absolute Unix
+        r"C:\Users\runner\AppData\Local\Programs\Python\Python312\Scripts\bourdon.exe claude-code export",  # Windows .exe path
+        "bourdon.exe claude-code export",  # bare Windows
+    ],
+)
+def test_is_claude_code_hook_wired_recognizes_path_variants(fake_home, command):
+    """Issue: Windows path .exe broke exact-substring marker (#88 fix).
+
+    Confirm the detector picks up the hook regardless of how the binary is
+    spelled at the front of the command string.
+    """
+    settings = claude_code_settings_path(home=fake_home)
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionEnd": [
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert is_claude_code_hook_wired(settings) is True
+
+
 # ---------------------------------------------------------------------------
 # resolve_bourdon_binary
 # ---------------------------------------------------------------------------

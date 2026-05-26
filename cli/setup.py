@@ -93,7 +93,19 @@ def ensure_agent_library(library_path: Path, *, dry_run: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
-_HOOK_COMMAND_MARKER = "bourdon claude-code export"
+def _command_marks_bourdon_hook(command: str) -> bool:
+    """Return True if ``command`` looks like a bourdon SessionEnd hook entry.
+
+    We can't use exact substring match (``"bourdon claude-code export"``) because
+    Windows resolves the binary to ``C:\\...\\bourdon.exe`` -- the ``.exe`` breaks
+    the contiguous substring. Match by tokens instead: must mention ``bourdon``
+    (anywhere -- handles bare name, absolute paths, and ``.exe``), the
+    ``claude-code`` subcommand, and the ``export`` action.
+    """
+    if not isinstance(command, str):
+        return False
+    lowered = command.lower()
+    return "bourdon" in lowered and "claude-code" in lowered and "export" in lowered
 
 
 def claude_code_settings_path(home: Optional[Path] = None) -> Path:
@@ -125,8 +137,7 @@ def is_claude_code_hook_wired(
         for nested in entry.get("hooks") or []:
             if not isinstance(nested, dict):
                 continue
-            command = nested.get("command") or ""
-            if isinstance(command, str) and _HOOK_COMMAND_MARKER in command:
+            if _command_marks_bourdon_hook(nested.get("command") or ""):
                 return True
     return False
 
