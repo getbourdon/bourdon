@@ -92,6 +92,23 @@ Cross-agent federation:
 
 See [`spec/ARCHITECTURE_v0.1.md`](spec/ARCHITECTURE_v0.1.md) for the full architecture doc.
 
+## Quick Start (one command)
+
+```bash
+pip install bourdon
+bourdon setup
+```
+
+`bourdon setup` is an interactive wizard that:
+
+- detects which AI agents are installed (Claude Code, Codex, Cursor, Copilot, Cascade)
+- creates `~/agent-library/` if missing
+- wires a `SessionEnd` hook in Claude Code so manifests auto-update at the end of each session
+- runs `bourdon export-all` to populate the library from current state
+- offers to run `bourdon codex sync-native --from-library --memory-md --write` so Codex.app surfaces federation context on its next turn
+
+Re-running is idempotent; `--non-interactive` uses defaults and `--dry-run` shows the plan without changing the filesystem. Once it's done, the per-agent Quick Starts below are reference -- the wizard wires the same things.
+
 ## Quick Start (Phase 1 Orchestrator)
 
 ```bash
