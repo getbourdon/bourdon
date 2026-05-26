@@ -1493,6 +1493,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     latency_cmd.set_defaults(func=_handle_benchmark_latency)
 
+    # ---- setup wizard ------------------------------------------------------
+    from cli.setup import add_setup_parser
+    add_setup_parser(subparsers)
+
     # ---- sync (#74) --------------------------------------------------------
     sync_cmd = subparsers.add_parser(
         "sync",
