@@ -1505,6 +1505,10 @@ def _build_parser() -> argparse.ArgumentParser:
     from cli.setup import add_setup_parser
     add_setup_parser(subparsers)
 
+    # ---- demo walkthrough --------------------------------------------------
+    from cli.demo import add_demo_parser
+    add_demo_parser(subparsers)
+
     # ---- sync (#74) --------------------------------------------------------
     sync_cmd = subparsers.add_parser(
         "sync",

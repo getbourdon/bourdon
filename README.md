@@ -109,6 +109,14 @@ bourdon setup
 
 Re-running is idempotent; `--non-interactive` uses defaults and `--dry-run` shows the plan without changing the filesystem. Once it's done, the per-agent Quick Starts below are reference -- the wizard wires the same things.
 
+### Just want to see what Bourdon does?
+
+```bash
+bourdon demo
+```
+
+A self-contained walkthrough that recreates the 2026-05-26 cross-machine recognition test locally using synthetic agent-library content. No real IDE state is touched, no network calls are made -- the federation pipeline is the production code path, only the input library is synthetic. Useful before deciding to wire your real machine.
+
 ## Quick Start (Phase 1 Orchestrator)
 
 ```bash
