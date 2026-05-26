@@ -505,10 +505,17 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
 
 def _handle_codex_sync_native(args: argparse.Namespace) -> int:
     adapter = _build_adapter(args)
+    library_path = (
+        Path(args.library_path) if getattr(args, "library_path", None) else None
+    )
     payload = _build_codex_native_memory_payload(
         adapter._codex_home,
         adapter._codex_brain,
         max_sessions=args.max_sessions,
+        from_library=bool(getattr(args, "from_library", False)),
+        include_local=bool(getattr(args, "include_local", False)),
+        library_path=library_path,
+        access_level=getattr(args, "access_level", "team"),
     )
     target_kind = "memory_md" if args.memory_md else "bourdon_file"
     target = (
@@ -1234,6 +1241,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "Update a bounded Bourdon section in ~/.codex/memories/MEMORY.md "
             "instead of writing the standalone Bourdon file."
         ),
+    )
+    sync_native_cmd.add_argument(
+        "--from-library",
+        action="store_true",
+        help=(
+            "Source content from the federation library "
+            "(~/agent-library/agents/*.l5.yaml) instead of local Codex history. "
+            "Required to render anchors on a fresh machine where Codex has no "
+            "local sessions yet."
+        ),
+    )
+    sync_native_cmd.add_argument(
+        "--include-local",
+        action="store_true",
+        help=(
+            "When combined with --from-library, append local Codex history "
+            "as a trailing section. Ignored without --from-library."
+        ),
+    )
+    sync_native_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+        help="Visibility filter applied to federation entities (default: team).",
+    )
+    sync_native_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
     )
     sync_native_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
     sync_native_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)

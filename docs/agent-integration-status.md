@@ -21,6 +21,13 @@ Status: SQLite-backed fallback and turn preparation available.
   back to `session_index.jsonl` on older Codex installs.
 - `bourdon codex prepare-turn` refreshes Codex fallback memory surfaces and emits
   prompt-ready recognition context.
+- `bourdon codex sync-native --from-library` sources `bourdon_fallback.md` from
+  the federation library (`~/agent-library/agents/*.l5.yaml`) instead of local
+  Codex history. Required on a fresh machine where Codex has no local sessions
+  yet; without it, federation transport alone cannot deliver recognition
+  context. Add `--include-local` to merge local Codex history into the same
+  file. `--access-level public|team|private` filters which federation entities
+  get rendered (default `team`).
 - Native Codex Stage 1 distilled memory is not relied on when it reports no
   stage1 outputs and errored memory jobs.
 
