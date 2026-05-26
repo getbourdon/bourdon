@@ -29,6 +29,7 @@ from adapters.claude_code import (
     _parse_frontmatter,
     _parse_log_file,
     _parse_project_overview,
+    _resolve_auto_memory_path,
 )
 
 # -- Fixture: isolated filesystem tree -----------------------------------------
@@ -101,6 +102,39 @@ def isolated_home(tmp_path, monkeypatch):
 def test_adapter_satisfies_protocol(isolated_home):
     adapter = ClaudeCodeAdapter()
     assert isinstance(adapter, BourdonAdapter)
+
+
+def test_resolve_auto_memory_path_returns_none_on_permission_error(tmp_path, monkeypatch):
+    """Guards #77: the CLI must stay importable when HOME points at an unreadable dir.
+
+    Reproduces the sudo-without-`-H` scenario by pointing Path.home() at a real
+    directory but making iterdir() raise PermissionError. The function must
+    swallow the error and return None instead of crashing module import.
+    """
+    fake_home = tmp_path / "unreadable_home"
+    (fake_home / ".claude" / "projects").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    def boom(self):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+
+    assert _resolve_auto_memory_path() is None
+
+
+def test_resolve_auto_memory_path_returns_none_on_oserror(tmp_path, monkeypatch):
+    """Defense in depth: any OSError reading the projects dir must not crash."""
+    fake_home = tmp_path / "broken_home"
+    (fake_home / ".claude" / "projects").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    def boom(self):
+        raise OSError(5, "I/O error", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+
+    assert _resolve_auto_memory_path() is None
 
 
 def test_adapter_exposes_expected_constants():
