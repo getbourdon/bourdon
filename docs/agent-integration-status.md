@@ -113,6 +113,44 @@ export path.
   > list in `~/.copilot-bourdon/memory.md`, and add any new project or concept
   > entities to the `entities:` list."
 
+## Cross-machine library distribution (`bourdon sync`)
+
+Status: shipped as `bourdon sync push|pull` per issue #74.
+
+`~/agent-library/` no longer requires manual `scp -r` or git-temp-branch
+transports to move between machines. The CLI surface:
+
+```bash
+# push the local library to another host
+bourdon sync push user@bourdon-mac.tailnet:~/agent-library/
+
+# pull a remote library into the local one
+bourdon sync pull user@bourdon-pc.tailnet:~/agent-library/
+```
+
+Behind the scenes:
+
+- **Visibility filter (push only).** Push stages a copy of `~/agent-library/`
+  in a tempdir with all `agents/*.l5.yaml` filtered by `--access-level`
+  (default: `public`). Entities and sessions above the requested level are
+  dropped from the staged copy before the rsync. The default is the most
+  restrictive — pushing `team` or `private` manifests is an opt-in.
+- **Transport.** Wraps `rsync -az --checksum --delay-updates` so the network
+  leg is idempotent (checksum-based change detection) and atomic per file
+  (rsync writes updated files to the destination's `.~tmp~/` and renames
+  them in at the end of the run, so a mid-sync failure leaves the destination
+  consistent).
+- **Sources / destinations.** Whatever rsync accepts: local paths,
+  `user@host:path` over SSH, or `rsync://` URLs. Trailing-slash semantics
+  follow rsync.
+
+`bourdon sync push` requires `rsync` on `$PATH`. macOS/Linux ship it; Windows
+users need WSL.
+
+For visibility verification before pushing, `--dry-run` shows the rsync plan
+plus per-agent entity/session counts so you can confirm the filter outcome
+without burning a network leg.
+
 ## Peer L6 federation (Phase 1.6)
 
 Status: available behind the `[federation]` extras.
