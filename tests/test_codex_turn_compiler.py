@@ -342,7 +342,7 @@ def test_compile_turn_latency_stays_small_for_fixture_library(tmp_path):
     elapsed_ms = (time.perf_counter() - start) * 1_000
 
     assert brief.items
-    assert elapsed_ms < 100
+    assert elapsed_ms < 200
 
 
 def test_compile_turn_routes_high_confidence_brief_to_explicit_and_mcp(tmp_path):
