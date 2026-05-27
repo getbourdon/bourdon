@@ -12,12 +12,21 @@ If you'd rather see Bourdon work before installing it, run [`bourdon demo`](#see
 pip install bourdon
 ```
 
-Optional extras:
+Python 3.10+. Mac, Linux, Windows (WSL recommended) all supported by CI.
+
+### Mac (Homebrew)
+
+```bash
+brew tap getbourdon/bourdon https://github.com/getbourdon/bourdon
+brew install getbourdon/bourdon/bourdon
+```
+
+Pulls in `python@3.12` and `rsync` automatically. See [`homebrew/README.md`](../homebrew/README.md) for the maintenance side.
+
+### Optional extras
 
 - `pip install 'bourdon[server]'` — pulls in `fastmcp` so you can run the L6 federation server.
 - `pip install 'bourdon[federation]'` — peer L6 federation over HTTP for cross-machine query.
-
-Python 3.10+. Mac, Linux, Windows (WSL recommended) all supported by CI.
 
 ## 2. Set up
 
