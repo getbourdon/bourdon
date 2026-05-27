@@ -154,6 +154,37 @@ def test_prepare_recognition_context_from_store_respects_public_visibility(libra
     assert report["prompt_context"] == ""
 
 
+def test_mcp_compile_codex_turn_returns_same_schema(library):
+    library["write"](
+        "codex",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "codex", "type": "code-assistant"},
+            "last_updated": "2026-05-27T12:00:00+00:00",
+            "known_entities": [
+                {
+                    "name": "Bourdon",
+                    "type": "project",
+                    "summary": "Turn compiler context.",
+                    "visibility": "team",
+                }
+            ],
+        },
+    )
+    store = L6Store(library["path"])
+
+    report = server_module.compile_codex_turn_from_store(
+        store,
+        "Bourdon recognition",
+        access_level="team",
+    )
+
+    assert report["schema_version"] == "codex-turn-brief/v1"
+    assert report["health"]["strategy"] == "turn_compiled"
+    assert report["items"][0]["name"] == "Bourdon"
+    assert "Bourdon turn recognition brief" in report["delivery"]["explicit_text"]
+
+
 async def test_get_deeper_context_for_prompt_never_raises(monkeypatch):
     async def broken_query_l2(prompt):
         raise RuntimeError("retriever unavailable")

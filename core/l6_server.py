@@ -55,13 +55,17 @@ import re
 import time as time_module
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from core.codex_turn_compiler import compile_codex_turn as _compile_codex_turn
 from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from core.l6_remote import RemoteL6Client
 
 _CONTEXT_SENSITIVE_PATTERNS = (
     re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
@@ -303,6 +307,27 @@ async def get_deeper_context_for_prompt(
         "context": context,
         "context_chars": len(context),
     }
+
+
+def compile_codex_turn_from_store(
+    store: L6Store,
+    prompt: str,
+    cwd: str | None = None,
+    access_level: str = "team",
+    max_items: int = 6,
+    max_chars: int = 1800,
+) -> dict[str, Any]:
+    """Return a Codex turn-scoped recognition brief using this server's store."""
+    brief = _compile_codex_turn(
+        prompt,
+        cwd=cwd,
+        library_path=store.library_path,
+        access_level=access_level,
+        max_items=max_items,
+        max_chars=max_chars,
+        delivery="all",
+    )
+    return brief.to_dict()
 
 
 def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
@@ -664,6 +689,31 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         )
 
     @mcp.tool()
+    def compile_codex_turn(
+        prompt: str,
+        cwd: str | None = None,
+        access_level: str = "team",
+        max_items: int = 6,
+        max_chars: int = 1800,
+    ) -> dict:
+        """
+        Compile a turn-scoped Codex recognition brief.
+
+        This is the active recognition-orchestration surface for Codex: it
+        ranks prompt, cwd/repo identity, local Codex thread metadata, and L6
+        federation context into a compact prompt fragment without depending on
+        native Stage 1 summarization.
+        """
+        return compile_codex_turn_from_store(
+            store,
+            prompt,
+            cwd=cwd,
+            access_level=access_level,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
+
+    @mcp.tool()
     async def get_deeper_context(
         prompt: str,
         access_level: str = "team",
@@ -750,7 +800,7 @@ def _parse_args() -> argparse.Namespace:
 def _load_peers(
     config_path: Path,
     inline_urls: list[str],
-) -> list["RemoteL6Client"]:
+) -> list[RemoteL6Client]:
     """Build the peers list from CLI flags + optional config file.
 
     Returns an empty list if no peers are configured. Import of
@@ -828,8 +878,6 @@ def _build_auth_middleware():
 
 
 def main() -> None:
-    import os as _os  # local to avoid top-level shuffle
-
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     peers = _load_peers(args.peers_config, args.peer)
