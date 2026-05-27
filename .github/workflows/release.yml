@@ -1,0 +1,89 @@
+name: Release
+
+# Publish to PyPI when a vX.Y.Z tag is pushed.
+#
+# Authentication is via PyPI Trusted Publishing (OIDC) -- no long-lived
+# API tokens stored in GitHub Secrets. The one-time PyPI-side configuration
+# lives in PyPI > Manage > bourdon > Publishing; see docs/RELEASE_PROCESS.md
+# for the exact fields. The `environment: pypi` line below MUST match the
+# environment name PyPI was told to expect.
+#
+# Tag-push triggers the workflow automatically; `workflow_dispatch` also
+# accepts an optional `tag` input so a release can be (re)published
+# retroactively without re-tagging.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish (e.g. v0.7.0). Defaults to current ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify built version matches tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          EXPECTED="${TAG#v}"
+          BUILT=$(ls dist/bourdon-*.tar.gz | sed -E 's|.*/bourdon-(.+)\.tar\.gz|\1|')
+          echo "Tag version:   $EXPECTED"
+          echo "Built version: $BUILT"
+          test "$BUILT" = "$EXPECTED"
+
+      - name: Upload artifacts for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Trusted Publishing requires this environment name to match the
+    # one configured on the PyPI side under Manage > Publishing.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/bourdon/
+
+    # OIDC: required for Trusted Publishing handshake.
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@release/v1
