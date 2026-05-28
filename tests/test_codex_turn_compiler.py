@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from core.codex_turn_compiler import compile_codex_turn
@@ -317,6 +319,10 @@ def test_compile_turn_respects_max_items_and_max_chars(tmp_path):
     assert len(brief.delivery["explicit_text"]) <= 420
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="GH Actions Windows runner latency is too variable for absolute-time perf assertion",
+)
 def test_compile_turn_latency_stays_small_for_fixture_library(tmp_path):
     library = tmp_path / "agent-library"
     _write_manifest(
