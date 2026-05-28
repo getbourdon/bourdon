@@ -802,6 +802,148 @@ def test_cli_codex_prepare_turn_dry_run_does_not_write(tmp_path, monkeypatch, ca
     assert l5_path.exists() is False
 
 
+def test_cli_codex_prepare_turn_turn_compiled_strategy_returns_router_trace(
+    tmp_path, monkeypatch, capsys
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _build_fake_codex_home(fake_home)
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "claude-code",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Active recognition orchestration across agent surfaces.",
+                "visibility": "team",
+            }
+        ],
+    )
+    native_path = tmp_path / "native.md"
+    l5_path = tmp_path / "codex.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex",
+            "prepare-turn",
+            "--strategy",
+            "turn-compiled",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(fake_home / ".codex"),
+            "--native-out",
+            str(native_path),
+            "--l5-out",
+            str(l5_path),
+            "Can we keep working on Bourdon recognition orchestration?",
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["mode"] == "dry-run"
+    assert report["strategy"] == "turn-compiled"
+    assert report["writes"]["native_memory"]["written"] is False
+    assert report["writes"]["l5"]["written"] is False
+    assert native_path.exists() is False
+    assert l5_path.exists() is False
+    assert "compiled_turn" in report
+    assert report["prompt_context"] == report["compiled_turn"]["delivery"][
+        "explicit_text"
+    ]
+    assert report["compiled_turn"]["schema_version"] == "codex-turn-brief/v1"
+    assert report["compiled_turn"]["routing"]["mode"] == "inject"
+    assert report["compiled_turn"]["routing"]["primary_surface"] == (
+        "explicit_pre_turn"
+    )
+    assert report["compiled_turn"]["trace"]["routing_decision"][
+        "primary_surface"
+    ] == "explicit_pre_turn"
+
+
+def test_cli_compile_turn_outputs_yaml_schema(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Turn compiler context.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+
+    exit_code = main(
+        [
+            "codex",
+            "compile-turn",
+            "Bourdon recognition",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["schema_version"] == "codex-turn-brief/v1"
+    assert report["health"]["strategy"] == "turn_compiled"
+    assert report["items"][0]["name"] == "Bourdon"
+    assert "Bourdon turn recognition brief" in report["delivery"]["explicit_text"]
+
+
+def test_cli_compile_turn_report_out_writes_requested_report(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Turn compiler context.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    report_out = tmp_path / "compile-turn.yaml"
+
+    exit_code = main(
+        [
+            "codex",
+            "compile-turn",
+            "Bourdon recognition",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+            "--report-out",
+            str(report_out),
+            "--format",
+            "json",
+        ]
+    )
+    stdout_report = json.loads(capsys.readouterr().out)
+    written_report = yaml.safe_load(report_out.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert stdout_report["schema_version"] == "codex-turn-brief/v1"
+    assert written_report["schema_version"] == "codex-turn-brief/v1"
+    assert written_report["items"][0]["name"] == "Bourdon"
+
+
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
     report_path = tmp_path / "report.yaml"
 
@@ -1105,3 +1247,29 @@ def test_cli_codex_eval_without_recognition_flag_omits_recognition_section(
     assert exit_code == 0
     report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
     assert "recognition" not in report
+
+
+def test_cli_codex_eval_turn_compiler_flag_attaches_routing_metrics(tmp_path):
+    report_path = tmp_path / "report.yaml"
+
+    exit_code = main(
+        [
+            "codex",
+            "eval",
+            "--fixtures",
+            "--turn-compiler",
+            "--report-out",
+            str(report_path),
+        ]
+    )
+    report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+    turn_compiler = report["turn_compiler"]
+
+    assert exit_code == 0
+    assert turn_compiler["prompts_tested"] == 5
+    assert turn_compiler["compiled_hits"] >= 1
+    assert turn_compiler["compiled_hit_rate"] > 0.0
+    assert turn_compiler["avg_latency_us"] < 100_000.0
+    assert "explicit_pre_turn" in turn_compiler["primary_surfaces"]
+    assert turn_compiler["results"][0]["prompt"] == "Tell me about Coolculator"
+    assert "top_score" in turn_compiler["results"][0]

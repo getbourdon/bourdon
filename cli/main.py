@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import tempfile
 import time as _time
@@ -46,6 +47,7 @@ from core.codex_context import (
     write_codex_context_artifacts,
 )
 from core.codex_fixtures import create_sample_codex_sources
+from core.codex_turn_compiler import compile_codex_turn
 from core.l2 import query_l2
 from core.l5_io import write_l5_dict
 from core.l6_server import prepare_recognition_context_from_store
@@ -712,6 +714,7 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
     access_level = args.access_level
     since = _parse_since(args.since)
     mode = "write" if args.write else "dry-run"
+    strategy = getattr(args, "strategy", "legacy")
 
     native_payload = _build_codex_native_memory_payload(
         adapter._codex_home,
@@ -777,11 +780,32 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
         "recognition_latency_us": round(recognition_us, 1),
         "hydration_scheduled": hydration_scheduled,
     }
+    prompt_context = _build_recognition_prompt_context(result)
+    compiled_turn: dict[str, Any] | None = None
+    if strategy == "turn-compiled":
+        try:
+            compiled = compile_codex_turn(
+                args.prompt,
+                cwd=getattr(args, "cwd", None),
+                codex_home=adapter._codex_home,
+                library_path=getattr(args, "library_path", None),
+                access_level=access_level,
+                max_items=getattr(args, "max_items", 6),
+                max_chars=getattr(args, "max_chars", 1800),
+                delivery="all",
+            )
+        except ValueError as exc:
+            print(f"prepare-turn: {exc}", file=sys.stderr)
+            return 2
+        compiled_turn = compiled.to_dict()
+        prompt_context = str(compiled_turn["delivery"]["explicit_text"])
+
     report = {
         "mode": mode,
+        "strategy": strategy,
         "access_level": access_level,
         "recognition": recognition_report,
-        "prompt_context": _build_recognition_prompt_context(result),
+        "prompt_context": prompt_context,
         "fallback_recall": native_payload["fallback_recall"],
         "writes": {
             "native_memory": {
@@ -800,8 +824,35 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
             },
         },
     }
+    if compiled_turn is not None:
+        report["compiled_turn"] = compiled_turn
     _write_yaml_if_requested(report, args.report_out)
     _print_yaml(report)
+    return 0
+
+
+def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
+    try:
+        brief = compile_codex_turn(
+            args.prompt,
+            cwd=getattr(args, "cwd", None),
+            codex_home=getattr(args, "codex_home", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery=args.delivery,
+        )
+    except ValueError as exc:
+        print(f"compile-turn: {exc}", file=sys.stderr)
+        return 2
+
+    data = brief.to_dict()
+    _write_yaml_if_requested(data, args.report_out)
+    if args.format == "json":
+        print(json.dumps(data, indent=2, sort_keys=False))
+    else:
+        _print_yaml(data)
     return 0
 
 
@@ -917,6 +968,72 @@ def _recognition_eval(
     }
 
 
+def _turn_compiler_eval(
+    *,
+    prompts: list[str],
+    codex_home: Path,
+    library_path: Path,
+    cwd: str | None,
+    access_level: str,
+    max_items: int,
+    max_chars: int,
+) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    latencies_us: list[float] = []
+    primary_surfaces: Counter[str] = Counter()
+    confidence_counts: Counter[str] = Counter()
+
+    for prompt in prompts:
+        t0 = _time.perf_counter()
+        brief = compile_codex_turn(
+            prompt,
+            cwd=cwd,
+            codex_home=codex_home,
+            library_path=library_path,
+            access_level=access_level,
+            max_items=max_items,
+            max_chars=max_chars,
+            delivery="all",
+        )
+        latency_us = (_time.perf_counter() - t0) * 1_000_000
+        latencies_us.append(latency_us)
+
+        data = brief.to_dict()
+        items = data["items"]
+        routing = data["routing"]
+        primary_surface = str(routing["primary_surface"])
+        confidence = str(routing["confidence"])
+        primary_surfaces[primary_surface] += 1
+        confidence_counts[confidence] += 1
+        top_item = items[0] if items else None
+        results.append(
+            {
+                "prompt": prompt,
+                "native_stage1": data["health"]["native_stage1"],
+                "item_count": len(items),
+                "top_item": top_item["name"] if top_item else None,
+                "top_score": top_item["score"] if top_item else 0.0,
+                "primary_surface": primary_surface,
+                "confidence": confidence,
+                "latency_us": round(latency_us, 1),
+            }
+        )
+
+    n = len(results)
+    avg_latency_us = sum(latencies_us) / n if n else 0.0
+    hits = sum(1 for result in results if result["item_count"] > 0)
+
+    return {
+        "prompts_tested": n,
+        "compiled_hits": hits,
+        "compiled_hit_rate": round(hits / n, 2) if n else 0.0,
+        "avg_latency_us": round(avg_latency_us, 1),
+        "primary_surfaces": dict(primary_surfaces),
+        "confidence_counts": dict(confidence_counts),
+        "results": results,
+    }
+
+
 def _handle_codex_eval(args: argparse.Namespace) -> int:
     adapter = _fixture_adapter() if args.fixtures else _build_adapter(args)
     manifest = _manifest_for_access(
@@ -970,6 +1087,23 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
     # and `does recognition fire on them in microseconds without retrieval?`
     if getattr(args, "recognition", False):
         report["recognition"] = _recognition_eval(manifest)
+
+    if getattr(args, "turn_compiler", False):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            if args.fixtures or not getattr(args, "library_path", None):
+                compiler_library = Path(tmpdir) / "agent-library"
+                write_l5_dict(manifest, compiler_library / "agents" / "codex.l5.yaml")
+            else:
+                compiler_library = Path(args.library_path)
+            report["turn_compiler"] = _turn_compiler_eval(
+                prompts=CANONICAL_RECOGNITION_PROMPTS,
+                codex_home=adapter._codex_home,
+                library_path=compiler_library,
+                cwd=getattr(args, "cwd", None),
+                access_level=args.access_level,
+                max_items=getattr(args, "max_items", 6),
+                max_chars=getattr(args, "max_chars", 1800),
+            )
 
     _write_yaml_if_requested(report, args.report_out)
     _print_yaml(report)
@@ -1405,6 +1539,35 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_turn_cmd.add_argument("--native-out")
     prepare_turn_cmd.add_argument("--l5-out")
     prepare_turn_cmd.add_argument("--max-sessions", type=int, default=20)
+    prepare_turn_cmd.add_argument(
+        "--strategy",
+        choices=("legacy", "turn-compiled"),
+        default="legacy",
+        help="Choose legacy recognition context or the turn-scoped compiler.",
+    )
+    prepare_turn_cmd.add_argument(
+        "--cwd",
+        help="Current working directory used by --strategy turn-compiled.",
+    )
+    prepare_turn_cmd.add_argument(
+        "--library-path",
+        help=(
+            "Override the agent-library root used by --strategy "
+            "turn-compiled (default: ~/agent-library)."
+        ),
+    )
+    prepare_turn_cmd.add_argument(
+        "--max-items",
+        type=int,
+        default=6,
+        help="Maximum compiled brief items for --strategy turn-compiled.",
+    )
+    prepare_turn_cmd.add_argument(
+        "--max-chars",
+        type=int,
+        default=1800,
+        help="Maximum explicit brief characters for --strategy turn-compiled.",
+    )
     prepare_turn_cmd.add_argument("--since")
     prepare_turn_cmd.add_argument(
         "--access-level",
@@ -1415,6 +1578,37 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_turn_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
     prepare_turn_cmd.add_argument("--codex-brain", help=argparse.SUPPRESS)
     prepare_turn_cmd.set_defaults(func=_handle_codex_prepare_turn)
+
+    compile_turn_cmd = codex_subparsers.add_parser(
+        "compile-turn",
+        help="Compile a turn-scoped Codex recognition brief",
+    )
+    compile_turn_cmd.add_argument("prompt")
+    compile_turn_cmd.add_argument("--cwd")
+    compile_turn_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    compile_turn_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    compile_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    compile_turn_cmd.add_argument("--max-items", type=int, default=6)
+    compile_turn_cmd.add_argument("--max-chars", type=int, default=1800)
+    compile_turn_cmd.add_argument(
+        "--format",
+        choices=("yaml", "json"),
+        default="yaml",
+    )
+    compile_turn_cmd.add_argument(
+        "--delivery",
+        choices=("explicit", "mcp", "memory-md", "fallback", "all"),
+        default="all",
+    )
+    compile_turn_cmd.add_argument("--report-out")
+    compile_turn_cmd.set_defaults(func=_handle_codex_compile_turn)
 
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()
@@ -1438,6 +1632,24 @@ def _build_parser() -> argparse.ArgumentParser:
             "hydration latency, hit rate)."
         ),
     )
+    eval_cmd.add_argument(
+        "--turn-compiler",
+        action="store_true",
+        help=(
+            "Also exercise the Codex turn-scoped compiler against canonical "
+            "prompts and attach routing, confidence, and latency metrics."
+        ),
+    )
+    eval_cmd.add_argument("--cwd")
+    eval_cmd.add_argument(
+        "--library-path",
+        help=(
+            "Agent-library root for --turn-compiler live mode. Fixtures and "
+            "live runs without this flag use a temp L5 export."
+        ),
+    )
+    eval_cmd.add_argument("--max-items", type=int, default=6)
+    eval_cmd.add_argument("--max-chars", type=int, default=1800)
     eval_cmd.set_defaults(func=_handle_codex_eval)
 
     # ---- claude-code subcommands --------------------------------------------
