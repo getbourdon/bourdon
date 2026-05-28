@@ -61,26 +61,16 @@ The tag push fires `.github/workflows/release.yml` which:
 2. Builds sdist + wheel via `python -m build`.
 3. Asserts the built package version matches the tag (defensive — catches bumps that didn't propagate).
 4. Publishes to PyPI via OIDC. No tokens.
+5. Creates the GitHub Release from `RELEASE_NOTES_vX.Y.Z.md` (or updates it if one already exists at that tag).
+6. Opens a `chore(homebrew): bump Formula to vX.Y.Z` PR with the recomputed `url` + `sha256`. Review and merge it.
 
-GitHub Release creation (optional but recommended for the public changelog):
-
-```bash
-gh release create vX.Y.Z --title "vX.Y.Z -- one-line summary" --notes-file RELEASE_NOTES_vX.Y.Z.md
-```
+`RELEASE_NOTES_vX.Y.Z.md` must be present on the tagged commit — step 5 hard-fails if it's missing. That file lands in the release PR alongside the `pyproject.toml` bump.
 
 ## Homebrew formula bump
 
-After the tag is live:
+The release workflow's `homebrew_bump` job opens the Formula PR automatically. Review the diff, confirm `sha256` matches `curl -sL https://github.com/getbourdon/bourdon/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256`, and merge.
 
-```bash
-# Compute the new tarball SHA
-curl -sL "https://github.com/getbourdon/bourdon/archive/refs/tags/vX.Y.Z.tar.gz" | shasum -a 256
-
-# Edit Formula/bourdon.rb -- bump url + sha256 to the new tag.
-# Open a PR (chore(homebrew): bump Formula to vX.Y.Z). Merge.
-```
-
-See `homebrew/README.md` for resource-dep refresh recipes (PyYAML etc.).
+See `homebrew/README.md` for **resource-dep refresh recipes** (PyYAML etc.) — those are not automated and need a human bump when an underlying dep advances.
 
 ## Retroactive publish (one-off)
 
