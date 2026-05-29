@@ -28,7 +28,8 @@ not differ between agents:
 - the deterministic scorer, recognition gate, and ranker,
 - the router, the explicit/MCP/memory/fallback/overlay delivery payloads,
 - the recognition trace and diagnostics,
-- credential redaction + length bounding (`core/text_safety.py`).
+- credential redaction + length bounding (the shared `_safe_native_memory_text`
+  helper in `adapters/codex.py`).
 
 Each public entry point (`compile_codex_turn`, `compile_claude_turn`) is a thin
 wrapper that injects its agent's `SessionSource` and keeps its original
@@ -68,11 +69,10 @@ attribute access.
 - `compile_codex_turn` keeps its signature and **byte-for-byte output**; the
   existing `tests/test_codex_turn_compiler.py` suite is the regression guard and
   stays green unchanged.
-- `core/text_safety.py` is the new canonical home for
-  `_NATIVE_MEMORY_SENSITIVE_PATTERNS` / `_normalize_text` /
-  `_safe_native_memory_text`. `adapters/codex.py` re-exports them, so existing
-  importers (`adapters/copilot.py`, `adapters/cascade.py`, `cli/main.py`) are
-  unchanged.
+- The shared engine reuses the existing credential redactor
+  (`_safe_native_memory_text`) from `adapters/codex.py` — the same helper the
+  original Codex compiler imported. No adapter or redaction code is moved or
+  changed, keeping this change scoped to the compiler extraction.
 
 ## Adding a third agent
 

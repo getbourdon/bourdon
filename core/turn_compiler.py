@@ -25,8 +25,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import yaml
 
+from adapters.codex import _safe_native_memory_text
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
-from core.text_safety import _safe_native_memory_text
 
 STRATEGY = "turn_compiled"
 ACCESS_LEVELS = {"public", "team", "private"}
@@ -120,23 +120,23 @@ class SessionSource(Protocol):
 
     def resolve_home(self, override: str | Path | None) -> Path | None:
         """Resolve the agent's local native-memory home (override-able)."""
-        ...
+        raise NotImplementedError
 
     def inspect_native(self, home: Path | None) -> dict[str, Any]:
         """Return a read-only report on native-memory health."""
-        ...
+        raise NotImplementedError
 
     def classify_native(self, report: dict[str, Any]) -> str:
         """Classify the report into ``available`` / ``degraded`` / ``unknown``."""
-        ...
+        raise NotImplementedError
 
     def collect_local_records(self, home: Path | None, *, limit: int) -> list[_Candidate]:
         """Read local native session/thread metadata into ranking candidates."""
-        ...
+        raise NotImplementedError
 
     def native_diagnostics(self, report: dict[str, Any]) -> dict[str, Any]:
         """Return an agent-specific diagnostics block to merge into the brief."""
-        ...
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)

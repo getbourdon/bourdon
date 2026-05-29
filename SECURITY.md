@@ -24,7 +24,7 @@ Writes use **atomic tmp + fsync + rename** via `core/l5_io.py`. This prevents co
 
 Every string that originates from native agent state is run through the canonical redaction pipeline before landing in an L5 manifest field.
 
-**Canonical pattern set** (defined in `core/text_safety.py::_NATIVE_MEMORY_SENSITIVE_PATTERNS`, re-exported from `adapters/codex.py`):
+**Canonical pattern set** (from `adapters/codex.py::_NATIVE_MEMORY_SENSITIVE_PATTERNS`):
 
 | Pattern | Catches |
 |---------|---------|

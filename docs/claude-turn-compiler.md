@@ -142,7 +142,8 @@ source mix, surface health, and the routing reason.
 The compiler is read-only. It does not read auth files, write native Claude
 memory, mutate the federation library, run model calls, or execute shell
 commands. It reuses the shared visibility filtering and credential redaction
-(`core/text_safety.py`), and reads only the first few records of any transcript.
+(`_safe_native_memory_text` from `adapters/codex.py`), and reads only the first
+few records of any transcript.
 
 Tests (`tests/test_claude_turn_compiler.py`) mirror the Codex suite — ranking,
 cwd/repo identity, cross-agent context without native memory, degraded native
