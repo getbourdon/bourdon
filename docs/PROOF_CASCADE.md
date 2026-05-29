@@ -113,3 +113,58 @@ Five agents reporting. Four healthy, one degraded (Claude Code missing knowledge
 | `adapters/cascade.py` | Adapter implementation |
 | `cli/main.py` | CLI handler (`bourdon cascade {export,doctor,init}`) |
 | `tests/test_cascade_adapter.py` | 51 tests, all green |
+
+---
+
+## v0.8.0 Parity Update
+
+**Date:** 2026-05-28  
+**Branch:** `feat/cascade-v0.8-parity`
+
+### What was added
+
+Full feature parity with the Codex adapter — Cascade now has all 9 CLI subcommands
+and the same recognition/compilation stack that powers Codex's active orchestration.
+
+### New capabilities
+
+| Surface | Status |
+|---------|--------|
+| Native Windsurf state reader (`adapters/_windsurf_native.py`) | ✅ Reads `state.vscdb`, workspace metadata, cascade sessions, plans, workflows |
+| `bourdon cascade sync-native --from-library --write` | ✅ Renders federation into convention file with idempotent markers |
+| `bourdon cascade recognize "<prompt>"` | ✅ Runs recognition_runtime against Cascade manifest |
+| `bourdon cascade prepare-turn --strategy turn-compiled` | ✅ Refreshes memory surfaces + returns compiled context |
+| `bourdon cascade compile-turn "<prompt>"` | ✅ Turn-scoped recognition compiler (`cascade-turn-brief/v1` schema) |
+| `bourdon cascade eval --recognition --turn-compiler` | ✅ Full evaluation harness with latency + hit-rate metrics |
+| `bourdon cascade build-context --out-dir` | ✅ Generates L0/L1 timing artifacts |
+| `bourdon setup` — Cascade sync step | ✅ Wired into interactive wizard |
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    compile_cascade_turn()                      │
+│                                                              │
+│   ┌──────────────────┐  ┌─────────────────┐  ┌────────────┐ │
+│   │ Convention File   │  │ Native Windsurf │  │    L6       │ │
+│   │ (~/.cascade-     │  │ (state.vscdb +  │  │ Federation  │ │
+│   │  bourdon/        │  │  .windsurf/     │  │ Library     │ │
+│   │  memory.md)      │  │  plans/         │  │             │ │
+│   └────────┬─────────┘  └────────┬────────┘  └──────┬─────┘ │
+│            │                     │                    │       │
+│            └─────────────────────┼────────────────────┘       │
+│                                  ▼                            │
+│                    candidate scoring + ranking                │
+│                    (token_overlap + cwd_affinity              │
+│                     + recency + source_confidence)            │
+│                                  │                            │
+│                                  ▼                            │
+│               delivery: explicit | mcp | convention-file      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Test coverage
+
+- **765 tests pass** (full suite), **43 new turn compiler tests**, **52 adapter tests**
+- Native reader validates graceful fallback on all platforms (Darwin/Linux/Windows paths)
+- Determinism assertions: same input → byte-identical output

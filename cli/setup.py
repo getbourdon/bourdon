@@ -265,6 +265,7 @@ class SetupChoices:
     init_copilot: bool = False
     init_cascade: bool = False
     run_codex_sync: bool = True
+    run_cascade_sync: bool = True
     run_initial_export: bool = True
 
 
@@ -277,6 +278,7 @@ class SetupOutcome:
     copilot_init: Optional[Path] = None
     cascade_init: Optional[Path] = None
     codex_sync_ran: Optional[bool] = None  # None = skipped, True/False = ran with success/fail
+    cascade_sync_ran: Optional[bool] = None
     initial_export_ran: Optional[bool] = None
     notes: list[str] = field(default_factory=list)
 
@@ -344,6 +346,20 @@ def apply_choices(
         )
     elif choices.run_codex_sync and codex_present and dry_run:
         outcome.codex_sync_ran = True
+
+    # 7. Cascade sync-native --from-library
+    if choices.run_cascade_sync and cas_present and not dry_run:
+        outcome.cascade_sync_ran = _run_bourdon_subprocess(
+            [
+                "cascade",
+                "sync-native",
+                "--from-library",
+                "--write",
+            ],
+            bourdon_binary=bourdon_binary,
+        )
+    elif choices.run_cascade_sync and cas_present and dry_run:
+        outcome.cascade_sync_ran = True
 
     return outcome
 

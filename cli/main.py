@@ -280,6 +280,384 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_cascade_sync_native(args: argparse.Namespace) -> int:
+    from adapters.cascade import (
+        build_cascade_native_memory_payload,
+        merge_bourdon_cascade_section,
+    )
+
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    library_path = Path(args.library_path) if getattr(args, "library_path", None) else None
+
+    payload = build_cascade_native_memory_payload(
+        cascade_dir=cascade_dir,
+        from_library=bool(getattr(args, "from_library", False)),
+        library_path=library_path,
+        access_level=getattr(args, "access_level", "team"),
+        include_local=bool(getattr(args, "include_local", False)),
+    )
+
+    target = (
+        Path(args.out)
+        if getattr(args, "out", None)
+        else default_cascade_memory_path()
+    )
+    text = str(payload["text"])
+    mode = "write" if args.write else "dry-run"
+
+    # Merge into existing file using markers
+    existing_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    merged = merge_bourdon_cascade_section(existing_text, text)
+
+    written = False
+    if args.write:
+        _write_text_atomic(merged, target)
+        written = True
+
+    report = {
+        "mode": mode,
+        "target": str(target),
+        "source": payload["source"],
+        "would_write": bool(text.strip()),
+        "written": written,
+        "bytes": payload["bytes"],
+        "entities_count": payload["entities_count"],
+        "sessions_count": payload["sessions_count"],
+    }
+    if not args.write:
+        report["preview"] = merged
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cascade_recognize(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    t0 = _time.perf_counter()
+    result = recognition_first(
+        args.prompt,
+        data,
+        access_level=args.access_level,
+    )
+    recognition_us = (_time.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    report = {
+        "mode": "live",
+        "access_level": args.access_level,
+        "prompt": args.prompt,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(recognition_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+    }
+    if getattr(args, "prompt_context", False):
+        report["prompt_context"] = _build_recognition_prompt_context(result)
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cascade_prepare_turn(args: argparse.Namespace) -> int:
+    from adapters.cascade import (
+        build_cascade_native_memory_payload,
+        merge_bourdon_cascade_section,
+    )
+
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir)
+    access_level = args.access_level
+    since = _parse_since(args.since)
+    mode = "write" if args.write else "dry-run"
+    strategy = getattr(args, "strategy", "legacy")
+
+    # Build native memory payload
+    native_payload = build_cascade_native_memory_payload(
+        cascade_dir=cascade_dir,
+        from_library=True,
+        access_level=access_level,
+    )
+    native_target = (
+        Path(args.native_out)
+        if getattr(args, "native_out", None)
+        else default_cascade_memory_path()
+    )
+    native_text = str(native_payload["text"])
+    existing_text = native_target.read_text(encoding="utf-8") if native_target.is_file() else ""
+    merged_native = merge_bourdon_cascade_section(existing_text, native_text)
+
+    # Build L5 manifest
+    manifest = adapter.export_l5(since=since)
+    data = filter_manifest_for_access(manifest, access_level=access_level)
+    l5_target = Path(args.l5_out) if getattr(args, "l5_out", None) else _default_cascade_l5_path()
+
+    # Recognition
+    t0 = _time.perf_counter()
+    result = recognition_first(
+        args.prompt,
+        data,
+        access_level=access_level,
+    )
+    recognition_us = (_time.perf_counter() - t0) * 1_000_000
+    hydration = result.hydration
+    hydration_scheduled = hydration is not None
+    if hydration is not None:
+        hydration.close()
+
+    native_written = False
+    l5_written = False
+    if args.write:
+        _write_text_atomic(merged_native, native_target)
+        write_l5_dict(data, l5_target)
+        native_written = True
+        l5_written = True
+
+    recognition_report = {
+        "prompt": args.prompt,
+        "recognition": result.recognition,
+        "matched_entities": [
+            {
+                "name": str(entity.get("name") or ""),
+                "type": str(entity.get("type") or "topic"),
+            }
+            for entity in result.matched_entities
+        ],
+        "recognition_latency_us": round(recognition_us, 1),
+        "hydration_scheduled": hydration_scheduled,
+    }
+    prompt_context = _build_recognition_prompt_context(result)
+
+    compiled_turn: dict[str, Any] | None = None
+    if strategy == "turn-compiled":
+        try:
+            from core.cascade_turn_compiler import compile_cascade_turn
+
+            compiled = compile_cascade_turn(
+                args.prompt,
+                cwd=getattr(args, "cwd", None),
+                cascade_dir=cascade_dir,
+                library_path=getattr(args, "library_path", None),
+                access_level=access_level,
+                max_items=getattr(args, "max_items", 6),
+                max_chars=getattr(args, "max_chars", 1800),
+                delivery="all",
+            )
+            compiled_turn = compiled.to_dict()
+            prompt_context = str(compiled_turn["delivery"]["explicit_text"])
+        except (ImportError, ValueError) as exc:
+            print(f"prepare-turn: {exc}", file=sys.stderr)
+            return 2
+
+    report: dict[str, Any] = {
+        "mode": mode,
+        "strategy": strategy,
+        "access_level": access_level,
+        "recognition": recognition_report,
+        "prompt_context": prompt_context,
+        "writes": {
+            "native_memory": {
+                "target": str(native_target),
+                "would_write": bool(native_text.strip()),
+                "written": native_written,
+                "bytes": len(merged_native.encode("utf-8")),
+            },
+            "l5": {
+                "target": str(l5_target),
+                "would_write": True,
+                "written": l5_written,
+                "entity_count": len(data.get("known_entities") or []),
+                "session_count": len(data.get("recent_sessions") or []),
+            },
+        },
+    }
+    if compiled_turn is not None:
+        report["compiled_turn"] = compiled_turn
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cascade_compile_turn(args: argparse.Namespace) -> int:
+    from core.cascade_turn_compiler import compile_cascade_turn
+
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    try:
+        brief = compile_cascade_turn(
+            args.prompt,
+            cwd=getattr(args, "cwd", None),
+            cascade_dir=cascade_dir,
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery=args.delivery,
+        )
+    except ValueError as exc:
+        print(f"compile-turn: {exc}", file=sys.stderr)
+        return 2
+
+    data = brief.to_dict()
+    _write_yaml_if_requested(data, getattr(args, "report_out", None))
+    if getattr(args, "format", "yaml") == "json":
+        print(json.dumps(data, indent=2, sort_keys=False))
+    else:
+        _print_yaml(data)
+    return 0
+
+
+def _cascade_source_coverage(adapter: CascadeAdapter) -> dict[str, Any]:
+    health = adapter.health_check()
+    details = health.details or {}
+    native = details.get("native_windsurf") or {}
+    return {
+        "status": health.status,
+        "convention_file": details.get("present", False),
+        "frontmatter_valid": details.get("frontmatter_valid", False),
+        "entity_count": details.get("entity_count", 0),
+        "session_count": details.get("session_count", 0),
+        "native_windsurf_available": native.get("available", False),
+        "native_spaces": native.get("spaces_count", 0),
+        "native_cascade_sessions": native.get("cascade_sessions_count", 0),
+        "native_plans": native.get("plans_count", 0),
+        "native_workflows": native.get("workflows_count", 0),
+    }
+
+
+def _handle_cascade_eval(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir, cwd=Path(args.cwd) if getattr(args, "cwd", None) else None)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    entities = data.get("known_entities") or []
+    sessions = data.get("recent_sessions") or []
+
+    report: dict[str, Any] = {
+        "mode": "live",
+        "access_level": args.access_level,
+        "source_coverage": _cascade_source_coverage(adapter),
+        "session_count": len(sessions),
+        "entity_counts": {
+            "total": len(entities),
+            "by_type": dict(Counter(
+                entity.get("type") or "topic" for entity in entities
+            )),
+        },
+    }
+
+    if getattr(args, "recognition", False):
+        report["recognition"] = _recognition_eval(data)
+
+    if getattr(args, "turn_compiler", False):
+        try:
+            from core.cascade_turn_compiler import compile_cascade_turn
+
+            results: list[dict[str, Any]] = []
+            latencies: list[float] = []
+            for prompt in CANONICAL_RECOGNITION_PROMPTS:
+                t0 = _time.perf_counter()
+                brief = compile_cascade_turn(
+                    prompt,
+                    cwd=getattr(args, "cwd", None),
+                    cascade_dir=cascade_dir,
+                    library_path=getattr(args, "library_path", None),
+                    access_level=args.access_level,
+                    max_items=getattr(args, "max_items", 6),
+                    max_chars=getattr(args, "max_chars", 1800),
+                    delivery="all",
+                )
+                latency = (_time.perf_counter() - t0) * 1_000_000
+                latencies.append(latency)
+                bd = brief.to_dict()
+                results.append({
+                    "prompt": prompt,
+                    "item_count": len(bd["items"]),
+                    "primary_surface": bd["routing"]["primary_surface"],
+                    "confidence": bd["routing"]["confidence"],
+                    "latency_us": round(latency, 1),
+                })
+            n = len(results)
+            hits = sum(1 for r in results if r["item_count"] > 0)
+            report["turn_compiler"] = {
+                "prompts_tested": n,
+                "compiled_hits": hits,
+                "compiled_hit_rate": round(hits / n, 2) if n else 0.0,
+                "avg_latency_us": round(sum(latencies) / n, 1) if n else 0.0,
+                "results": results,
+            }
+        except ImportError as exc:
+            report["turn_compiler"] = {"error": str(exc)}
+
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cascade_build_context(args: argparse.Namespace) -> int:
+    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level="team")
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write L0 hot-cache artifact
+    entities = data.get("known_entities") or []
+    sessions = data.get("recent_sessions") or []
+
+    l0_lines = ["# Cascade L0 — Hot Cache", ""]
+    for entity in entities[:20]:
+        name = str(entity.get("name") or "")
+        summary = _safe_native_memory_text(str(entity.get("summary") or ""), limit=120)
+        l0_lines.append(f"- {name}: {summary}")
+    l0_text = "\n".join(l0_lines) + "\n"
+    (out_dir / "cascade_l0_hot_cache.md").write_text(l0_text, encoding="utf-8")
+
+    # Write L1 entity synopses artifact
+    l1_lines = ["# Cascade L1 — Entity Synopses", ""]
+    for entity in entities:
+        name = str(entity.get("name") or "")
+        etype = entity.get("type") or "topic"
+        summary = _safe_native_memory_text(str(entity.get("summary") or ""), limit=240)
+        aliases = entity.get("aliases") or []
+        alias_text = f" (aka {', '.join(aliases)})" if aliases else ""
+        l1_lines.append(f"## {name}{alias_text}")
+        l1_lines.append(f"Type: {etype}")
+        l1_lines.append(f"Summary: {summary}")
+        l1_lines.append("")
+    l1_text = "\n".join(l1_lines) + "\n"
+    (out_dir / "cascade_l1_entity_synopses.md").write_text(l1_text, encoding="utf-8")
+
+    report = {
+        "out_dir": str(out_dir),
+        "l0_hot_cache": {
+            "path": str(out_dir / "cascade_l0_hot_cache.md"),
+            "entities": min(len(entities), 20),
+            "bytes": len(l0_text.encode("utf-8")),
+        },
+        "l1_entity_synopses": {
+            "path": str(out_dir / "cascade_l1_entity_synopses.md"),
+            "entities": len(entities),
+            "bytes": len(l1_text.encode("utf-8")),
+        },
+    }
+    _print_yaml(report)
+    return 0
+
+
 # -- Top-level doctor / export-all --------------------------------------------
 
 _ADAPTER_REGISTRY: list[tuple[str, type]] = [
@@ -1354,6 +1732,158 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing memory.md.",
     )
     cascade_init_cmd.set_defaults(func=_handle_cascade_init)
+
+    cascade_sync_cmd = cascade_subparsers.add_parser(
+        "sync-native",
+        help="Render federation library into Cascade's convention memory file",
+    )
+    cascade_sync_mode = cascade_sync_cmd.add_mutually_exclusive_group()
+    cascade_sync_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the merged memory file without writing. This is the default.",
+    )
+    cascade_sync_mode.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the merged memory file.",
+    )
+    cascade_sync_cmd.add_argument("--out")
+    cascade_sync_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_sync_cmd.add_argument(
+        "--from-library",
+        action="store_true",
+        help="Source content from ~/agent-library/agents/*.l5.yaml.",
+    )
+    cascade_sync_cmd.add_argument(
+        "--include-local",
+        action="store_true",
+        help="Also append local convention-file entities (requires --from-library).",
+    )
+    cascade_sync_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_sync_cmd.add_argument("--library-path")
+    cascade_sync_cmd.set_defaults(func=_handle_cascade_sync_native)
+
+    cascade_recognize_cmd = cascade_subparsers.add_parser(
+        "recognize",
+        help="Run the Cascade recognition layer for one prompt",
+    )
+    cascade_recognize_cmd.add_argument("prompt")
+    cascade_recognize_cmd.add_argument("--since")
+    cascade_recognize_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_recognize_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_recognize_cmd.add_argument("--report-out")
+    cascade_recognize_cmd.add_argument(
+        "--prompt-context",
+        action="store_true",
+        help="Include a bounded prompt fragment built from matched entities.",
+    )
+    cascade_recognize_cmd.set_defaults(func=_handle_cascade_recognize)
+
+    cascade_prepare_cmd = cascade_subparsers.add_parser(
+        "prepare-turn",
+        help="Refresh Cascade memory surfaces and return recognition context",
+    )
+    cascade_prepare_cmd.add_argument("prompt")
+    cascade_prepare_cmd.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the convention memory file and Cascade L5 manifest.",
+    )
+    cascade_prepare_cmd.add_argument("--native-out")
+    cascade_prepare_cmd.add_argument("--l5-out")
+    cascade_prepare_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_prepare_cmd.add_argument(
+        "--strategy",
+        choices=("legacy", "turn-compiled"),
+        default="legacy",
+        help="Choose legacy recognition context or the turn-scoped compiler.",
+    )
+    cascade_prepare_cmd.add_argument("--cwd")
+    cascade_prepare_cmd.add_argument("--library-path")
+    cascade_prepare_cmd.add_argument("--max-items", type=int, default=6)
+    cascade_prepare_cmd.add_argument("--max-chars", type=int, default=1800)
+    cascade_prepare_cmd.add_argument("--since")
+    cascade_prepare_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_prepare_cmd.add_argument("--report-out")
+    cascade_prepare_cmd.set_defaults(func=_handle_cascade_prepare_turn)
+
+    cascade_compile_cmd = cascade_subparsers.add_parser(
+        "compile-turn",
+        help="Compile a turn-scoped Cascade recognition brief",
+    )
+    cascade_compile_cmd.add_argument("prompt")
+    cascade_compile_cmd.add_argument("--cwd")
+    cascade_compile_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_compile_cmd.add_argument("--library-path")
+    cascade_compile_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_compile_cmd.add_argument("--max-items", type=int, default=6)
+    cascade_compile_cmd.add_argument("--max-chars", type=int, default=1800)
+    cascade_compile_cmd.add_argument(
+        "--format",
+        choices=("yaml", "json"),
+        default="yaml",
+    )
+    cascade_compile_cmd.add_argument(
+        "--delivery",
+        choices=("explicit", "mcp", "convention-file", "all"),
+        default="all",
+    )
+    cascade_compile_cmd.add_argument("--report-out")
+    cascade_compile_cmd.set_defaults(func=_handle_cascade_compile_turn)
+
+    cascade_eval_cmd = cascade_subparsers.add_parser(
+        "eval",
+        help="Evaluate Cascade memory sources and recognition behavior",
+    )
+    cascade_eval_cmd.add_argument("--since")
+    cascade_eval_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_eval_cmd.add_argument("--cwd")
+    cascade_eval_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_eval_cmd.add_argument("--report-out")
+    cascade_eval_cmd.add_argument(
+        "--recognition",
+        action="store_true",
+        help="Also exercise recognition_runtime against canonical prompts.",
+    )
+    cascade_eval_cmd.add_argument(
+        "--turn-compiler",
+        action="store_true",
+        help="Also exercise the Cascade turn compiler against canonical prompts.",
+    )
+    cascade_eval_cmd.add_argument("--library-path")
+    cascade_eval_cmd.add_argument("--max-items", type=int, default=6)
+    cascade_eval_cmd.add_argument("--max-chars", type=int, default=1800)
+    cascade_eval_cmd.set_defaults(func=_handle_cascade_eval)
+
+    cascade_ctx_cmd = cascade_subparsers.add_parser(
+        "build-context",
+        help="Generate Cascade L0/L1 timing artifacts",
+    )
+    cascade_ctx_cmd.add_argument("--out-dir", required=True)
+    cascade_ctx_cmd.add_argument("--since")
+    cascade_ctx_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_ctx_cmd.set_defaults(func=_handle_cascade_build_context)
 
     # ---- top-level doctor / export-all --------------------------------------
     doctor_cmd = subparsers.add_parser(

@@ -1,21 +1,20 @@
-"""
-Bourdon adapter for Cascade (Windsurf).
+"""Bourdon adapter for Cascade (Windsurf).
 
 Cascade is an agentic AI coding assistant embedded in the Windsurf IDE. It has
 persistent memory, multi-step planning, tool use (file editing, terminal, search),
 and workspace-level context awareness.
 
-This adapter uses a **convention-based** approach: Cascade maintains a structured
-memory file at ``~/.cascade-bourdon/memory.md`` with YAML front-matter containing
-entities and sessions. This file can be updated by Cascade at session end, giving
-it persistent cross-session entity awareness via the L6 federation library.
+This adapter uses a **hybrid** approach:
 
-Architecture choice
--------------------
-Cascade's internal state is not directly accessible on the filesystem in a
-standardized format (similar to Copilot). The convention-file approach means
-Cascade owns its memory projection explicitly -- it writes what it knows, and
-the adapter normalizes that into L5.
+1. **Convention file** (``~/.cascade-bourdon/memory.md``) — YAML front-matter with
+   entities and sessions, maintained explicitly by Cascade at session end.
+2. **Native Windsurf state** (``state.vscdb`` + workspace-level ``.windsurf/``
+   enrichment) — probed for session metadata, workspace associations, active
+   plans, and workflow definitions.
+
+The convention file is the primary source (Cascade owns what it writes); the
+native reader provides enrichment signals for the turn compiler and health
+diagnostics.
 """
 
 from __future__ import annotations
@@ -41,6 +40,11 @@ from adapters.base import (
     Visibility,
     VisibilityPolicy,
     filter_for_federation,
+)
+from adapters._windsurf_native import (
+    NativeWindsurfState,
+    inspect_native_windsurf,
+    read_native_windsurf_state,
 )
 from adapters.codex import (
     _NATIVE_MEMORY_SENSITIVE_PATTERNS,
@@ -291,9 +295,21 @@ class CascadeAdapter(BourdonAdapter):
         self,
         cascade_dir: Path | None = None,
         policy: VisibilityPolicy | None = None,
+        windsurf_data_dir: Path | None = None,
+        cwd: Path | None = None,
     ) -> None:
         self._dir = cascade_dir or default_cascade_dir()
         self._policy = policy or DEFAULT_POLICY
+        self._windsurf_data_dir = windsurf_data_dir
+        self._cwd = cwd
+
+    @property
+    def native_state(self) -> NativeWindsurfState:
+        """Read native Windsurf state (cached per call, not per instance)."""
+        return read_native_windsurf_state(
+            windsurf_data_dir=self._windsurf_data_dir,
+            cwd=self._cwd,
+        )
 
     @property
     def native_path(self) -> str:
@@ -475,8 +491,161 @@ class CascadeAdapter(BourdonAdapter):
                 ),
             )
 
+        native_report = inspect_native_windsurf(
+            windsurf_data_dir=self._windsurf_data_dir,
+            cwd=self._cwd,
+        )
+        report["native_windsurf"] = native_report
+
         return HealthStatus(
             status="ok",
             reason=None,
             details=report,
         )
+
+
+# -- Sync-native helpers -------------------------------------------------------
+
+_BOURDON_SECTION_BEGIN = "<!-- bourdon:federation:begin -->"
+_BOURDON_SECTION_END = "<!-- bourdon:federation:end -->"
+
+
+def merge_bourdon_cascade_section(existing: str, new_section: str) -> str:
+    """Merge a Bourdon federation section into a Cascade memory file.
+
+    Idempotent: replaces any existing Bourdon section between the marker
+    comments; appends if no section exists. Content outside the markers is
+    preserved.
+    """
+    begin_idx = existing.find(_BOURDON_SECTION_BEGIN)
+    end_idx = existing.find(_BOURDON_SECTION_END)
+
+    block = (
+        f"{_BOURDON_SECTION_BEGIN}\n"
+        f"{new_section.strip()}\n"
+        f"{_BOURDON_SECTION_END}\n"
+    )
+
+    if begin_idx != -1 and end_idx != -1:
+        # Replace existing section
+        before = existing[:begin_idx]
+        after = existing[end_idx + len(_BOURDON_SECTION_END):]
+        return before + block + after.lstrip("\n")
+
+    # Append
+    separator = "\n" if existing and not existing.endswith("\n") else ""
+    trailing = "\n" if existing else ""
+    return existing + separator + trailing + block
+
+
+def build_cascade_native_memory_payload(
+    cascade_dir: Path | None = None,
+    *,
+    from_library: bool = False,
+    library_path: Path | None = None,
+    access_level: str = "team",
+    include_local: bool = False,
+) -> dict[str, Any]:
+    """Build a federation-sourced memory payload for Cascade's convention file.
+
+    Parameters
+    ----------
+    cascade_dir : Path, optional
+        Override Cascade-Bourdon directory.
+    from_library : bool
+        Source entities from the federation library rather than local state.
+    library_path : Path, optional
+        Override agent-library path.
+    access_level : str
+        Visibility filter for federation content.
+    include_local : bool
+        When from_library=True, also append local convention-file entities.
+
+    Returns
+    -------
+    dict with keys: text, bytes, source, entities_count, sessions_count
+    """
+    from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+
+    lines: list[str] = []
+    entity_count = 0
+    session_count = 0
+    source = "local"
+
+    if from_library:
+        source = "federation"
+        lib_path = library_path or DEFAULT_LIBRARY_PATH
+        store = L6Store(lib_path)
+        manifest = store.build_recognition_manifest(access_level=access_level)
+
+        entities = manifest.get("known_entities") or []
+        sessions = manifest.get("recent_sessions") or []
+
+        if entities:
+            lines.append("## Federation Entities")
+            lines.append("")
+            for entity in entities:
+                if not isinstance(entity, dict):
+                    continue
+                name = str(entity.get("name") or "").strip()
+                if not name:
+                    continue
+                entity_type = entity.get("type") or "topic"
+                summary = _safe_native_memory_text(
+                    str(entity.get("summary") or ""), limit=180
+                )
+                agents = entity.get("source_agents") or []
+                via = f" (via {', '.join(str(a) for a in agents)})" if agents else ""
+                lines.append(f"- **{name}** ({entity_type}){via}: {summary}")
+                entity_count += 1
+            lines.append("")
+
+        if sessions:
+            lines.append("## Recent Sessions")
+            lines.append("")
+            for session in sessions[:20]:
+                if not isinstance(session, dict):
+                    continue
+                date_str = str(session.get("date") or "")
+                agent = str(session.get("agent") or "")
+                actions = session.get("key_actions") or []
+                action_text = "; ".join(str(a) for a in actions[:3])
+                via = f" [{agent}]" if agent else ""
+                lines.append(f"- {date_str}{via}: {action_text}")
+                session_count += 1
+            lines.append("")
+
+    if include_local and from_library:
+        # Also append local convention-file content as supplementary
+        target_dir = cascade_dir or default_cascade_dir()
+        memory_path = target_dir / _MEMORY_FILENAME
+        if memory_path.is_file():
+            try:
+                text = memory_path.read_text(encoding="utf-8")
+                data = _parse_frontmatter(text, source=memory_path)
+                local_entities = data.get("entities") or []
+                if local_entities:
+                    lines.append("## Local Cascade Entities")
+                    lines.append("")
+                    for raw in local_entities:
+                        if not isinstance(raw, dict):
+                            continue
+                        name = str(raw.get("name") or "").strip()
+                        if not name:
+                            continue
+                        summary = _safe_native_memory_text(
+                            str(raw.get("summary") or ""), limit=120
+                        )
+                        lines.append(f"- **{name}**: {summary}")
+                    lines.append("")
+            except OSError:
+                pass
+
+    text = "\n".join(lines)
+    return {
+        "text": text,
+        "bytes": len(text.encode("utf-8")),
+        "source": source,
+        "entities_count": entity_count,
+        "sessions_count": session_count,
+    }
