@@ -15,8 +15,9 @@ asked us to revisit "now that there are two callers."
 
 ```
 core/turn_compiler.py        agent-agnostic engine + SessionSource Protocol
-  ├─ core/codex_turn_compiler.py    CodexSessionSource  + compile_codex_turn()
-  └─ core/claude_turn_compiler.py   ClaudeSessionSource + compile_claude_turn()
+  ├─ core/codex_turn_compiler.py    CodexSessionSource   + compile_codex_turn()
+  ├─ core/claude_turn_compiler.py   ClaudeSessionSource  + compile_claude_turn()
+  └─ core/cascade_turn_compiler.py  CascadeSessionSource + compile_cascade_turn()
 ```
 
 `compile_turn(prompt, *, source: SessionSource, ...)` owns everything that does
@@ -31,9 +32,9 @@ not differ between agents:
 - credential redaction + length bounding (the shared `_safe_native_memory_text`
   helper in `adapters/codex.py`).
 
-Each public entry point (`compile_codex_turn`, `compile_claude_turn`) is a thin
-wrapper that injects its agent's `SessionSource` and keeps its original
-signature.
+Each public entry point (`compile_codex_turn`, `compile_claude_turn`,
+`compile_cascade_turn`) is a thin wrapper that injects its agent's
+`SessionSource` and keeps its original signature.
 
 ## The `SessionSource` seam
 
@@ -41,21 +42,21 @@ A `typing.Protocol` (runtime-checkable). It carries the small set of things that
 genuinely differ between agents — identity labels and read-only native-surface
 probes:
 
-| member | Codex | Claude Code |
-|---|---|---|
-| `agent_id` | `codex` | `claude-code` |
-| `agent_display` | `Codex` | `Claude` |
-| `schema_version` | `codex-turn-brief/v1` | `claude-turn-brief/v1` |
-| `l5_source_label` | `codex_l5` | `claude_l5` |
-| `native_health_key` | `native_stage1` | `native_memory` |
-| `native_health_noun` | `native Stage 1` | `native memory` |
-| `local_record_noun` | `Codex thread` | `Claude session` |
-| `exhausted_paths` | Codex list | Claude list |
-| `resolve_home(override)` | `~/.codex` | `~/.claude/projects` base |
-| `inspect_native(home)` | `state_5.sqlite` stage1 report | `MEMORY.md` size report |
-| `classify_native(report)` | available/degraded/unknown | available/degraded/unknown |
-| `collect_local_records(home, *, limit)` | `threads` table → `kind="thread"` | project `*.jsonl` → `kind="thread"` |
-| `native_diagnostics(report)` | `{stage1_jobs: ...}` | `{auto_memory: ...}` |
+| member | Codex | Claude Code | Cascade (Windsurf) |
+|---|---|---|---|
+| `agent_id` | `codex` | `claude-code` | `cascade` |
+| `agent_display` | `Codex` | `Claude` | `Cascade` |
+| `schema_version` | `codex-turn-brief/v1` | `claude-turn-brief/v1` | `cascade-turn-brief/v1` |
+| `l5_source_label` | `codex_l5` | `claude_l5` | `cascade_l5` |
+| `native_health_key` | `native_stage1` | `native_memory` | `native_state` |
+| `native_health_noun` | `native Stage 1` | `native memory` | `native Windsurf state` |
+| `local_record_noun` | `Codex thread` | `Claude session` | `Cascade session` |
+| `exhausted_paths` | Codex list | Claude list | Cascade list |
+| `resolve_home(override)` | `~/.codex` | `~/.claude/projects` base | Windsurf data dir |
+| `inspect_native(home)` | `state_5.sqlite` stage1 report | `MEMORY.md` size report | Windsurf state read |
+| `classify_native(report)` | available/degraded/unknown | available/degraded/unknown | available/degraded/unknown |
+| `collect_local_records(home, *, limit)` | `threads` table → `kind="thread"` | project `*.jsonl` → `kind="thread"` | editor sessions → `thread`; plans/workflows → `plan`/`workflow` |
+| `native_diagnostics(report)` | `{stage1_jobs: ...}` | `{auto_memory: ...}` | `{native_state: ...}` |
 
 The engine reads `source.agent_id` to decide own-agent vs cross-agent
 (`l6_federation`) source labels, derives the suppressed-route name as
@@ -74,9 +75,12 @@ attribute access.
   original Codex compiler imported. No adapter or redaction code is moved or
   changed, keeping this change scoped to the compiler extraction.
 
-## Adding a third agent
+## Adding another agent
 
-Implement a `SessionSource` (identity labels + the five read-only probes), add a
-thin `compile_<agent>_turn` wrapper, and wire a CLI subcommand + MCP tool that
-mirror the Codex/Claude pairs. No engine changes should be required; if they
+Cascade (Windsurf) is the third caller — `core/cascade_turn_compiler.py` — and
+its reconciliation onto this engine (collapsing an ~820-line standalone compiler
+to a thin `CascadeSessionSource`) is what proved the seam beyond two callers. To
+add a fourth: implement a `SessionSource` (identity labels + the read-only
+probes), add a thin `compile_<agent>_turn` wrapper, and wire a CLI subcommand +
+MCP tool that mirror the existing pairs. No engine changes should be required; if they
 are, that is the signal that the seam needs another parameter rather than a fork.
