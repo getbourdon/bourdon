@@ -1,6 +1,10 @@
-# Bourdon Adapter Contract v0.1
+# Bourdon Adapter Contract v0.2
 
 An **adapter** is the bridge between an agent's native memory store and Bourdon's standardized L5 manifest. Adapters are how Bourdon federates across agents it does not control.
+
+Contract v0.2 is additive. The synchronous `BourdonAdapter` protocol remains
+the required base surface; the new v0.2 types are optional extensions for large
+stores, network-backed stores, UI metadata, and future sandbox enforcement.
 
 ## Two Kinds of Adapters
 
@@ -105,7 +109,115 @@ def export_l5(self, since=None) -> L5Manifest:
 
 ## Incremental Export (Optional)
 
-The `since` parameter on `export_l5()` and `export_sessions()` allows efficient updates. Adapters that support it emit only entities/sessions updated after `since`. Adapters that do not support it emit everything (and the caller deduplicates). Declare support via an `IncrementalAdapter` protocol extension (forthcoming in v0.2).
+The `since` parameter on `export_l5()` and `export_sessions()` allows efficient updates. Adapters that support it emit only entities/sessions updated after `since`. Adapters that do not support it emit everything (and the caller deduplicates). Declare support with `AdapterCapabilities(supports_incremental=True)`.
+
+## Optional Extension Surfaces (v0.2)
+
+These extensions live in `adapters/base.py`. They are deliberately optional so
+existing adapters do not need churn.
+
+### Metadata
+
+Adapters that want to expose UI or documentation details implement
+`AdapterMetadataProvider`:
+
+```python
+class MyToolAdapter:
+    def adapter_metadata(self) -> AdapterMetadata:
+        return AdapterMetadata(
+            display_name="My Tool",
+            description="Exports My Tool project and session memory.",
+            docs_url="https://example.test/my-tool/bourdon",
+            tags=["network-backed"],
+        )
+```
+
+Metadata MUST be static or derived from adapter code/config. It MUST NOT read
+native user memory; discovery UIs should be able to call it safely.
+
+### Capabilities
+
+Adapters declare optional support through `AdapterCapabilitiesProvider`:
+
+```python
+class MyToolAdapter:
+    def adapter_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            supports_incremental=True,
+            supports_batch_export=True,
+            supports_async=True,
+            supports_metadata=True,
+            supports_sandbox_policy=True,
+        )
+```
+
+Default capabilities are conservative: every optional flag is `False`.
+
+### Batch Export
+
+Very large native stores SHOULD implement `BatchExportAdapter` instead of
+forcing callers to materialize all entities and sessions in one process:
+
+```python
+result = adapter.export_l5_batch(BatchExportOptions(limit=500, cursor=cursor))
+for entity in result.known_entities:
+    ...
+cursor = result.next_cursor if result.has_more else None
+```
+
+`BatchExportOptions.limit` is bounded to `1..1000`. A batch result with
+`has_more=True` MUST include `next_cursor`; a result with `next_cursor` MUST set
+`has_more=True`. Cursor tokens are adapter-owned opaque strings.
+
+Batch export returns normalized `Entity` and `Session` rows, not raw native
+records. Visibility filtering and redaction requirements still apply before a
+row leaves the adapter.
+
+### Sandbox Policy
+
+Adapters that can describe their access surface implement
+`AdapterSandboxPolicyProvider`:
+
+```python
+class MyToolAdapter:
+    def adapter_sandbox_policy(self) -> AdapterSandboxPolicy:
+        return AdapterSandboxPolicy(
+            filesystem_read_roots=["~/.my-tool"],
+            filesystem_write_roots=[],
+            network_hosts=["api.my-tool.example"],
+            subprocess_commands=[],
+        )
+```
+
+This is advisory in v0.2. Runtime enforcement is future work. The declaration
+still matters: adapters should publish the narrowest filesystem roots, network
+hosts, and subprocess commands they need so a future host can enforce them.
+Empty lists mean no declared access.
+
+### Async Network-Backed Adapters
+
+Network-backed native stores such as Linear, Attio, Notion, or MCP-backed
+systems SHOULD implement `AsyncBourdonAdapter`:
+
+```python
+class MyNetworkAdapter:
+    agent_id = "my-network-tool"
+    agent_type = "code-assistant"
+    native_path = "https://api.example.test"
+
+    async def adiscover(self) -> AgentStore: ...
+    async def aexport_l5(self, since=None) -> L5Manifest: ...
+    async def aexport_sessions(self, since, limit=100) -> list[Session]: ...
+    async def ahealth_check(self) -> HealthStatus: ...
+```
+
+Async methods use an `a` prefix on purpose. Runtime protocol checks cannot
+distinguish a sync `def export_l5` from an async `async def export_l5`; distinct
+method names keep sync adapters from accidentally satisfying the async surface.
+
+The same error semantics apply: async `ahealth_check()` must not raise, and
+network calls should use bounded timeouts, retry only idempotent operations, and
+avoid logging tokens or raw responses.
 
 ## Example: A Minimal Adapter
 
@@ -156,15 +268,15 @@ Fixtures live under `tests/fixtures/<agent_id>/` with sample native-store conten
 ## Versioning
 
 - Adapter contract has its own semver, tied to Bourdon spec version but independently bumped on breaking changes
-- Adapters declare `CONTRACT_VERSION = "0.1"` at module level
+- Adapters declare `CONTRACT_VERSION = "0.2"` at module level
 - L6 warns on version mismatch but does not reject — adapters are free to be ahead or behind
 
-## Open Questions (To Resolve in v0.2)
+## Open Questions
 
-- Async adapter interface (required for MCP/network-backed adapters like Linear, Attio, Notion)
-- Batch export for very large native stores (1M+ entities)
-- Adapter metadata for L6 UI (icon, name, description)
-- Adapter sandboxing — do we trust all adapters to read their native paths, or enforce FS isolation?
+- Runtime sandbox enforcement for declared `AdapterSandboxPolicy` values
+- Async batch export for network-backed stores with very large histories
+- UI display conventions for adapter icons and tags
+- Backpressure and resumability guarantees for million-row adapter exports
 
 ## Reference Implementation
 
