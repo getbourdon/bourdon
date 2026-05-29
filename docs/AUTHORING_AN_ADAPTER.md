@@ -35,7 +35,7 @@ from adapters.base import (
     BourdonAdapter, AgentInfo, Entity, Session, L5Manifest,
     AgentStore, HealthStatus, Visibility, VisibilityPolicy,
     AdapterDiscoveryError, apply_visibility, filter_for_federation,
-    CONTRACT_VERSION,  # "0.1"
+    CONTRACT_VERSION,  # "0.2"
 )
 
 class MyAgentAdapter:  # implicitly satisfies the Protocol
@@ -59,6 +59,60 @@ Required behavior, in order of how-easy-it-is-to-get-wrong:
    - Native store present but parse failed → `AdapterExportError`
    - Native store newer/older than supported → `AdapterVersionMismatchError`
    - Anything else → catch + convert to `HealthStatus.degraded` (never propagate)
+
+### Optional v0.2 Extension Surfaces
+
+Most filesystem or SQLite adapters should stop at `BourdonAdapter`. Use the
+optional v0.2 surfaces only when they solve a real boundary:
+
+| Extension | Use when | Do not use when |
+|---|---|---|
+| `AdapterMetadataProvider` | A UI, docs page, or registry needs display name, icon, docs URL, or tags | Metadata would require reading native user memory |
+| `AdapterCapabilitiesProvider` | The adapter supports incremental, batch, async, metadata, or sandbox declarations | You only need the required sync protocol |
+| `BatchExportAdapter` | The native store can be too large to materialize in one manifest pass | The store is small enough for `export_l5()` to stay simple |
+| `AdapterSandboxPolicyProvider` | The adapter can declare exact filesystem roots, network hosts, or subprocess commands | You would need broad filesystem or network access and cannot narrow it |
+| `AsyncBourdonAdapter` | The native store is network-backed or MCP-backed and async IO is the natural boundary | The adapter reads local files or SQLite in-process |
+
+Batch export uses bounded cursor pagination:
+
+```python
+from adapters.base import BatchExportOptions, BatchExportResult
+
+page = adapter.export_l5_batch(BatchExportOptions(limit=500, cursor=cursor))
+cursor = page.next_cursor if page.has_more else None
+```
+
+`BatchExportOptions.limit` is capped at 1000. Cursor tokens are adapter-owned
+opaque strings. Batch rows are still normalized `Entity` and `Session` objects,
+with redaction and visibility filtering already applied.
+
+Async adapters use distinct `a*` method names:
+
+```python
+class MyNetworkAdapter:
+    async def adiscover(self) -> AgentStore: ...
+    async def aexport_l5(self, since=None) -> L5Manifest: ...
+    async def aexport_sessions(self, since, limit=100) -> list[Session]: ...
+    async def ahealth_check(self) -> HealthStatus: ...
+```
+
+The `a` prefix is intentional. It prevents runtime protocol checks from
+mistaking a sync adapter for an async adapter just because method names match.
+
+Sandbox policy is descriptive in v0.2, not enforced by Bourdon yet. Still
+declare the narrowest access surface you can:
+
+```python
+from adapters.base import AdapterSandboxPolicy
+
+def adapter_sandbox_policy(self) -> AdapterSandboxPolicy:
+    return AdapterSandboxPolicy(
+        filesystem_read_roots=["~/.my-agent"],
+        filesystem_write_roots=[],
+        network_hosts=[],
+        subprocess_commands=[],
+    )
+```
 
 ## Step 2 — Apply Credential Redaction
 
@@ -212,6 +266,9 @@ When the agent has a plugin SDK (OpenClaw is the reference case), a Bourdon **pl
 - **Don't propagate exceptions from `health_check()`.** L6 calls it in a polling loop. A raised exception bubbles into the L6 process and crashes federation for *all* agents.
 - **Don't trust L6 to filter visibility.** L6 trusts you. If your `export_l5()` emits a `private`-tagged entity, it leaks. Test the visibility category with a fixture explicitly.
 - **Don't bypass `core/l5_io.py::write_l5()`.** A direct `yaml.safe_dump` to the final path will be observed half-written by readers.
+- **Don't use async just because it exists.** Local file and SQLite adapters are easier to reason about as sync code. Save `AsyncBourdonAdapter` for network-backed stores.
+- **Don't page raw native records.** `BatchExportAdapter` returns normalized, redacted, visibility-filtered `Entity` and `Session` rows.
+- **Don't declare broad sandbox access out of convenience.** Empty access lists are the safe default; list only the roots, hosts, and commands the adapter actually needs.
 - **Don't use the agent's display name for `agent_id`.** Use the kebab-case slug. `Claude Code` → `claude-code`, `Cline` → `cline`, `OpenClaw` → `openclaw`. The `agent_id` is the L5 filename.
 - **Don't ship a Python adapter when the agent has a plugin SDK.** The plugin is where the install path is. The Python adapter is the fallback for SDK-less agents.
 

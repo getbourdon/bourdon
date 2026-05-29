@@ -4,10 +4,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from adapters.base import (
+    CONTRACT_VERSION,
+    MAX_BATCH_EXPORT_LIMIT,
     SPEC_VERSION,
+    AdapterCapabilities,
+    AdapterCapabilitiesProvider,
+    AdapterMetadata,
+    AdapterMetadataProvider,
+    AdapterSandboxPolicy,
+    AdapterSandboxPolicyProvider,
     AgentInfo,
     AgentStore,
+    AsyncBourdonAdapter,
+    BatchExportAdapter,
+    BatchExportOptions,
+    BatchExportResult,
     BourdonAdapter,
     Entity,
     HealthStatus,
@@ -26,6 +40,11 @@ def test_visibility_enum_values():
     assert Visibility.PUBLIC.value == "public"
     assert Visibility.TEAM.value == "team"
     assert Visibility.PRIVATE.value == "private"
+
+
+def test_contract_and_spec_versions_are_separate():
+    assert CONTRACT_VERSION == "0.2"
+    assert SPEC_VERSION == "0.1"
 
 
 # -- Dataclass shape -----------------------------------------------------------
@@ -55,6 +74,69 @@ def test_l5_manifest_required_fields():
     assert manifest.spec_version == "0.1"
     assert manifest.agent.id == "x"
     assert manifest.known_entities == []
+
+
+def test_adapter_metadata_defaults_are_explicit():
+    metadata = AdapterMetadata(display_name="Linear")
+
+    assert metadata.display_name == "Linear"
+    assert metadata.description == ""
+    assert metadata.homepage_url is None
+    assert metadata.docs_url is None
+    assert metadata.icon is None
+    assert metadata.tags == []
+
+
+def test_adapter_capabilities_default_to_no_optional_extensions():
+    capabilities = AdapterCapabilities()
+
+    assert capabilities.supports_incremental is False
+    assert capabilities.supports_batch_export is False
+    assert capabilities.supports_async is False
+    assert capabilities.supports_metadata is False
+    assert capabilities.supports_sandbox_policy is False
+
+
+def test_batch_export_options_defaults_to_bounded_first_page():
+    options = BatchExportOptions()
+
+    assert options.since is None
+    assert options.limit == 100
+    assert options.cursor is None
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, MAX_BATCH_EXPORT_LIMIT + 1, True])
+def test_batch_export_options_rejects_invalid_limit(bad_limit):
+    with pytest.raises(ValueError):
+        BatchExportOptions(limit=bad_limit)
+
+
+def test_batch_export_result_defaults_to_complete_empty_page():
+    result = BatchExportResult()
+
+    assert result.known_entities == []
+    assert result.recent_sessions == []
+    assert result.next_cursor is None
+    assert result.has_more is False
+
+
+def test_batch_export_result_requires_cursor_when_more_pages_exist():
+    with pytest.raises(ValueError):
+        BatchExportResult(has_more=True)
+
+
+def test_batch_export_result_rejects_cursor_without_more_flag():
+    with pytest.raises(ValueError):
+        BatchExportResult(next_cursor="cursor-2")
+
+
+def test_adapter_sandbox_policy_defaults_to_no_access():
+    policy = AdapterSandboxPolicy()
+
+    assert policy.filesystem_read_roots == []
+    assert policy.filesystem_write_roots == []
+    assert policy.network_hosts == []
+    assert policy.subprocess_commands == []
 
 
 # -- Visibility resolution -----------------------------------------------------
@@ -259,6 +341,52 @@ class _MinimalAdapter:
         return HealthStatus(status="ok")
 
 
+class _MetadataAwareAdapter:
+    def adapter_metadata(self) -> AdapterMetadata:
+        return AdapterMetadata(display_name="Metadata Aware")
+
+
+class _CapabilitiesAwareAdapter:
+    def adapter_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(supports_metadata=True)
+
+
+class _SandboxAwareAdapter:
+    def adapter_sandbox_policy(self) -> AdapterSandboxPolicy:
+        return AdapterSandboxPolicy(filesystem_read_roots=["/tmp/example"])
+
+
+class _BatchAdapter(_MinimalAdapter):
+    def export_l5_batch(self, options: BatchExportOptions) -> BatchExportResult:
+        return BatchExportResult(
+            known_entities=[Entity(name="Bourdon")],
+            next_cursor="cursor-2",
+            has_more=True,
+        )
+
+
+class _AsyncAdapter:
+    agent_id = "async"
+    agent_type = "code-assistant"
+    native_path = "https://api.example.test"
+
+    async def adiscover(self) -> AgentStore:
+        return AgentStore(path=self.native_path)
+
+    async def aexport_l5(self, since=None) -> L5Manifest:
+        return L5Manifest(
+            spec_version=SPEC_VERSION,
+            agent=AgentInfo(id=self.agent_id, type=self.agent_type),
+            last_updated="2026-04-15T12:00:00+00:00",
+        )
+
+    async def aexport_sessions(self, since: datetime, limit: int = 100) -> list[Session]:
+        return []
+
+    async def ahealth_check(self) -> HealthStatus:
+        return HealthStatus(status="ok")
+
+
 def test_minimal_adapter_satisfies_protocol():
     assert isinstance(_MinimalAdapter(), BourdonAdapter)
 
@@ -268,3 +396,30 @@ def test_broken_adapter_fails_protocol():
         pass
 
     assert not isinstance(NotAnAdapter(), BourdonAdapter)
+
+
+def test_optional_metadata_provider_protocol_is_runtime_checkable():
+    assert isinstance(_MetadataAwareAdapter(), AdapterMetadataProvider)
+    assert not isinstance(_MinimalAdapter(), AdapterMetadataProvider)
+
+
+def test_optional_capabilities_provider_protocol_is_runtime_checkable():
+    assert isinstance(_CapabilitiesAwareAdapter(), AdapterCapabilitiesProvider)
+    assert not isinstance(_MinimalAdapter(), AdapterCapabilitiesProvider)
+
+
+def test_optional_sandbox_policy_provider_protocol_is_runtime_checkable():
+    assert isinstance(_SandboxAwareAdapter(), AdapterSandboxPolicyProvider)
+    assert not isinstance(_MinimalAdapter(), AdapterSandboxPolicyProvider)
+
+
+def test_batch_export_adapter_protocol_extends_sync_adapter_protocol():
+    adapter = _BatchAdapter()
+
+    assert isinstance(adapter, BourdonAdapter)
+    assert isinstance(adapter, BatchExportAdapter)
+
+
+def test_async_adapter_protocol_uses_distinct_method_names():
+    assert isinstance(_AsyncAdapter(), AsyncBourdonAdapter)
+    assert not isinstance(_MinimalAdapter(), AsyncBourdonAdapter)
