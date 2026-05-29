@@ -42,6 +42,7 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
+from core.cascade_turn_compiler import compile_cascade_turn
 from core.claude_turn_compiler import compile_claude_turn
 from core.codex_context import (
     filter_manifest_for_access,
@@ -442,12 +443,10 @@ def _handle_cascade_prepare_turn(args: argparse.Namespace) -> int:
     compiled_turn: dict[str, Any] | None = None
     if strategy == "turn-compiled":
         try:
-            from core.cascade_turn_compiler import compile_cascade_turn
-
             compiled = compile_cascade_turn(
                 args.prompt,
                 cwd=getattr(args, "cwd", None),
-                cascade_dir=cascade_dir,
+                windsurf_data_dir=getattr(args, "windsurf_data_dir", None),
                 library_path=getattr(args, "library_path", None),
                 access_level=access_level,
                 max_items=getattr(args, "max_items", 6),
@@ -490,14 +489,11 @@ def _handle_cascade_prepare_turn(args: argparse.Namespace) -> int:
 
 
 def _handle_cascade_compile_turn(args: argparse.Namespace) -> int:
-    from core.cascade_turn_compiler import compile_cascade_turn
-
-    cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
     try:
         brief = compile_cascade_turn(
             args.prompt,
             cwd=getattr(args, "cwd", None),
-            cascade_dir=cascade_dir,
+            windsurf_data_dir=getattr(args, "windsurf_data_dir", None),
             library_path=getattr(args, "library_path", None),
             access_level=args.access_level,
             max_items=args.max_items,
@@ -537,7 +533,8 @@ def _cascade_source_coverage(adapter: CascadeAdapter) -> dict[str, Any]:
 
 def _handle_cascade_eval(args: argparse.Namespace) -> int:
     cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
-    adapter = CascadeAdapter(cascade_dir=cascade_dir, cwd=Path(args.cwd) if getattr(args, "cwd", None) else None)
+    cwd = Path(args.cwd) if getattr(args, "cwd", None) else None
+    adapter = CascadeAdapter(cascade_dir=cascade_dir, cwd=cwd)
     manifest = adapter.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
 
@@ -562,8 +559,6 @@ def _handle_cascade_eval(args: argparse.Namespace) -> int:
 
     if getattr(args, "turn_compiler", False):
         try:
-            from core.cascade_turn_compiler import compile_cascade_turn
-
             results: list[dict[str, Any]] = []
             latencies: list[float] = []
             for prompt in CANONICAL_RECOGNITION_PROMPTS:
@@ -571,7 +566,7 @@ def _handle_cascade_eval(args: argparse.Namespace) -> int:
                 brief = compile_cascade_turn(
                     prompt,
                     cwd=getattr(args, "cwd", None),
-                    cascade_dir=cascade_dir,
+                    windsurf_data_dir=getattr(args, "windsurf_data_dir", None),
                     library_path=getattr(args, "library_path", None),
                     access_level=args.access_level,
                     max_items=getattr(args, "max_items", 6),
@@ -616,7 +611,6 @@ def _handle_cascade_build_context(args: argparse.Namespace) -> int:
 
     # Write L0 hot-cache artifact
     entities = data.get("known_entities") or []
-    sessions = data.get("recent_sessions") or []
 
     l0_lines = ["# Cascade L0 — Hot Cache", ""]
     for entity in entities[:20]:
@@ -1827,6 +1821,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cascade_compile_cmd.add_argument("prompt")
     cascade_compile_cmd.add_argument("--cwd")
     cascade_compile_cmd.add_argument("--cascade-dir", help=argparse.SUPPRESS)
+    cascade_compile_cmd.add_argument("--windsurf-data-dir", help=argparse.SUPPRESS)
     cascade_compile_cmd.add_argument("--library-path")
     cascade_compile_cmd.add_argument(
         "--access-level",
@@ -1842,7 +1837,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cascade_compile_cmd.add_argument(
         "--delivery",
-        choices=("explicit", "mcp", "convention-file", "all"),
+        choices=("explicit", "mcp", "memory-md", "fallback", "all"),
         default="all",
     )
     cascade_compile_cmd.add_argument("--report-out")
