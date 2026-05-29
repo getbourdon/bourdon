@@ -62,10 +62,10 @@ Required behavior, in order of how-easy-it-is-to-get-wrong:
 
 ## Step 2 — Apply Credential Redaction
 
-**Reuse — do not re-implement.** Import the patterns from `adapters/codex.py`:
+**Reuse — do not re-implement.** Import the patterns from `core/text_safety.py` (also re-exported from `adapters/codex.py` for backwards compatibility):
 
 ```python
-from adapters.codex import _NATIVE_MEMORY_SENSITIVE_PATTERNS, _safe_native_memory_text
+from core.text_safety import _NATIVE_MEMORY_SENSITIVE_PATTERNS, _safe_native_memory_text
 ```
 
 The pattern set covers `api[_-]?key`, `api[_-]?token`, `access[_-]?token`, `bearer\s+token`, `password`, `sk_live_*` (Stripe), `hf_*` (HuggingFace). `_safe_native_memory_text(value, limit=180)` does redaction, URL-strip-to-`[link]`, and 180-char truncation. **Run every string that originated from native agent state through it before it lands in an L5 field.**

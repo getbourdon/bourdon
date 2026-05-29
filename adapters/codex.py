@@ -29,6 +29,13 @@ from adapters.base import (
     filter_for_federation,
 )
 from core.l6_store import L6Store
+from core.text_safety import (
+    _NATIVE_MEMORY_SENSITIVE_PATTERNS as _NATIVE_MEMORY_SENSITIVE_PATTERNS,
+)
+from core.text_safety import (
+    _normalize_text,
+    _safe_native_memory_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,15 +219,8 @@ _MEMORY_SECTION_KEYS = (
     "keywords",
     "descriptions",
 )
-_NATIVE_MEMORY_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-    re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
-    re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
-)
+# _NATIVE_MEMORY_SENSITIVE_PATTERNS now lives in core/text_safety.py
+# (imported + re-exported above).
 _MAX_STRUCTURED_ROLLOUT_SCAN_BYTES = 1_000_000
 _MAX_ROLLOUT_CONCEPT_SCAN_CHARS = 2_000_000
 _MAX_L5_KEY_ACTION_CHARS = 300
@@ -257,18 +257,8 @@ _FALLBACK_CONCEPT_PATTERNS = (
 )
 
 
-def _normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip())
-
-
-def _safe_native_memory_text(value: str, limit: int = 180) -> str:
-    text = _normalize_text(value)
-    if any(pattern.search(text) for pattern in _NATIVE_MEMORY_SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+# _normalize_text / _safe_native_memory_text now live in core/text_safety.py
+# (imported + re-exported above).
 
 
 def _bounded_l5_text(value: str, limit: int) -> str:
