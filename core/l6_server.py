@@ -57,6 +57,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.claude_turn_compiler import compile_claude_turn as _compile_claude_turn
 from core.codex_turn_compiler import compile_codex_turn as _compile_codex_turn
 from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
@@ -319,6 +320,27 @@ def compile_codex_turn_from_store(
 ) -> dict[str, Any]:
     """Return a Codex turn-scoped recognition brief using this server's store."""
     brief = _compile_codex_turn(
+        prompt,
+        cwd=cwd,
+        library_path=store.library_path,
+        access_level=access_level,
+        max_items=max_items,
+        max_chars=max_chars,
+        delivery="all",
+    )
+    return brief.to_dict()
+
+
+def compile_claude_turn_from_store(
+    store: L6Store,
+    prompt: str,
+    cwd: str | None = None,
+    access_level: str = "team",
+    max_items: int = 6,
+    max_chars: int = 1800,
+) -> dict[str, Any]:
+    """Return a Claude Code turn-scoped recognition brief using this server's store."""
+    brief = _compile_claude_turn(
         prompt,
         cwd=cwd,
         library_path=store.library_path,
@@ -705,6 +727,31 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         native Stage 1 summarization.
         """
         return compile_codex_turn_from_store(
+            store,
+            prompt,
+            cwd=cwd,
+            access_level=access_level,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
+
+    @mcp.tool()
+    def compile_claude_turn(
+        prompt: str,
+        cwd: str | None = None,
+        access_level: str = "team",
+        max_items: int = 6,
+        max_chars: int = 1800,
+    ) -> dict:
+        """
+        Compile a turn-scoped Claude Code recognition brief.
+
+        The Claude analogue of ``compile_codex_turn``: it ranks prompt, cwd/repo
+        identity, local Claude session transcripts, and L6 federation context
+        into a compact prompt fragment without depending on native auto-memory
+        (``MEMORY.md``) being healthy.
+        """
+        return compile_claude_turn_from_store(
             store,
             prompt,
             cwd=cwd,

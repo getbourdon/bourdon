@@ -42,6 +42,7 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
+from core.claude_turn_compiler import compile_claude_turn
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -837,6 +838,31 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
             args.prompt,
             cwd=getattr(args, "cwd", None),
             codex_home=getattr(args, "codex_home", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery=args.delivery,
+        )
+    except ValueError as exc:
+        print(f"compile-turn: {exc}", file=sys.stderr)
+        return 2
+
+    data = brief.to_dict()
+    _write_yaml_if_requested(data, args.report_out)
+    if args.format == "json":
+        print(json.dumps(data, indent=2, sort_keys=False))
+    else:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_claude_code_compile_turn(args: argparse.Namespace) -> int:
+    try:
+        brief = compile_claude_turn(
+            args.prompt,
+            cwd=getattr(args, "cwd", None),
+            projects_base=getattr(args, "projects_base", None),
             library_path=getattr(args, "library_path", None),
             access_level=args.access_level,
             max_items=args.max_items,
@@ -1692,6 +1718,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Log progress + errors to stderr (default: silent).",
     )
     cc_export_cmd.set_defaults(func=_handle_claude_code_export)
+
+    cc_compile_turn_cmd = cc_subparsers.add_parser(
+        "compile-turn",
+        help="Compile a turn-scoped Claude Code recognition brief",
+    )
+    cc_compile_turn_cmd.add_argument("prompt")
+    cc_compile_turn_cmd.add_argument("--cwd")
+    cc_compile_turn_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    cc_compile_turn_cmd.add_argument("--projects-base", help=argparse.SUPPRESS)
+    cc_compile_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cc_compile_turn_cmd.add_argument("--max-items", type=int, default=6)
+    cc_compile_turn_cmd.add_argument("--max-chars", type=int, default=1800)
+    cc_compile_turn_cmd.add_argument(
+        "--format",
+        choices=("yaml", "json"),
+        default="yaml",
+    )
+    cc_compile_turn_cmd.add_argument(
+        "--delivery",
+        choices=("explicit", "mcp", "memory-md", "fallback", "all"),
+        default="all",
+    )
+    cc_compile_turn_cmd.add_argument("--report-out")
+    cc_compile_turn_cmd.set_defaults(func=_handle_claude_code_compile_turn)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(
