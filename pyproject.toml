@@ -90,6 +90,7 @@ federation = [
 claude-code = "adapters.claude_code:ClaudeCodeAdapter"
 claude-code-automations = "adapters.claude_code_automations:ClaudeCodeAutomationsAdapter"
 codex = "adapters.codex:CodexAdapter"
+codex-automations = "adapters.codex_automations:CodexAutomationsAdapter"
 cursor = "adapters.cursor:CursorAdapter"
 copilot = "adapters.copilot:CopilotAdapter"
 cascade = "adapters.cascade:CascadeAdapter"

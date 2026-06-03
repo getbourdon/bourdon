@@ -242,6 +242,33 @@ def _build_fake_cursor_dir(tmp_path: Path) -> Path:
     return cursor_dir
 
 
+def _build_fake_automations_dir(tmp_path: Path) -> Path:
+    automations_dir = tmp_path / "automations"
+    automation = automations_dir / "radlab-mission-control-brief"
+    automation.mkdir(parents=True)
+    (automation / "automation.toml").write_text(
+        """\
+version = 1
+id = "radlab-mission-control-brief"
+kind = "cron"
+name = "Mission Control Brief"
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO"
+cwds = ["/Users/radman"]
+""",
+        encoding="utf-8",
+    )
+    (automation / "memory.md").write_text(
+        """\
+2026-06-03
+- ShipStable launch gates are now human dashboard actions.
+- Bourdon needs a codex-automations L5 publisher.
+""",
+        encoding="utf-8",
+    )
+    return automations_dir
+
+
 def test_cli_prepare_turn_returns_l6_recognition_from_merged_agents(tmp_path, capsys):
     library = tmp_path / "agent-library"
     _write_l5_manifest(
@@ -366,6 +393,81 @@ def test_cli_cursor_export_print_still_writes_file(tmp_path, capsys):
     assert exit_code == 0
     assert out_path.is_file()
     assert printed["agent"]["id"] == "cursor"
+
+
+def test_cli_codex_automations_export_writes_schema_valid_manifest(tmp_path, capsys):
+    import jsonschema
+
+    automations_dir = _build_fake_automations_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "export",
+            "--automations-dir",
+            str(automations_dir),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+    manifest = yaml.safe_load(out_path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        (Path(__file__).parent.parent / "spec" / "L5_schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert exit_code == 0
+    assert manifest["agent"]["id"] == "codex-automations"
+    assert manifest["recent_sessions"][0]["date"] == "2026-06-03"
+    assert any(
+        entity["name"] == "radlab-mission-control-brief"
+        for entity in manifest["known_entities"]
+    )
+    jsonschema.validate(instance=manifest, schema=schema)
+
+
+def test_cli_codex_automations_export_print_still_writes_file(tmp_path, capsys):
+    automations_dir = _build_fake_automations_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "export",
+            "--automations-dir",
+            str(automations_dir),
+            "--out",
+            str(out_path),
+            "--print",
+        ]
+    )
+    printed = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert out_path.is_file()
+    assert printed["agent"]["id"] == "codex-automations"
+
+
+def test_cli_codex_automations_doctor_reports_counts(tmp_path, capsys):
+    automations_dir = _build_fake_automations_dir(tmp_path)
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "doctor",
+            "--automations-dir",
+            str(automations_dir),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["health"]["status"] == "ok"
+    assert report["health"]["details"]["automation_count"] == 1
+    assert report["health"]["details"]["runs_extracted"] == 1
 
 
 def test_cli_deeper_context_returns_empty_when_l2_disabled(monkeypatch, capsys):
