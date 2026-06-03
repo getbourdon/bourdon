@@ -133,6 +133,33 @@ You can schedule the ingest as a launchd / cron job. A daily pull is usually eno
 
 `ingest-github` shells out to the `gh` CLI in repo-mode (`--repo + --run`). Install it from [cli.github.com](https://cli.github.com) and run `gh auth login` once. The `--source` and `--artifact-zip` modes don't require `gh`.
 
+## `/schedule`'d remote routines
+
+`/schedule`'d routines run on Anthropic infrastructure — they have no path back to your local `~/.claude/automations/` directly. The relay model: the routine posts its run summary to a place your local box can pull from, and a periodic local job ingests it.
+
+The simplest channel is a **long-lived tracking GitHub Issue per routine**. The routine ends each run with a `gh issue comment` call; your local box runs `bourdon claude-code-automations ingest-github --gh-issue owner/repo#N --automation-id <id>`.
+
+```sh
+bourdon claude-code-automations ingest-github \
+    --gh-issue your-org/your-repo#42 \
+    --automation-id weekly-pr-audit
+bourdon claude-code-automations export
+```
+
+Each comment on the issue becomes one dated run entry (dated by the comment's `createdAt`). Bullets within a comment are extracted into the run's `key_actions`. Idempotent: re-running on the same issue is a no-op because the merge dedupes by exact-string match per date.
+
+See [`examples/routine-prompt-template.md`](../../examples/routine-prompt-template.md) for the prompt snippet routines should include to make this work.
+
+### Other relay channels
+
+The `ingest-github` subcommand also accepts:
+
+- `--source <dir>` — merge from any local `automations/<id>/` tree. Works if your routine commits its summary to a git repo (e.g. claude-brain) that your local box already syncs.
+- `--artifact-zip <path>` — unzip and merge a workflow-artifact-shaped zip you've downloaded manually.
+- `--repo + --run` — pull a `claude-code-automations` artifact from a specific workflow run via `gh run download` (the GitHub Actions case from the previous section).
+
+All four modes feed the same `merge_automation_tree` core, so the dedupe + chronological-ordering semantics are identical.
+
 ## Diagnostics
 
 ```sh
