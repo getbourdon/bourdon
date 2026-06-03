@@ -167,6 +167,167 @@ def _build_config(toml_path: Path) -> AutomationConfig | None:
     )
 
 
+@dataclass(frozen=True)
+class MergeResult:
+    """Summary of a merge_automation_tree call.
+
+    Returned to callers (CLI, tests, future Python consumers) so they can
+    report bullets-added counts without re-parsing the destination tree.
+    """
+
+    automations_seen: int
+    automations_created: int
+    bullets_added: int
+    sections_created: int
+    skipped: tuple[str, ...]
+
+
+_BULLET_RE = re.compile(r"^[-*]\s+(.*)$")
+
+
+def _parse_memory_sections(text: str) -> list[tuple[str, list[str]]]:
+    """Split memory.md text into (date_header, list_of_bullets) sections.
+
+    Tolerates ``2026-06-03``, ``2026-06-03 -- subtitle``, and same-line
+    bullets like ``2026-06-03 run: ...``. Anything before the first date
+    header is discarded -- the convention is strictly dated sections.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current_date = ""
+    current_bullets: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        match = _RUN_HEADER_RE.match(line.strip())
+        if match:
+            if current_date:
+                sections.append((current_date, current_bullets))
+            current_date = match.group(1)
+            suffix = match.group(2).strip(" -:—")
+            current_bullets = []
+            if suffix:
+                # Treat a same-line "2026-06-03 run: foo" as the first bullet
+                current_bullets.append(suffix)
+            continue
+        if not current_date:
+            continue
+        bullet_match = _BULLET_RE.match(line.strip())
+        if bullet_match:
+            current_bullets.append(bullet_match.group(1).strip())
+    if current_date:
+        sections.append((current_date, current_bullets))
+    return sections
+
+
+def _serialize_sections(sections: list[tuple[str, list[str]]]) -> str:
+    """Render a list of (date, bullets) back to memory.md form."""
+    blocks: list[str] = []
+    for date_str, bullets in sections:
+        lines = [date_str]
+        lines.extend(f"- {b}" for b in bullets)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
+def merge_automation_tree(
+    source_dir: Path,
+    dest_dir: Path,
+    default_kind: str = "github-action",
+) -> MergeResult:
+    """Merge an ``automations/<id>/`` tree from ``source_dir`` into ``dest_dir``.
+
+    For each ``<id>/`` under ``source_dir``:
+
+    - If ``dest_dir/<id>/`` doesn't exist, copy ``automation.toml`` (creating
+      a minimal stub from the id if the source has none) and ``memory.md`` as-is.
+    - If ``dest_dir/<id>/`` exists, merge ``memory.md`` bullets per-date:
+      dates not yet in the destination are appended; dates that exist gain any
+      bullets not already present (exact-string match).
+
+    Designed for ingesting GitHub Action workflow artifacts. Idempotent --
+    calling twice on the same source is a no-op. Returns a MergeResult so
+    callers can report what changed.
+    """
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"merge source not found: {source_dir}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    seen = 0
+    created = 0
+    bullets_added = 0
+    sections_created = 0
+    skipped: list[str] = []
+
+    for src_id_dir in sorted(source_dir.iterdir()):
+        if not src_id_dir.is_dir():
+            continue
+        seen += 1
+        automation_id = src_id_dir.name
+        # Same sanitization as the writer helper
+        if not re.match(r"^[A-Za-z0-9._-]+$", automation_id):
+            skipped.append(automation_id)
+            continue
+
+        dest_id_dir = dest_dir / automation_id
+        src_toml = src_id_dir / _AUTOMATION_TOML
+        src_memory = src_id_dir / _MEMORY_MD
+
+        if not dest_id_dir.exists():
+            dest_id_dir.mkdir(parents=True)
+            created += 1
+            if src_toml.is_file():
+                dest_id_dir.joinpath(_AUTOMATION_TOML).write_text(
+                    src_toml.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+            else:
+                dest_id_dir.joinpath(_AUTOMATION_TOML).write_text(
+                    f'version = 1\n'
+                    f'id = "{automation_id}"\n'
+                    f'name = "{automation_id}"\n'
+                    f'status = "ACTIVE"\n'
+                    f'kind = "{default_kind}"\n'
+                    f'rrule = ""\n'
+                    f'cwds = []\n',
+                    encoding="utf-8",
+                )
+
+        if not src_memory.is_file():
+            continue
+
+        src_sections = _parse_memory_sections(
+            src_memory.read_text(encoding="utf-8")
+        )
+        dest_memory = dest_id_dir / _MEMORY_MD
+        dest_sections = (
+            _parse_memory_sections(dest_memory.read_text(encoding="utf-8"))
+            if dest_memory.is_file()
+            else []
+        )
+        dest_by_date: dict[str, list[str]] = dict(dest_sections)
+
+        for date_str, bullets in src_sections:
+            if date_str not in dest_by_date:
+                dest_by_date[date_str] = []
+                dest_sections.append((date_str, dest_by_date[date_str]))
+                sections_created += 1
+            existing = dest_by_date[date_str]
+            for bullet in bullets:
+                if bullet not in existing:
+                    existing.append(bullet)
+                    bullets_added += 1
+
+        # Re-serialize sorted by date (chronological order, oldest first)
+        dest_sections.sort(key=lambda pair: pair[0])
+        dest_memory.write_text(_serialize_sections(dest_sections), encoding="utf-8")
+
+    return MergeResult(
+        automations_seen=seen,
+        automations_created=created,
+        bullets_added=bullets_added,
+        sections_created=sections_created,
+        skipped=tuple(skipped),
+    )
+
+
 def _iter_configs(automations_dir: Path) -> list[AutomationConfig]:
     configs: list[AutomationConfig] = []
     if not automations_dir.is_dir():

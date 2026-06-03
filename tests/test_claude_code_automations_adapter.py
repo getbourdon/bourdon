@@ -10,8 +10,11 @@ from adapters.claude_code_automations import (
     AGENT_ID,
     AGENT_TYPE,
     ClaudeCodeAutomationsAdapter,
+    MergeResult,
     _build_config,
     _extract_memory_runs,
+    _parse_memory_sections,
+    merge_automation_tree,
 )
 
 
@@ -203,3 +206,155 @@ def test_default_automations_dir_falls_back_to_home(monkeypatch, tmp_path):
     from adapters.claude_code_automations import default_claude_code_automations_dir
 
     assert default_claude_code_automations_dir() == tmp_path / ".claude" / "automations"
+
+
+# ---- Path B: merge_automation_tree (GitHub Actions ingest) ------------------
+
+
+def test_merge_creates_new_automation_when_dest_missing(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    a = src / "gh-pr-digest"
+    a.mkdir(parents=True)
+    (a / "automation.toml").write_text(
+        'id = "gh-pr-digest"\nname = "GH PR Digest"\n'
+        'status = "ACTIVE"\nkind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (a / "memory.md").write_text(
+        "2026-06-03\n- Ran PR digest in CI run 42.\n- Found 2 flaky tests.\n",
+        encoding="utf-8",
+    )
+
+    result = merge_automation_tree(src, dst)
+
+    assert isinstance(result, MergeResult)
+    assert result.automations_seen == 1
+    assert result.automations_created == 1
+    assert result.bullets_added == 2
+    assert result.sections_created == 1
+    assert (dst / "gh-pr-digest" / "automation.toml").is_file()
+    body = (dst / "gh-pr-digest" / "memory.md").read_text(encoding="utf-8")
+    assert "Ran PR digest in CI run 42." in body
+    assert body.startswith("2026-06-03")
+
+
+def test_merge_is_idempotent_on_repeat(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    a = src / "gh-pr-digest"
+    a.mkdir(parents=True)
+    (a / "memory.md").write_text(
+        "2026-06-03\n- Ran PR digest.\n", encoding="utf-8"
+    )
+
+    merge_automation_tree(src, dst)
+    result2 = merge_automation_tree(src, dst)
+
+    assert result2.automations_created == 0
+    assert result2.bullets_added == 0
+    assert result2.sections_created == 0
+
+
+def test_merge_appends_new_bullets_to_existing_date(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    (dst / "gh-digest").mkdir(parents=True)
+    (dst / "gh-digest" / "automation.toml").write_text(
+        'id = "gh-digest"\nname = "x"\nstatus = "ACTIVE"\n'
+        'kind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (dst / "gh-digest" / "memory.md").write_text(
+        "2026-06-03\n- Existing bullet.\n", encoding="utf-8"
+    )
+    src_dir = src / "gh-digest"
+    src_dir.mkdir(parents=True)
+    (src_dir / "memory.md").write_text(
+        "2026-06-03\n- Existing bullet.\n- New bullet from CI.\n",
+        encoding="utf-8",
+    )
+
+    result = merge_automation_tree(src, dst)
+
+    assert result.automations_created == 0
+    assert result.bullets_added == 1
+    body = (dst / "gh-digest" / "memory.md").read_text(encoding="utf-8")
+    assert "Existing bullet." in body
+    assert "New bullet from CI." in body
+    # No duplicate of the existing bullet
+    assert body.count("Existing bullet.") == 1
+
+
+def test_merge_synthesizes_automation_toml_if_missing_in_source(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    a = src / "untracked-ci-job"
+    a.mkdir(parents=True)
+    (a / "memory.md").write_text(
+        "2026-06-03\n- CI run logged from a runner with no toml.\n",
+        encoding="utf-8",
+    )
+
+    merge_automation_tree(src, dst, default_kind="github-action")
+
+    toml_text = (dst / "untracked-ci-job" / "automation.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'id = "untracked-ci-job"' in toml_text
+    assert 'kind = "github-action"' in toml_text
+
+
+def test_merge_skips_invalid_ids(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    bad = src / "bad name with spaces"
+    bad.mkdir(parents=True)
+    (bad / "memory.md").write_text("2026-06-03\n- nope\n", encoding="utf-8")
+
+    result = merge_automation_tree(src, dst)
+
+    assert result.automations_created == 0
+    assert "bad name with spaces" in result.skipped
+
+
+def test_merge_preserves_chronological_ordering(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    (dst / "x").mkdir(parents=True)
+    (dst / "x" / "automation.toml").write_text(
+        'id = "x"\nname = "x"\nstatus = "ACTIVE"\n'
+        'kind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (dst / "x" / "memory.md").write_text(
+        "2026-06-04\n- Later.\n", encoding="utf-8"
+    )
+    src_dir = src / "x"
+    src_dir.mkdir(parents=True)
+    (src_dir / "memory.md").write_text(
+        "2026-06-02\n- Earlier.\n", encoding="utf-8"
+    )
+
+    merge_automation_tree(src, dst)
+
+    body = (dst / "x" / "memory.md").read_text(encoding="utf-8")
+    assert body.index("2026-06-02") < body.index("2026-06-04")
+
+
+def test_merge_raises_when_source_missing(tmp_path):
+    src = tmp_path / "does-not-exist"
+    dst = tmp_path / "dst"
+
+    try:
+        merge_automation_tree(src, dst)
+    except FileNotFoundError as exc:
+        assert "merge source not found" in str(exc)
+    else:
+        raise AssertionError("expected FileNotFoundError")
+
+
+def test_parse_memory_sections_handles_same_line_subtitle():
+    text = "2026-06-03 run: did a thing\n- bullet one\n"
+    sections = _parse_memory_sections(text)
+    assert sections == [("2026-06-03", ["run: did a thing", "bullet one"])]

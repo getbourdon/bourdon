@@ -25,7 +25,11 @@ from adapters.cascade import (
     init_memory_file as cascade_init_memory_file,
 )
 from adapters.claude_code import ClaudeCodeAdapter
-from adapters.claude_code_automations import ClaudeCodeAutomationsAdapter
+from adapters.claude_code_automations import (
+    ClaudeCodeAutomationsAdapter,
+    default_claude_code_automations_dir,
+    merge_automation_tree,
+)
 from adapters.codex import (
     CodexAdapter,
     _build_codex_native_memory_payload,
@@ -1256,6 +1260,133 @@ def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_claude_code_automations_ingest(args: argparse.Namespace) -> int:
+    """Ingest a GitHub-Actions-produced ``automations/`` tree into the local one.
+
+    Three modes (mutually exclusive, mode is auto-detected from flags):
+
+      1. ``--source <local-dir>`` -- merge from an already-downloaded tree
+         (most useful for tests / scripted post-processing).
+      2. ``--artifact-zip <path>`` -- unzip a workflow artifact zip first.
+      3. ``--repo owner/name --run <run-id>`` -- shell out to the ``gh`` CLI
+         to download the named artifact, then merge.
+
+    On success prints a JSON-shaped YAML summary describing how many
+    automations / bullets / sections were added. Exits non-zero only on
+    configuration error (bad flags, gh missing, source-dir not found).
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(
+                    f"claude-code-automations ingest: artifact zip not found: {zip_path}",
+                    file=sys.stderr,
+                )
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_automations_root(Path(tmp.name))
+        elif args.repo and args.run:
+            if shutil.which("gh") is None:
+                print(
+                    "claude-code-automations ingest: 'gh' CLI not on PATH "
+                    "-- install GitHub CLI or use --source / --artifact-zip.",
+                    file=sys.stderr,
+                )
+                return 127
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            cmd = [
+                "gh", "run", "download", str(args.run),
+                "--repo", args.repo,
+                "--name", args.artifact_name,
+                "--dir", tmp.name,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(
+                    f"claude-code-automations ingest: gh download failed: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+            source = _find_automations_root(Path(tmp.name))
+        else:
+            print(
+                "claude-code-automations ingest: must specify one of "
+                "--source / --artifact-zip / (--repo + --run).",
+                file=sys.stderr,
+            )
+            return 2
+
+        if source is None or not source.is_dir():
+            print(
+                "claude-code-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+
+        dest_dir = (
+            Path(args.dest)
+            if args.dest
+            else default_claude_code_automations_dir()
+        )
+        result = merge_automation_tree(source, dest_dir, default_kind=args.default_kind)
+
+        report = {
+            "source": str(source),
+            "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        # JSON for easy piping; YAML would be ambiguous with the doctor command.
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
+
+
+def _find_automations_root(extracted_dir: Path) -> Path | None:
+    """Locate the 'automations/' subtree inside an extracted artifact.
+
+    Workflows can upload either the parent `~/.claude/` or just the
+    `automations/` dir; tolerate both. Returns the dir containing
+    `<id>/automation.toml` children.
+    """
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: walk one level deep
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    # Bottom case: the extracted dir IS the automations root (no wrapping)
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
 def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
     automations_dir = (
         Path(args.automations_dir)
@@ -1835,6 +1966,45 @@ def _build_parser() -> argparse.ArgumentParser:
     cca_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
     cca_doctor_cmd.add_argument("--report-out")
     cca_doctor_cmd.set_defaults(func=_handle_claude_code_automations_doctor)
+
+    cca_ingest_cmd = cca_subparsers.add_parser(
+        "ingest-github",
+        help=(
+            "Ingest an automations/ tree produced by a claude-code-action "
+            "GitHub Actions run into the local ~/.claude/automations/."
+        ),
+    )
+    cca_ingest_cmd.add_argument(
+        "--source",
+        help="Local automations/ directory (already downloaded).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-zip",
+        help="Path to a workflow artifact zip to extract.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--repo",
+        help="GitHub repo (owner/name) to pull from via 'gh run download'.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--run",
+        help="Workflow run id (used with --repo).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-name",
+        default="claude-code-automations",
+        help="Artifact name uploaded by the workflow (default: %(default)s).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--dest",
+        help="Destination automations directory (default: ~/.claude/automations).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--default-kind",
+        default="github-action",
+        help="kind= value for newly created automation.toml stubs (default: %(default)s).",
+    )
+    cca_ingest_cmd.set_defaults(func=_handle_claude_code_automations_ingest)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(

@@ -1216,6 +1216,112 @@ def test_cli_claude_code_automations_export_verbose_logs_missing_dir(
     assert "no automations" in captured.err.lower()
 
 
+# ---- claude-code-automations ingest-github (Path B) -------------------------
+
+
+def _write_ci_artifact_source(root: Path, automation_id: str = "gh-pr-digest") -> Path:
+    """Build the shape of an extracted workflow artifact: automations/<id>/..."""
+    src = root / "automations" / automation_id
+    src.mkdir(parents=True)
+    (src / "automation.toml").write_text(
+        f'id = "{automation_id}"\nname = "GH PR Digest"\n'
+        f'status = "ACTIVE"\nkind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (src / "memory.md").write_text(
+        "2026-06-03\n- Ran PR digest in CI run 42.\n- Found 2 flaky tests.\n",
+        encoding="utf-8",
+    )
+    return root / "automations"
+
+
+def test_cli_ingest_github_from_source_dir(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    src = _write_ci_artifact_source(tmp_path / "ci")
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--source", str(src)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_seen"] == 1
+    assert report["automations_created"] == 1
+    assert report["bullets_added"] == 2
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+    assert "Ran PR digest in CI run 42." in dest.read_text(encoding="utf-8")
+
+
+def test_cli_ingest_github_requires_a_mode(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "ingest-github"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "must specify one of" in captured.err.lower()
+
+
+def test_cli_ingest_github_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    # Build a workflow-artifact-shaped zip
+    payload = tmp_path / "payload"
+    _write_ci_artifact_source(payload)
+    zip_base = tmp_path / "artifact"
+    import shutil
+
+    shutil.make_archive(str(zip_base), "zip", root_dir=str(payload))
+    zip_path = Path(str(zip_base) + ".zip")
+    assert zip_path.is_file()
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--artifact-zip", str(zip_path)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_created"] == 1
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+
+
+def test_cli_ingest_github_missing_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--artifact-zip",
+            str(tmp_path / "nope.zip"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "artifact zip not found" in captured.err.lower()
+
+
 # ---- codex eval --recognition (Stream C harness) ----------------------------
 
 

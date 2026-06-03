@@ -95,6 +95,44 @@ Add it next to the existing `claude-code export` in `~/.claude/settings.json`:
 
 Also runnable from cron — there's no session dependency.
 
+## GitHub Actions (claude-code-action runs)
+
+Runs of `claude-code-action` in CI happen on an ephemeral runner — they never touch your local `~/.claude/automations/`. Bridge the gap in two steps:
+
+### 1. Emit from the workflow
+
+Drop the template at [`examples/github-actions/claude-code-bourdon-federation.yml`](../../examples/github-actions/claude-code-bourdon-federation.yml) into your repo's `.github/workflows/`. Three things happen per run:
+
+- The workflow runs `claude-code-action` (your existing step).
+- A `record run` step calls `automation-memory-append.sh` once per non-blank summary line, appending dated bullets to `~/.claude/automations/<workflow-name>/memory.md` on the runner.
+- The runner's `~/.claude/automations/` directory is uploaded as a workflow artifact named `claude-code-automations`.
+
+Tune the `SUMMARY` env var to interpolate whatever signals your run produces — step outputs, PR number, run URL, exit codes. Each non-blank line becomes one bullet.
+
+### 2. Ingest on your local box
+
+```sh
+bourdon claude-code-automations ingest-github \
+    --repo your-org/your-repo \
+    --run <run-id> \
+    --artifact-name claude-code-automations
+bourdon claude-code-automations export
+```
+
+Or, if you already have the artifact zip downloaded:
+
+```sh
+bourdon claude-code-automations ingest-github --artifact-zip path/to/artifact.zip
+```
+
+Ingestion is **idempotent**: re-running on the same artifact is a no-op. Bullets dedupe per-date by exact string match, and existing automations gain new bullets without disturbing what's already there.
+
+You can schedule the ingest as a launchd / cron job. A daily pull is usually enough; tune to how chatty your `claude-code-action` workflows are.
+
+### `gh` CLI requirement
+
+`ingest-github` shells out to the `gh` CLI in repo-mode (`--repo + --run`). Install it from [cli.github.com](https://cli.github.com) and run `gh auth login` once. The `--source` and `--artifact-zip` modes don't require `gh`.
+
 ## Diagnostics
 
 ```sh
