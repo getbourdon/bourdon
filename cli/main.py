@@ -25,6 +25,7 @@ from adapters.cascade import (
     init_memory_file as cascade_init_memory_file,
 )
 from adapters.claude_code import ClaudeCodeAdapter
+from adapters.claude_code_automations import ClaudeCodeAutomationsAdapter
 from adapters.codex import (
     CodexAdapter,
     _build_codex_native_memory_payload,
@@ -66,6 +67,10 @@ def _default_claude_code_l5_path() -> Path:
 
 def _default_codex_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
+
+
+def _default_claude_code_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
 
 
 def _default_cursor_l5_path() -> Path:
@@ -283,6 +288,7 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 _ADAPTER_REGISTRY: list[tuple[str, type]] = [
     ("claude-code", ClaudeCodeAdapter),
+    ("claude-code-automations", ClaudeCodeAutomationsAdapter),
     ("codex", CodexAdapter),
     ("cursor", CursorAdapter),
     ("copilot", CopilotAdapter),
@@ -1179,6 +1185,100 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
+    """
+    Build a Claude Code automations L5 manifest from
+    ``~/.claude/automations/<id>/{automation.toml, memory.md}`` and write it
+    to ``~/agent-library/agents/claude-code-automations.l5.yaml`` (or
+    ``--out`` if specified).
+
+    Designed for use both as a SessionEnd companion to ``claude-code export``
+    and as a cron-friendly publisher for automations that have no associated
+    interactive session. Silent on success; never raises -- matches the hook
+    contract of ``_handle_claude_code_export``.
+    """
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    try:
+        adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: adapter init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = adapter.export_l5(since=_parse_since(args.since))
+    except AdapterDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-code-automations export: no automations "
+                f"directory found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = (
+        Path(args.out) if args.out else _default_claude_code_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: write to {out_path} "
+                f"failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-code-automations export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
+    health = adapter.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": adapter.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bourdon",
@@ -1692,6 +1792,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Log progress + errors to stderr (default: silent).",
     )
     cc_export_cmd.set_defaults(func=_handle_claude_code_export)
+
+    # ---- claude-code-automations subcommands -------------------------------
+    cca = subparsers.add_parser(
+        "claude-code-automations",
+        help="Claude Code automation memory commands",
+    )
+    cca_subparsers = cca.add_subparsers(dest="cca_command")
+
+    cca_export_cmd = cca_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Code automations L5 manifest from local "
+            "~/.claude/automations/ memory."
+        ),
+    )
+    cca_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_export_cmd.add_argument("--out")
+    cca_export_cmd.add_argument("--since")
+    cca_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cca_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cca_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cca_export_cmd.set_defaults(func=_handle_claude_code_automations_export)
+
+    cca_doctor_cmd = cca_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Claude Code automation memory coverage",
+    )
+    cca_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_doctor_cmd.add_argument("--report-out")
+    cca_doctor_cmd.set_defaults(func=_handle_claude_code_automations_doctor)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(

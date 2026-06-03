@@ -1101,6 +1101,121 @@ def test_cli_claude_code_export_includes_role_narrative(tmp_path, monkeypatch):
     assert "manager" in role_narrative.lower()
 
 
+# ---- claude-code-automations export -----------------------------------------
+
+
+def _write_fake_automation(
+    home: Path,
+    automation_id: str = "weekly-pr-digest",
+    memory: str = "2026-06-03\n- ShipStable launch gate verified.\n",
+) -> Path:
+    """Build a ~/.claude/automations/<id>/{automation.toml, memory.md} fixture."""
+    automation_dir = home / ".claude" / "automations" / automation_id
+    automation_dir.mkdir(parents=True)
+    (automation_dir / "automation.toml").write_text(
+        f"""\
+version = 1
+id = "{automation_id}"
+kind = "loop"
+name = "Weekly PR Digest"
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO"
+cwds = ["/Users/radman/claudework"]
+""",
+        encoding="utf-8",
+    )
+    (automation_dir / "memory.md").write_text(memory, encoding="utf-8")
+    return automation_dir
+
+
+def test_cli_claude_code_automations_doctor_blocked_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """No automations dir -> doctor reports blocked + proposed_fix."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "doctor"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "blocked" in captured.out
+
+
+def test_cli_claude_code_automations_export_writes_to_default_path(
+    tmp_path, monkeypatch
+):
+    """With automations, writes to ~/agent-library/agents/claude-code-automations.l5.yaml."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    exit_code = main(["claude-code-automations", "export"])
+
+    assert exit_code == 0
+    expected = (
+        fake_home / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
+    )
+    assert expected.is_file()
+    manifest = yaml.safe_load(expected.read_text(encoding="utf-8"))
+    assert manifest["agent"]["id"] == "claude-code-automations"
+    assert manifest["agent"]["type"] == "other"
+    entity_names = {entity["name"] for entity in manifest["known_entities"]}
+    assert "weekly-pr-digest" in entity_names
+
+
+def test_cli_claude_code_automations_export_out_override(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    out_path = tmp_path / "custom" / "claude-code-automations.l5.yaml"
+    exit_code = main(
+        ["claude-code-automations", "export", "--out", str(out_path)]
+    )
+
+    assert exit_code == 0
+    assert out_path.is_file()
+
+
+def test_cli_claude_code_automations_export_no_dir_silent(
+    tmp_path, monkeypatch, capsys
+):
+    """Hook contract: missing automations dir -> exit 0, no stderr."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.err == ""
+
+
+def test_cli_claude_code_automations_export_verbose_logs_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """--verbose surfaces 'no automations directory' but still exits 0."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export", "--verbose"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "no automations" in captured.err.lower()
+
+
 # ---- codex eval --recognition (Stream C harness) ----------------------------
 
 
