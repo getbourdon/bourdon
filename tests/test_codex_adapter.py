@@ -618,6 +618,96 @@ def test_inspect_codex_state_db_reports_stage1_memory_failures(isolated_home):
     assert "usage limit" in report["memory_stage1_jobs"]["errors"][0]["last_error"]
 
 
+def test_inspect_codex_state_db_reports_current_agent_job_schema(isolated_home):
+    codex_home = isolated_home["create_codex_home"]()
+    db_path = codex_home / "state_5.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, "
+            "memory_mode TEXT NOT NULL, "
+            "archived INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE agent_jobs ("
+            "id TEXT PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "instruction TEXT NOT NULL, "
+            "input_headers_json TEXT NOT NULL, "
+            "input_csv_path TEXT NOT NULL, "
+            "output_csv_path TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, "
+            "updated_at INTEGER NOT NULL, "
+            "last_error TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE agent_job_items ("
+            "job_id TEXT NOT NULL, "
+            "item_id TEXT NOT NULL, "
+            "row_index INTEGER NOT NULL, "
+            "row_json TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "attempt_count INTEGER NOT NULL, "
+            "created_at INTEGER NOT NULL, "
+            "updated_at INTEGER NOT NULL, "
+            "last_error TEXT, "
+            "PRIMARY KEY (job_id, item_id))"
+        )
+        conn.execute(
+            "INSERT INTO threads (id, memory_mode, archived) VALUES ('thread-1', 'enabled', 0)"
+        )
+        conn.execute(
+            "INSERT INTO agent_jobs "
+            "(id, name, status, instruction, input_headers_json, input_csv_path, "
+            "output_csv_path, created_at, updated_at, last_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job-1",
+                "Codex memory backfill",
+                "error",
+                "Summarize memory",
+                "[]",
+                "/tmp/in.csv",
+                "/tmp/out.csv",
+                1,
+                2,
+                "Context window exhausted.",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO agent_job_items "
+            "(job_id, item_id, row_index, row_json, status, attempt_count, "
+            "created_at, updated_at, last_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job-1",
+                "item-1",
+                0,
+                "{}",
+                "error",
+                2,
+                1,
+                2,
+                "Context window exhausted.",
+            ),
+        )
+
+    report = _inspect_codex_state_db(codex_home)
+
+    assert report["schema"]["variant"] == "agent_jobs"
+    assert report["schema"]["stage1_counters_available"] is False
+    assert report["stage1_outputs"]["available"] is False
+    assert report["stage1_outputs"]["source"] == "unavailable_new_schema"
+    assert report["memory_stage1_jobs"]["available"] is False
+    assert report["memory_stage1_jobs"]["source"] == "unavailable_new_schema"
+    assert report["agent_jobs"]["total"] == 1
+    assert report["agent_jobs"]["by_status"] == {"error": 1}
+    assert report["agent_jobs"]["items_total"] == 1
+    assert report["agent_jobs"]["items_by_status"] == {"error": 1}
+    assert report["agent_jobs"]["errors"][0]["last_error"] == "Context window exhausted."
+
+
 def test_inspect_codex_fallback_recall_reports_session_rollout_coverage(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](
