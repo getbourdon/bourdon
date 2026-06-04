@@ -169,3 +169,64 @@ def test_metrics_script_writes_html_dashboard_with_precise_readiness_language(
     assert "schema issue" not in rendered.lower()
     assert "data-filter-kind" in rendered
     assert "Exact Evidence" in rendered
+
+
+def test_l5_staleness_threshold_is_parameterized(tmp_path, capsys):
+    module = _load_metrics_module()
+    codex_home = _build_codex_home(tmp_path)
+
+    stale_library = tmp_path / "stale-library"
+    (stale_library / "agents").mkdir(parents=True)
+    stale_manifest = {
+        "spec_version": "0.1",
+        "agent": {"id": "codex", "type": "code-assistant"},
+        "last_updated": "2020-01-01T00:00:00+00:00",
+        "known_entities": [{"name": "Bourdon", "type": "project", "visibility": "team"}],
+        "recent_sessions": [{"date": "2020-01-01", "visibility": "team"}],
+    }
+    (stale_library / "agents" / "codex.l5.yaml").write_text(
+        yaml.safe_dump(stale_manifest, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    html_dir = tmp_path / "html-stale"
+    exit_code = module.main(
+        [
+            "--codex-home",
+            str(codex_home),
+            "--library-path",
+            str(stale_library),
+            "--html-report-dir",
+            str(html_dir),
+            "--l5-staleness-days",
+            "1",
+            "--skip-mcp",
+        ]
+    )
+    capsys.readouterr()
+    rendered_stale = (html_dir / "latest.html").read_text(encoding="utf-8")
+
+    assert exit_code == 0
+    assert "Codex L5 publication stale" in rendered_stale
+
+    fresh_library = tmp_path / "fresh-library"
+    fresh_library = _build_agent_library(tmp_path)
+    html_dir_fresh = tmp_path / "html-fresh"
+    exit_code_fresh = module.main(
+        [
+            "--codex-home",
+            str(codex_home),
+            "--library-path",
+            str(fresh_library),
+            "--html-report-dir",
+            str(html_dir_fresh),
+            "--l5-staleness-days",
+            "36500",
+            "--skip-mcp",
+        ]
+    )
+    capsys.readouterr()
+    rendered_fresh = (html_dir_fresh / "latest.html").read_text(encoding="utf-8")
+
+    assert exit_code_fresh == 0
+    assert "Codex L5 publication stale" not in rendered_fresh
