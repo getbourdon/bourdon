@@ -961,6 +961,53 @@ in shipping code) but a more representative live evaluation would replace
 them with prompts based on the user's own recent threads."""
 
 
+TURN_COMPILER_FIXTURE_EVAL_CASES = [
+    {
+        "name": "direct_project",
+        "prompt": "Tell me about Coolculator",
+        "expected_injection": True,
+        "expected_top_contains": "Coolculator",
+    },
+    {
+        "name": "vague_repo_continuation",
+        "prompt": "What should I do next?",
+        "expected_injection": True,
+        "expected_top_contains": "Coolculator",
+    },
+    {
+        "name": "handoff_anchor",
+        "prompt": "Anything new on Mac handoff?",
+        "expected_injection": True,
+        "expected_top_contains": "Mac handoff",
+    },
+    {
+        "name": "absent_entity",
+        "prompt": "What is Fastify?",
+        "expected_injection": False,
+        "expected_top_contains": None,
+    },
+    {
+        "name": "unrelated_prompt",
+        "prompt": "What's the weather like?",
+        "expected_injection": False,
+        "expected_top_contains": None,
+    },
+]
+"""Fixture-scoped compiler quality cases.
+
+The set deliberately covers direct prompt recognition, vague repo continuation,
+handoff continuity, an absent entity, and a fully unrelated prompt. These cases
+protect the pre-turn injection protocol from both misses and false positives.
+"""
+
+
+def _live_turn_compiler_cases() -> list[dict[str, Any]]:
+    return [
+        {"name": f"live_{index + 1}", "prompt": prompt}
+        for index, prompt in enumerate(CANONICAL_RECOGNITION_PROMPTS)
+    ]
+
+
 def _recognition_eval(
     manifest: Any, prompts: list[str] = CANONICAL_RECOGNITION_PROMPTS
 ) -> dict[str, Any]:
@@ -1027,7 +1074,7 @@ def _recognition_eval(
 
 def _turn_compiler_eval(
     *,
-    prompts: list[str],
+    cases: list[dict[str, Any]],
     codex_home: Path,
     library_path: Path,
     cwd: str | None,
@@ -1040,7 +1087,8 @@ def _turn_compiler_eval(
     primary_surfaces: Counter[str] = Counter()
     confidence_counts: Counter[str] = Counter()
 
-    for prompt in prompts:
+    for case in cases:
+        prompt = str(case["prompt"])
         t0 = _time.perf_counter()
         brief = compile_codex_turn(
             prompt,
@@ -1063,22 +1111,44 @@ def _turn_compiler_eval(
         primary_surfaces[primary_surface] += 1
         confidence_counts[confidence] += 1
         top_item = items[0] if items else None
-        results.append(
-            {
-                "prompt": prompt,
-                "native_stage1": data["health"]["native_stage1"],
-                "item_count": len(items),
-                "top_item": top_item["name"] if top_item else None,
-                "top_score": top_item["score"] if top_item else 0.0,
-                "primary_surface": primary_surface,
-                "confidence": confidence,
-                "latency_us": round(latency_us, 1),
+        top_name = str(top_item["name"]) if top_item else None
+        injected = primary_surface != "none" and bool(items)
+        row = {
+            "name": str(case["name"]),
+            "prompt": prompt,
+            "native_stage1": data["health"]["native_stage1"],
+            "item_count": len(items),
+            "top_item": top_name,
+            "top_score": top_item["score"] if top_item else 0.0,
+            "primary_surface": primary_surface,
+            "confidence": confidence,
+            "latency_us": round(latency_us, 1),
+        }
+        if "expected_injection" in case:
+            expected_injection = bool(case["expected_injection"])
+            expected_top_contains = case.get("expected_top_contains")
+            top_ok = (
+                expected_top_contains is None
+                or (top_name is not None and str(expected_top_contains) in top_name)
+            )
+            row["expected"] = {
+                "injection": expected_injection,
+                "top_contains": expected_top_contains,
             }
-        )
+            row["expectation_passed"] = injected == expected_injection and top_ok
+        results.append(row)
 
     n = len(results)
     avg_latency_us = sum(latencies_us) / n if n else 0.0
     hits = sum(1 for result in results if result["item_count"] > 0)
+    expected_results = [
+        result for result in results if "expectation_passed" in result
+    ]
+    failed_expectations = [
+        result["name"]
+        for result in expected_results
+        if result["expectation_passed"] is False
+    ]
 
     return {
         "prompts_tested": n,
@@ -1087,6 +1157,11 @@ def _turn_compiler_eval(
         "avg_latency_us": round(avg_latency_us, 1),
         "primary_surfaces": dict(primary_surfaces),
         "confidence_counts": dict(confidence_counts),
+        "quality": {
+            "expectations_tested": len(expected_results),
+            "expectations_passed": len(expected_results) - len(failed_expectations),
+            "failed_expectations": failed_expectations,
+        },
         "results": results,
     }
 
@@ -1152,11 +1227,21 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
                 write_l5_dict(manifest, compiler_library / "agents" / "codex.l5.yaml")
             else:
                 compiler_library = Path(args.library_path)
+            cases = (
+                TURN_COMPILER_FIXTURE_EVAL_CASES
+                if args.fixtures
+                else _live_turn_compiler_cases()
+            )
+            compiler_cwd = (
+                "/workspace/coolculator"
+                if args.fixtures and not getattr(args, "cwd", None)
+                else getattr(args, "cwd", None)
+            )
             report["turn_compiler"] = _turn_compiler_eval(
-                prompts=CANONICAL_RECOGNITION_PROMPTS,
+                cases=cases,
                 codex_home=adapter._codex_home,
                 library_path=compiler_library,
-                cwd=getattr(args, "cwd", None),
+                cwd=compiler_cwd,
                 access_level=args.access_level,
                 max_items=getattr(args, "max_items", 6),
                 max_chars=getattr(args, "max_chars", 1800),

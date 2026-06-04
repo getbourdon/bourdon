@@ -1762,5 +1762,10 @@ def test_cli_codex_eval_turn_compiler_flag_attaches_routing_metrics(tmp_path):
     assert turn_compiler["compiled_hit_rate"] > 0.0
     assert turn_compiler["avg_latency_us"] < 100_000.0
     assert "explicit_pre_turn" in turn_compiler["primary_surfaces"]
+    assert turn_compiler["primary_surfaces"]["none"] == 2
+    assert turn_compiler["quality"]["expectations_tested"] == 5
+    assert turn_compiler["quality"]["failed_expectations"] == []
     assert turn_compiler["results"][0]["prompt"] == "Tell me about Coolculator"
+    assert turn_compiler["results"][0]["name"] == "direct_project"
+    assert turn_compiler["results"][0]["expectation_passed"] is True
     assert "top_score" in turn_compiler["results"][0]
