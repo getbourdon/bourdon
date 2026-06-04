@@ -17,7 +17,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from core.l6_store import DEFAULT_LIBRARY_PATH
 
 SCHEMA_VERSION = "codex-memory-metrics/v1"
 BOURDON_MCP_NAME = "bourdon"
+DEFAULT_L5_STALENESS_DAYS = 7
 
 
 def _now() -> datetime:
@@ -556,13 +557,26 @@ def _html_report_paths(
     return html_report_dir / f"{report_date}.html", html_report_dir / "latest.html"
 
 
-def _dashboard_status(snapshot: dict[str, Any]) -> dict[str, Any]:
+def _l5_staleness_cutoff(snapshot: dict[str, Any], staleness_days: int) -> str:
+    collected_at_raw = str(snapshot.get("collected_at") or "")
+    try:
+        collected_at = datetime.fromisoformat(collected_at_raw)
+    except ValueError:
+        collected_at = _now()
+    return (collected_at - timedelta(days=staleness_days)).date().isoformat()
+
+
+def _dashboard_status(
+    snapshot: dict[str, Any],
+    staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
+) -> dict[str, Any]:
     derived = snapshot["derived"]
     codex_l5_last_updated = str(derived.get("codex_l5_last_updated") or "")
+    cutoff = _l5_staleness_cutoff(snapshot, staleness_days)
     blockers: list[str] = []
     if not derived.get("stage1_counters_available"):
         blockers.append("Legacy Stage 1 metric continuity unavailable")
-    if codex_l5_last_updated and codex_l5_last_updated < "2026-06-01":
+    if codex_l5_last_updated and codex_l5_last_updated < cutoff:
         blockers.append("Codex L5 publication stale")
     if not snapshot.get("codex_mcp", {}).get("installed"):
         blockers.append("Codex MCP unavailable")
@@ -623,10 +637,13 @@ def _trend_row(label: str, value: Any, delta: Any, max_abs_delta: float) -> str:
       </tr>"""
 
 
-def _render_html_dashboard(snapshot: dict[str, Any]) -> str:
+def _render_html_dashboard(
+    snapshot: dict[str, Any],
+    staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
+) -> str:
     derived = snapshot["derived"]
     trend = snapshot.get("trend") or {}
-    status = _dashboard_status(snapshot)
+    status = _dashboard_status(snapshot, staleness_days)
     memory_files = snapshot["memory_files"]
     codex_l5 = snapshot["agent_library"]["codex_l5"]
     reporting = snapshot.get("reporting") or {}
@@ -861,13 +878,14 @@ def _write_html_reports(
     html_report_dir: Path | None,
     snapshot: dict[str, Any],
     collected_at: datetime,
+    staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
 ) -> None:
     if html_report_dir is None:
         return
     report_path, latest_path = _html_report_paths(html_report_dir, collected_at)
     snapshot["reporting"]["html_report_path"] = str(report_path)
     snapshot["reporting"]["html_latest_path"] = str(latest_path)
-    rendered = _render_html_dashboard(snapshot)
+    rendered = _render_html_dashboard(snapshot, staleness_days)
     _write_report(report_path, rendered)
     _write_report(latest_path, rendered)
 
@@ -897,6 +915,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Write a dated self-contained HTML dashboard and refresh latest.html.",
+    )
+    parser.add_argument(
+        "--l5-staleness-days",
+        type=int,
+        default=DEFAULT_L5_STALENESS_DAYS,
+        help=(
+            "Mark the Codex L5 publication as stale when its last_updated is older "
+            "than this many days before the run's collected_at. Default: "
+            f"{DEFAULT_L5_STALENESS_DAYS}."
+        ),
     )
     parser.add_argument(
         "--format",
@@ -948,7 +976,12 @@ def main(argv: list[str] | None = None) -> int:
     _write_report(args.out, rendered)
     _write_report(timestamped_path, rendered)
     _write_report(latest_path, rendered)
-    _write_html_reports(args.html_report_dir, snapshot, collected_at)
+    _write_html_reports(
+        args.html_report_dir,
+        snapshot,
+        collected_at,
+        args.l5_staleness_days,
+    )
     sys.stdout.write(rendered)
     return 0
 
