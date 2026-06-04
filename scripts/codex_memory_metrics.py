@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501
 """Collect read-only metrics for Codex native memory and Bourdon federation.
 
 The output is a graph-ready JSON/YAML snapshot intended for recurring tracking
@@ -9,6 +10,7 @@ and later association/pattern-recognition analysis. The script never reads
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import socket
 import subprocess
@@ -522,6 +524,354 @@ def _write_report(path: Path | None, rendered: str) -> None:
     path.write_text(rendered, encoding="utf-8")
 
 
+def _html_escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _format_bytes(value: Any) -> str:
+    if not isinstance(value, int):
+        return "n/a"
+    if value >= 1024 * 1024:
+        return f"{value / (1024 * 1024):.2f} MiB"
+    if value >= 1024:
+        return f"{value / 1024:.1f} KiB"
+    return f"{value} B"
+
+
+def _html_report_paths(
+    html_report_dir: Path,
+    collected_at: datetime,
+) -> tuple[Path, Path]:
+    report_date = collected_at.astimezone(timezone.utc).date().isoformat()
+    return html_report_dir / f"{report_date}.html", html_report_dir / "latest.html"
+
+
+def _dashboard_status(snapshot: dict[str, Any]) -> dict[str, Any]:
+    derived = snapshot["derived"]
+    codex_l5_last_updated = str(derived.get("codex_l5_last_updated") or "")
+    blockers: list[str] = []
+    if not derived.get("stage1_counters_available"):
+        blockers.append("Legacy Stage 1 metric continuity unavailable")
+    if codex_l5_last_updated and codex_l5_last_updated < "2026-06-01":
+        blockers.append("Codex L5 publication stale")
+    if not snapshot.get("codex_mcp", {}).get("installed"):
+        blockers.append("Codex MCP unavailable")
+    if not derived.get("native_memory_present"):
+        blockers.append("Native memory accumulation inactive")
+
+    if blockers:
+        readiness = "Read-only adoption eval ready; Native-primary adoption blocked"
+    else:
+        readiness = "Native-primary adoption candidate"
+    return {
+        "schema_detection": "Schema detection fixed",
+        "stage1_continuity": (
+            "Legacy Stage 1 metric continuity available"
+            if derived.get("stage1_counters_available")
+            else "Legacy Stage 1 metric continuity unavailable"
+        ),
+        "native_accumulation": (
+            "Native memory accumulation active"
+            if derived.get("native_memory_present")
+            else "Native memory accumulation inactive"
+        ),
+        "readiness": readiness,
+        "blockers": blockers,
+    }
+
+
+def _metric_card(
+    title: str,
+    value: Any,
+    note: str,
+    *,
+    kind: str,
+    path_kind: str,
+    accent: str,
+    changed: bool,
+) -> str:
+    return f"""
+      <article class="metric-card accent-{accent}" data-kind="{kind}" data-path="{path_kind}" data-changed="{str(changed).lower()}">
+        <div class="metric-top"><span>{_html_escape(title)}</span><span class="chip">{_html_escape(kind)}</span></div>
+        <strong>{_html_escape(value)}</strong>
+        <p>{_html_escape(note)}</p>
+      </article>"""
+
+
+def _trend_row(label: str, value: Any, delta: Any, max_abs_delta: float) -> str:
+    changed = isinstance(delta, (int, float)) and delta != 0
+    width = 0
+    if isinstance(delta, (int, float)) and max_abs_delta > 0:
+        width = min(100, int(abs(delta) / max_abs_delta * 100))
+    direction = "pos" if isinstance(delta, (int, float)) and delta > 0 else "neg" if changed else "flat"
+    return f"""
+      <tr data-changed="{str(changed).lower()}">
+        <td>{_html_escape(label)}</td>
+        <td>{_html_escape(_format_metric(value))}</td>
+        <td class="delta {direction}">{_html_escape(_format_metric(delta))}</td>
+        <td><span class="bar"><span class="bar-fill {direction}" style="width:{width}%"></span></span></td>
+      </tr>"""
+
+
+def _render_html_dashboard(snapshot: dict[str, Any]) -> str:
+    derived = snapshot["derived"]
+    trend = snapshot.get("trend") or {}
+    status = _dashboard_status(snapshot)
+    memory_files = snapshot["memory_files"]
+    codex_l5 = snapshot["agent_library"]["codex_l5"]
+    reporting = snapshot.get("reporting") or {}
+
+    trend_rows = [
+        ("Stage 1 outputs", derived["stage1_outputs_total"], trend.get("stage1_outputs_total_delta")),
+        ("Stage 1 done jobs", derived["stage1_jobs_done"], trend.get("stage1_jobs_done_delta")),
+        ("Stage 1 error jobs", derived["stage1_jobs_error"], trend.get("stage1_jobs_error_delta")),
+        ("Agent jobs", derived["agent_jobs_total"], trend.get("agent_jobs_total_delta")),
+        ("Agent job items", derived["agent_job_items_total"], trend.get("agent_job_items_total_delta")),
+        ("Distilled memory items", derived["distilled_memory_items"], trend.get("distilled_memory_items_delta")),
+        ("Fallback memory items", derived["fallback_memory_items"], trend.get("fallback_memory_items_delta")),
+        ("Session records", derived["session_records"], trend.get("session_records_delta")),
+        ("Rollout records", derived["rollout_records"], trend.get("rollout_records_delta")),
+        ("Raw memory bytes", derived["raw_memories_bytes"], trend.get("raw_memories_bytes_delta")),
+        ("Codex L5 entities", derived["codex_l5_entity_count"], trend.get("codex_l5_entity_count_delta")),
+        ("Codex L5 sessions", derived["codex_l5_session_count"], trend.get("codex_l5_session_count_delta")),
+    ]
+    max_abs_delta = max(
+        [abs(delta) for _, _, delta in trend_rows if isinstance(delta, (int, float))]
+        or [1]
+    )
+
+    cards = [
+        _metric_card(
+            "Schema detection",
+            status["schema_detection"],
+            f"variant: {derived['state_schema_variant']}",
+            kind="evidence",
+            path_kind="collector",
+            accent="leaf",
+            changed=False,
+        ),
+        _metric_card(
+            "Legacy Stage 1 continuity",
+            status["stage1_continuity"],
+            "old done/error ratios are not comparable when unavailable",
+            kind="evidence",
+            path_kind="collector",
+            accent="honey" if not derived["stage1_counters_available"] else "leaf",
+            changed=False,
+        ),
+        _metric_card(
+            "Native accumulation",
+            status["native_accumulation"],
+            f"distilled items: {_format_metric(derived['distilled_memory_items'])}",
+            kind="memory",
+            path_kind="collector",
+            accent="teal",
+            changed=bool(trend.get("distilled_memory_items_delta")),
+        ),
+        _metric_card(
+            "Adoption readiness",
+            status["readiness"],
+            f"blockers: {len(status['blockers'])}",
+            kind="evidence",
+            path_kind="collector",
+            accent="orange" if status["blockers"] else "leaf",
+            changed=False,
+        ),
+        _metric_card(
+            "Raw memory file",
+            _format_bytes(derived["raw_memories_bytes"]),
+            f"delta { _format_metric(trend.get('raw_memories_bytes_delta')) } bytes",
+            kind="evidence",
+            path_kind="collector",
+            accent="orchid",
+            changed=bool(trend.get("raw_memories_bytes_delta")),
+        ),
+        _metric_card(
+            "Codex L5",
+            f"{_format_metric(derived['codex_l5_entity_count'])} entities",
+            f"{_format_metric(derived['codex_l5_session_count'])} sessions; last {derived.get('codex_l5_last_updated')}",
+            kind="memory",
+            path_kind="collector",
+            accent="orange",
+            changed=False,
+        ),
+        _metric_card(
+            "Codex MCP",
+            "installed" if snapshot["codex_mcp"].get("installed") else "missing",
+            str(snapshot["codex_mcp"].get("status")),
+            kind="evidence",
+            path_kind="collector",
+            accent="leaf" if snapshot["codex_mcp"].get("installed") else "ember",
+            changed=False,
+        ),
+        _metric_card(
+            "Fallback recall",
+            "active" if derived["fallback_recall_active"] else "inactive",
+            str(derived["fallback_recall_reason"]),
+            kind="memory",
+            path_kind="collector",
+            accent="teal",
+            changed=False,
+        ),
+    ]
+
+    commands = [
+        "./.venv/bin/python scripts/codex_memory_metrics.py --reports-dir /Users/radman/agent-library/reports/codex-memory-metrics --html-report-dir /Users/radman/.codex/automation-reports/check-codex-native-memory-integration --format json",
+        "codex mcp get bourdon",
+    ]
+    paths = [
+        str(reporting.get("latest_report_path")),
+        str(reporting.get("timestamped_report_path")),
+        str(reporting.get("html_latest_path")),
+        str(reporting.get("html_report_path")),
+        str(memory_files["memory_md"]["path"]),
+        str(memory_files["raw_memories_md"]["path"]),
+        str(memory_files["bourdon_fallback_md"]["path"]),
+        str(memory_files["rollout_summaries"]["path"]),
+        str(codex_l5["path"]),
+        str(Path(snapshot["codex_home"] or "") / "state_5.sqlite"),
+    ]
+
+    action_items = status["blockers"] + [
+        "Run a read-only adoption/comparison eval before native-primary adoption.",
+        "Keep Bourdon fallback/federated recognition primary until continuity and publication catch up.",
+    ]
+    trend_table = "".join(
+        _trend_row(label, value, delta, float(max_abs_delta))
+        for label, value, delta in trend_rows
+    )
+    action_html = "".join(
+        f'<div class="action">{_html_escape(action)}</div>' for action in action_items
+    )
+    collected_at = _html_escape(snapshot["collected_at"])
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Native Memory Dashboard</title>
+  <style>
+    :root {{
+      --bg: #131614; --surface: #1b201e; --surface-2: #252b28;
+      --text: #e5f0e3; --muted: #b8d4bb; --dim: #839c87;
+      --line: rgba(184, 212, 187, 0.22); --leaf: #a7c080;
+      --teal: #7fbbb3; --deep-teal: #35a77c; --honey: #dfa000;
+      --ember: #f85552; --orange: #e69875; --steel: #859289;
+      --orchid: #df69ba;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: radial-gradient(circle at top left, rgba(127,187,179,.12), transparent 36%), var(--bg); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }}
+    main {{ width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 34px 0 48px; }}
+    header, .panel, .filters, .metric-card {{ border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(180deg, rgba(37,43,40,.92), rgba(27,32,30,.94)); box-shadow: inset 0 1px rgba(229,240,227,.08); }}
+    header {{ display: grid; gap: 14px; padding: 22px; }}
+    h1, h2, p {{ margin: 0; }} h1 {{ font-size: clamp(24px, 4vw, 42px); }} h2 {{ font-size: 18px; color: var(--muted); }}
+    .sub {{ color: var(--dim); max-width: 860px; }} .status-strip, .filters {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    .chip, button {{ border: 1px solid var(--line); border-radius: 999px; background: rgba(229,240,227,.04); color: var(--muted); padding: 7px 10px; font: inherit; }}
+    button {{ cursor: pointer; }} button.active {{ color: var(--bg); background: var(--leaf); border-color: transparent; }}
+    section {{ margin-top: 22px; }} .filters {{ padding: 14px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }}
+    .metric-card {{ min-height: 150px; padding: 16px; }}
+    .metric-top {{ display: flex; justify-content: space-between; gap: 10px; color: var(--dim); font-size: 12px; text-transform: uppercase; }}
+    .metric-card strong {{ display: block; margin-top: 18px; font-size: 22px; }} .metric-card p {{ color: var(--muted); margin-top: 8px; font-size: 13px; }}
+    .accent-leaf strong {{ color: var(--leaf); }} .accent-teal strong {{ color: var(--teal); }} .accent-honey strong {{ color: var(--honey); }} .accent-ember strong {{ color: var(--ember); }} .accent-orange strong {{ color: var(--orange); }} .accent-orchid strong {{ color: var(--orchid); }}
+    .grid-2 {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, .9fr); gap: 14px; }} .panel {{ padding: 18px; }}
+    table {{ width: 100%; border-collapse: collapse; }} th, td {{ border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; }} th {{ color: var(--dim); font-size: 12px; text-transform: uppercase; }}
+    .delta.pos {{ color: var(--leaf); }} .delta.neg {{ color: var(--ember); }} .delta.flat {{ color: var(--steel); }} .bar {{ display: block; width: 100%; height: 9px; background: rgba(229,240,227,.07); border-radius: 999px; overflow: hidden; }} .bar-fill {{ display: block; height: 100%; border-radius: inherit; }} .bar-fill.pos {{ background: var(--deep-teal); }} .bar-fill.neg {{ background: var(--ember); }} .bar-fill.flat {{ background: var(--steel); }}
+    .action {{ padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: rgba(37,43,40,.72); margin-top: 10px; }}
+    details {{ border: 1px solid var(--line); border-radius: 18px; background: rgba(37,43,40,.55); padding: 12px 14px; margin-top: 12px; }} summary {{ cursor: pointer; color: var(--muted); }}
+    pre {{ white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); background: #131614; padding: 12px; border-radius: 14px; border: 1px solid var(--line); }} .hidden {{ display: none !important; }}
+    @media (max-width: 820px) {{ .grid-2 {{ grid-template-columns: 1fr; }} main {{ width: min(100vw - 20px, 1180px); }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="status-strip">
+        <span class="chip">Run {collected_at}</span>
+        <span class="chip">Collector present</span>
+        <span class="chip">Blockers {len(status["blockers"])}</span>
+        <span class="chip">{_html_escape(status["readiness"])}</span>
+      </div>
+      <h1>Codex Native Memory Health</h1>
+      <p class="sub">Schema detection is fixed. The remaining native-readiness gap is legacy Stage 1 metric continuity plus publication freshness, while native memory accumulation is measured from current artifacts.</p>
+    </header>
+    <section class="filters">
+      <span class="chip">Filters</span>
+      <button data-filter-kind="all" class="active">All</button><button data-filter-kind="evidence">Evidence</button><button data-filter-kind="memory">Memory-derived</button>
+      <button data-filter-path="all" class="active">All paths</button><button data-filter-path="collector">Collector</button><button data-filter-path="fallback">Fallback</button><button id="changedOnly">Changed-only</button>
+    </section>
+    <section class="metrics">{''.join(cards)}</section>
+    <section class="grid-2">
+      <div class="panel"><h2>Trend Table</h2><table><thead><tr><th>Signal</th><th>Current</th><th>Delta</th><th>Magnitude</th></tr></thead><tbody>{trend_table}</tbody></table></div>
+      <aside class="panel"><h2>Action Lane</h2>{action_html}</aside>
+    </section>
+    <section class="panel">
+      <h2>Exact Evidence</h2>
+      <details open><summary>Commands</summary><pre>{_html_escape(chr(10).join(commands))}</pre></details>
+      <details><summary>Paths</summary><pre>{_html_escape(chr(10).join(paths))}</pre></details>
+      <details><summary>SQLite Schema</summary><pre>{_html_escape(json.dumps(snapshot['codex_state_db'].get('schema'), indent=2))}</pre></details>
+      <details><summary>Graph</summary><pre>{_html_escape(json.dumps(snapshot.get('graph'), indent=2))}</pre></details>
+      <details><summary>Raw Snapshot</summary><pre>{_html_escape(json.dumps(snapshot, indent=2))}</pre></details>
+    </section>
+  </main>
+  <script>
+    const state = {{ kind: 'all', path: 'all', changedOnly: false }};
+    const cards = document.querySelectorAll('.metric-card');
+    const rows = document.querySelectorAll('tbody tr');
+    function applyFilters() {{
+      cards.forEach(card => {{
+        const kindOk = state.kind === 'all' || card.dataset.kind === state.kind;
+        const pathOk = state.path === 'all' || card.dataset.path === state.path;
+        const changedOk = !state.changedOnly || card.dataset.changed === 'true';
+        card.classList.toggle('hidden', !(kindOk && pathOk && changedOk));
+      }});
+      rows.forEach(row => row.classList.toggle('hidden', state.changedOnly && row.dataset.changed !== 'true'));
+    }}
+    document.querySelectorAll('button').forEach(button => button.addEventListener('click', () => {{
+      if (button.dataset.filterKind) {{
+        state.kind = button.dataset.filterKind;
+        document.querySelectorAll('[data-filter-kind]').forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+      }}
+      if (button.dataset.filterPath) {{
+        state.path = button.dataset.filterPath;
+        document.querySelectorAll('[data-filter-path]').forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+      }}
+      if (button.id === 'changedOnly') {{ state.changedOnly = !state.changedOnly; button.classList.toggle('active', state.changedOnly); }}
+      applyFilters();
+    }}));
+  </script>
+</body>
+</html>
+"""
+
+
+def _write_html_reports(
+    html_report_dir: Path | None,
+    snapshot: dict[str, Any],
+    collected_at: datetime,
+) -> None:
+    if html_report_dir is None:
+        return
+    report_path, latest_path = _html_report_paths(html_report_dir, collected_at)
+    snapshot["reporting"]["html_report_path"] = str(report_path)
+    snapshot["reporting"]["html_latest_path"] = str(latest_path)
+    rendered = _render_html_dashboard(snapshot)
+    _write_report(report_path, rendered)
+    _write_report(latest_path, rendered)
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect Codex memory metrics for Bourdon.")
     parser.add_argument("--codex-home", type=Path, default=None)
@@ -541,6 +891,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Write a timestamped snapshot and refresh latest.json/latest.yaml. "
             "When --previous is omitted, latest is used for deltas if it exists."
         ),
+    )
+    parser.add_argument(
+        "--html-report-dir",
+        type=Path,
+        default=None,
+        help="Write a dated self-contained HTML dashboard and refresh latest.html.",
     )
     parser.add_argument(
         "--format",
@@ -581,10 +937,18 @@ def main(argv: list[str] | None = None) -> int:
         args.format,
         collected_at,
     )
+    if args.html_report_dir:
+        report_path, latest_html_path = _html_report_paths(
+            args.html_report_dir,
+            collected_at,
+        )
+        snapshot["reporting"]["html_report_path"] = str(report_path)
+        snapshot["reporting"]["html_latest_path"] = str(latest_html_path)
     rendered = _render(snapshot, args.format)
     _write_report(args.out, rendered)
     _write_report(timestamped_path, rendered)
     _write_report(latest_path, rendered)
+    _write_html_reports(args.html_report_dir, snapshot, collected_at)
     sys.stdout.write(rendered)
     return 0
 

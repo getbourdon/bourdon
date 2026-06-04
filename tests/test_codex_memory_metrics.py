@@ -130,3 +130,42 @@ def test_metrics_script_writes_reports_dir_and_detects_current_schema(tmp_path, 
     assert latest["trend"]["raw_memories_bytes_delta"] > 0
     assert latest["agent_library"]["codex_l5"]["entity_count"] == 1
     assert len(timestamped_reports) == 1
+
+
+def test_metrics_script_writes_html_dashboard_with_precise_readiness_language(
+    tmp_path, capsys
+):
+    module = _load_metrics_module()
+    codex_home = _build_codex_home(tmp_path)
+    library = _build_agent_library(tmp_path)
+    reports_dir = tmp_path / "reports"
+    html_dir = tmp_path / "html"
+
+    exit_code = module.main(
+        [
+            "--codex-home",
+            str(codex_home),
+            "--library-path",
+            str(library),
+            "--reports-dir",
+            str(reports_dir),
+            "--html-report-dir",
+            str(html_dir),
+            "--skip-mcp",
+        ]
+    )
+    capsys.readouterr()
+    html_reports = sorted(html_dir.glob("*.html"))
+    latest_html = html_dir / "latest.html"
+    rendered = latest_html.read_text(encoding="utf-8")
+
+    assert exit_code == 0
+    assert latest_html.exists()
+    assert len(html_reports) == 2
+    assert "Schema detection fixed" in rendered
+    assert "Legacy Stage 1 metric continuity unavailable" in rendered
+    assert "Native memory accumulation active" in rendered
+    assert "Native-primary adoption blocked" in rendered
+    assert "schema issue" not in rendered.lower()
+    assert "data-filter-kind" in rendered
+    assert "Exact Evidence" in rendered
