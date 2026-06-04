@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import tomllib
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover -- 3.10 path
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from adapters.base import (
     SPEC_VERSION,
