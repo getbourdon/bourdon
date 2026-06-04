@@ -542,14 +542,34 @@ def _empty_codex_state_report(codex_home: Path | None) -> dict[str, Any]:
             "active": 0,
             "archived": 0,
         },
+        "schema": {
+            "tables": [],
+            "variant": "unknown",
+            "stage1_outputs_table": False,
+            "legacy_jobs_table": False,
+            "agent_jobs_table": False,
+            "agent_job_items_table": False,
+            "stage1_counters_available": False,
+        },
         "stage1_outputs": {
+            "available": False,
+            "source": "missing_table",
             "total": 0,
             "raw_memory": 0,
             "rollout_summary": 0,
         },
         "memory_stage1_jobs": {
+            "available": False,
+            "source": "missing_table",
             "total": 0,
             "by_status": {},
+            "errors": [],
+        },
+        "agent_jobs": {
+            "total": 0,
+            "by_status": {},
+            "items_total": 0,
+            "items_by_status": {},
             "errors": [],
         },
     }
@@ -577,6 +597,15 @@ def _sqlite_count(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] 
     return int(value or 0)
 
 
+def _sqlite_group_counts(
+    conn: sqlite3.Connection,
+    query: str,
+    params: tuple[Any, ...] = (),
+) -> dict[str, int]:
+    rows = conn.execute(query, params).fetchall()
+    return {str(status): int(count) for status, count in rows}
+
+
 def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
     """Summarize Codex's local memory pipeline state without reading auth data."""
     report = _empty_codex_state_report(codex_home)
@@ -593,6 +622,22 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
 
     try:
         report["readable"] = True
+        table_rows = conn.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name"
+        ).fetchall()
+        tables = {str(row[0]) for row in table_rows}
+        report["schema"]["tables"] = sorted(tables)
+        report["schema"]["stage1_outputs_table"] = "stage1_outputs" in tables
+        report["schema"]["legacy_jobs_table"] = "jobs" in tables
+        report["schema"]["agent_jobs_table"] = "agent_jobs" in tables
+        report["schema"]["agent_job_items_table"] = "agent_job_items" in tables
+        if "stage1_outputs" in tables or "jobs" in tables:
+            report["schema"]["variant"] = "legacy_stage1"
+            report["schema"]["stage1_counters_available"] = True
+        elif "agent_jobs" in tables or "agent_job_items" in tables:
+            report["schema"]["variant"] = "agent_jobs"
+            report["stage1_outputs"]["source"] = "unavailable_new_schema"
+            report["memory_stage1_jobs"]["source"] = "unavailable_new_schema"
 
         if _sqlite_table_exists(conn, "threads"):
             thread_columns = _sqlite_table_columns(conn, "threads")
@@ -614,6 +659,8 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
                 )
 
         if _sqlite_table_exists(conn, "stage1_outputs"):
+            report["stage1_outputs"]["available"] = True
+            report["stage1_outputs"]["source"] = "legacy_stage1_outputs"
             stage1_columns = _sqlite_table_columns(conn, "stage1_outputs")
             report["stage1_outputs"]["total"] = _sqlite_count(
                 conn,
@@ -631,9 +678,12 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
                 )
 
         if _sqlite_table_exists(conn, "jobs"):
+            report["memory_stage1_jobs"]["available"] = True
+            report["memory_stage1_jobs"]["source"] = "legacy_jobs"
             job_columns = _sqlite_table_columns(conn, "jobs")
             if {"kind", "status"}.issubset(job_columns):
-                job_rows = conn.execute(
+                by_status = _sqlite_group_counts(
+                    conn,
                     """
                     SELECT status, count(*)
                     FROM jobs
@@ -642,8 +692,7 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
                     ORDER BY status
                     """,
                     ("memory_stage1",),
-                ).fetchall()
-                by_status = {str(status): int(count) for status, count in job_rows}
+                )
                 report["memory_stage1_jobs"]["by_status"] = by_status
                 report["memory_stage1_jobs"]["total"] = sum(by_status.values())
             if {
@@ -672,6 +721,57 @@ def _inspect_codex_state_db(codex_home: Path | None) -> dict[str, Any]:
                     }
                     for job_key, status, retry_remaining, last_error in error_rows
                 ]
+        if _sqlite_table_exists(conn, "agent_jobs"):
+            agent_job_columns = _sqlite_table_columns(conn, "agent_jobs")
+            report["agent_jobs"]["total"] = _sqlite_count(
+                conn,
+                "SELECT count(*) FROM agent_jobs",
+            )
+            if "status" in agent_job_columns:
+                report["agent_jobs"]["by_status"] = _sqlite_group_counts(
+                    conn,
+                    """
+                    SELECT status, count(*)
+                    FROM agent_jobs
+                    GROUP BY status
+                    ORDER BY status
+                    """,
+                )
+            if {"id", "name", "status", "last_error"}.issubset(agent_job_columns):
+                error_rows = conn.execute(
+                    """
+                    SELECT id, name, status, last_error
+                    FROM agent_jobs
+                    WHERE status NOT IN ('done', 'completed', 'success', 'succeeded')
+                    ORDER BY updated_at DESC
+                    LIMIT 20
+                    """
+                ).fetchall()
+                report["agent_jobs"]["errors"] = [
+                    {
+                        "job_id": str(job_id),
+                        "name": str(name),
+                        "status": str(status),
+                        "last_error": str(last_error or "")[:500],
+                    }
+                    for job_id, name, status, last_error in error_rows
+                ]
+        if _sqlite_table_exists(conn, "agent_job_items"):
+            item_columns = _sqlite_table_columns(conn, "agent_job_items")
+            report["agent_jobs"]["items_total"] = _sqlite_count(
+                conn,
+                "SELECT count(*) FROM agent_job_items",
+            )
+            if "status" in item_columns:
+                report["agent_jobs"]["items_by_status"] = _sqlite_group_counts(
+                    conn,
+                    """
+                    SELECT status, count(*)
+                    FROM agent_job_items
+                    GROUP BY status
+                    ORDER BY status
+                    """,
+                )
     except sqlite3.Error as exc:
         report["readable"] = False
         report["error"] = str(exc)
