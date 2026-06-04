@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import time as _time
 from collections import Counter
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,11 @@ from adapters.cascade import (
     init_memory_file as cascade_init_memory_file,
 )
 from adapters.claude_code import ClaudeCodeAdapter
+from adapters.claude_code_automations import (
+    ClaudeCodeAutomationsAdapter,
+    default_claude_code_automations_dir,
+    merge_automation_tree,
+)
 from adapters.codex import (
     CodexAdapter,
     _build_codex_native_memory_payload,
@@ -66,6 +73,10 @@ def _default_claude_code_l5_path() -> Path:
 
 def _default_codex_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
+
+
+def _default_claude_code_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
 
 
 def _default_cursor_l5_path() -> Path:
@@ -283,6 +294,7 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 _ADAPTER_REGISTRY: list[tuple[str, type]] = [
     ("claude-code", ClaudeCodeAdapter),
+    ("claude-code-automations", ClaudeCodeAutomationsAdapter),
     ("codex", CodexAdapter),
     ("cursor", CursorAdapter),
     ("copilot", CopilotAdapter),
@@ -1179,6 +1191,366 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
+    """
+    Build a Claude Code automations L5 manifest from
+    ``~/.claude/automations/<id>/{automation.toml, memory.md}`` and write it
+    to ``~/agent-library/agents/claude-code-automations.l5.yaml`` (or
+    ``--out`` if specified).
+
+    Designed for use both as a SessionEnd companion to ``claude-code export``
+    and as a cron-friendly publisher for automations that have no associated
+    interactive session. Silent on success; never raises -- matches the hook
+    contract of ``_handle_claude_code_export``.
+    """
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    try:
+        adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: adapter init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = adapter.export_l5(since=_parse_since(args.since))
+    except AdapterDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-code-automations export: no automations "
+                f"directory found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = (
+        Path(args.out) if args.out else _default_claude_code_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: write to {out_path} "
+                f"failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-code-automations export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_code_automations_ingest(args: argparse.Namespace) -> int:
+    """Ingest an ``automations/`` tree into the local one.
+
+    Four modes (mutually exclusive, mode is auto-detected from flags):
+
+      1. ``--source <local-dir>`` -- merge from an already-downloaded tree
+         (also serves the claude-brain-relay case: ``--source
+         ~/claude-brain/automations``).
+      2. ``--artifact-zip <path>`` -- unzip a workflow artifact zip first.
+      3. ``--repo owner/name --run <run-id>`` -- shell out to ``gh run
+         download`` to fetch the named artifact, then merge.
+      4. ``--gh-issue owner/name#N --automation-id <id>`` -- shell out to
+         ``gh issue view`` to read the issue body + comments, treat each as
+         a memory.md run entry for the given automation_id. This is the
+         routine-self-report relay (Path C of the federation plan).
+
+    On success prints a JSON summary. Non-zero exit only on config error.
+    """
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.gh_issue:
+            if shutil.which("gh") is None:
+                print(
+                    "claude-code-automations ingest: 'gh' CLI not on PATH "
+                    "-- install GitHub CLI to use --gh-issue.",
+                    file=sys.stderr,
+                )
+                return 127
+            if not args.automation_id:
+                print(
+                    "claude-code-automations ingest: --gh-issue requires "
+                    "--automation-id <id>.",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                repo_part, issue_num = args.gh_issue.rsplit("#", 1)
+            except ValueError:
+                print(
+                    "claude-code-automations ingest: --gh-issue must be "
+                    "'owner/repo#N'.",
+                    file=sys.stderr,
+                )
+                return 2
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-issue-")
+            cleanup_dir = tmp
+            try:
+                source = _build_source_from_gh_issue(
+                    Path(tmp.name),
+                    repo=repo_part,
+                    issue_number=issue_num,
+                    automation_id=args.automation_id,
+                    gh_runner=subprocess.run,
+                )
+            except _GhIssueIngestError as exc:
+                print(
+                    f"claude-code-automations ingest: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(
+                    f"claude-code-automations ingest: artifact zip not found: {zip_path}",
+                    file=sys.stderr,
+                )
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_automations_root(Path(tmp.name))
+        elif args.repo and args.run:
+            if shutil.which("gh") is None:
+                print(
+                    "claude-code-automations ingest: 'gh' CLI not on PATH "
+                    "-- install GitHub CLI or use --source / --artifact-zip.",
+                    file=sys.stderr,
+                )
+                return 127
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            cmd = [
+                "gh", "run", "download", str(args.run),
+                "--repo", args.repo,
+                "--name", args.artifact_name,
+                "--dir", tmp.name,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(
+                    f"claude-code-automations ingest: gh download failed: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+            source = _find_automations_root(Path(tmp.name))
+        else:
+            print(
+                "claude-code-automations ingest: must specify one of "
+                "--source / --artifact-zip / (--repo + --run) / --gh-issue.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if source is None or not source.is_dir():
+            print(
+                "claude-code-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+
+        dest_dir = (
+            Path(args.dest)
+            if args.dest
+            else default_claude_code_automations_dir()
+        )
+        result = merge_automation_tree(source, dest_dir, default_kind=args.default_kind)
+
+        report = {
+            "source": str(source),
+            "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        # JSON for easy piping; YAML would be ambiguous with the doctor command.
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
+
+
+class _GhIssueIngestError(Exception):
+    """Raised when gh issue view fails or returns unparsable data."""
+
+
+def _build_source_from_gh_issue(
+    tmpdir: Path,
+    repo: str,
+    issue_number: str,
+    automation_id: str,
+    gh_runner,
+) -> Path:
+    """Materialize a synthetic automations/ tree from a GitHub issue.
+
+    Calls ``gh issue view <N> --repo <repo> --json body,comments,title``
+    and treats:
+      - the issue body as one run entry (dated by issue createdAt fallback today)
+      - each comment body as one run entry dated by the comment's createdAt
+
+    All run entries land in ``automations/<automation_id>/memory.md`` so the
+    standard merge_automation_tree pipeline handles deduplication.
+
+    ``gh_runner`` is injected so tests can stub the subprocess call.
+    """
+    import json as _json
+    import re as _re
+
+    cmd = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "title,body,comments,createdAt",
+    ]
+    result = gh_runner(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise _GhIssueIngestError(
+            f"gh issue view failed: {result.stderr.strip() or 'no stderr'}"
+        )
+    try:
+        payload = _json.loads(result.stdout)
+    except _json.JSONDecodeError as exc:
+        raise _GhIssueIngestError(f"gh returned non-JSON: {exc}") from exc
+
+    automations_dir = tmpdir / "automations" / automation_id
+    automations_dir.mkdir(parents=True)
+    (automations_dir / "automation.toml").write_text(
+        f'version = 1\n'
+        f'id = "{automation_id}"\n'
+        f'name = "{automation_id}"\n'
+        f'status = "ACTIVE"\n'
+        f'kind = "routine-gh-issue"\n'
+        f'rrule = ""\n'
+        f'cwds = []\n',
+        encoding="utf-8",
+    )
+
+    def _bullets_from_body(body: str) -> list[str]:
+        """Pull bullets out of an issue/comment body.
+
+        Routine prompts that follow the convention emit dashed bullets;
+        non-bulleted bodies become one bullet (the whole body, normalized).
+        """
+        bullets: list[str] = []
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            m = _re.match(r"^[-*]\s+(.*)$", stripped)
+            bullets.append(m.group(1) if m else stripped)
+        return bullets
+
+    def _date_from_iso(s: str) -> str:
+        """Extract YYYY-MM-DD from an ISO timestamp, with today as fallback."""
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2})", s or "")
+        return m.group(1) if m else datetime.now(timezone.utc).date().isoformat()
+
+    sections: list[tuple[str, list[str]]] = []
+    body = str(payload.get("body") or "").strip()
+    if body:
+        sections.append((_date_from_iso(payload.get("createdAt", "")), _bullets_from_body(body)))
+    for comment in payload.get("comments") or []:
+        c_body = str(comment.get("body") or "").strip()
+        if not c_body:
+            continue
+        sections.append((_date_from_iso(comment.get("createdAt", "")), _bullets_from_body(c_body)))
+
+    # Group bullets by date so multiple comments on the same day collapse.
+    by_date: dict[str, list[str]] = {}
+    for date_str, bullets in sections:
+        by_date.setdefault(date_str, []).extend(bullets)
+
+    lines: list[str] = []
+    for date_str in sorted(by_date.keys()):
+        if lines:
+            lines.append("")
+        lines.append(date_str)
+        for bullet in by_date[date_str]:
+            lines.append(f"- {bullet}")
+    (automations_dir / "memory.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return tmpdir / "automations"
+
+
+def _find_automations_root(extracted_dir: Path) -> Path | None:
+    """Locate the 'automations/' subtree inside an extracted artifact.
+
+    Workflows can upload either the parent `~/.claude/` or just the
+    `automations/` dir; tolerate both. Returns the dir containing
+    `<id>/automation.toml` children.
+    """
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: walk one level deep
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    # Bottom case: the extracted dir IS the automations root (no wrapping)
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
+def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
+    health = adapter.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": adapter.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bourdon",
@@ -1692,6 +2064,102 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Log progress + errors to stderr (default: silent).",
     )
     cc_export_cmd.set_defaults(func=_handle_claude_code_export)
+
+    # ---- claude-code-automations subcommands -------------------------------
+    cca = subparsers.add_parser(
+        "claude-code-automations",
+        help="Claude Code automation memory commands",
+    )
+    cca_subparsers = cca.add_subparsers(dest="cca_command")
+
+    cca_export_cmd = cca_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Code automations L5 manifest from local "
+            "~/.claude/automations/ memory."
+        ),
+    )
+    cca_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_export_cmd.add_argument("--out")
+    cca_export_cmd.add_argument("--since")
+    cca_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cca_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cca_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cca_export_cmd.set_defaults(func=_handle_claude_code_automations_export)
+
+    cca_doctor_cmd = cca_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Claude Code automation memory coverage",
+    )
+    cca_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_doctor_cmd.add_argument("--report-out")
+    cca_doctor_cmd.set_defaults(func=_handle_claude_code_automations_doctor)
+
+    cca_ingest_cmd = cca_subparsers.add_parser(
+        "ingest-github",
+        help=(
+            "Ingest an automations/ tree produced by a claude-code-action "
+            "GitHub Actions run into the local ~/.claude/automations/."
+        ),
+    )
+    cca_ingest_cmd.add_argument(
+        "--source",
+        help="Local automations/ directory (already downloaded).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-zip",
+        help="Path to a workflow artifact zip to extract.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--repo",
+        help="GitHub repo (owner/name) to pull from via 'gh run download'.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--run",
+        help="Workflow run id (used with --repo).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-name",
+        default="claude-code-automations",
+        help="Artifact name uploaded by the workflow (default: %(default)s).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--dest",
+        help="Destination automations directory (default: ~/.claude/automations).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--default-kind",
+        default="github-action",
+        help="kind= value for newly created automation.toml stubs (default: %(default)s).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--gh-issue",
+        help=(
+            "GitHub issue to pull routine self-report comments from "
+            "(format: owner/repo#NUMBER). Requires --automation-id."
+        ),
+    )
+    cca_ingest_cmd.add_argument(
+        "--automation-id",
+        help=(
+            "Automation id to attribute the ingested entries to. "
+            "Required with --gh-issue."
+        ),
+    )
+    cca_ingest_cmd.set_defaults(func=_handle_claude_code_automations_ingest)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(

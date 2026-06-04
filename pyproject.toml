@@ -40,6 +40,7 @@ classifiers = [
 
 dependencies = [
     "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -87,6 +88,7 @@ federation = [
 # Third-party adapters register here via their own pyproject.toml.
 [project.entry-points."bourdon.adapters"]
 claude-code = "adapters.claude_code:ClaudeCodeAdapter"
+claude-code-automations = "adapters.claude_code_automations:ClaudeCodeAutomationsAdapter"
 codex = "adapters.codex:CodexAdapter"
 cursor = "adapters.cursor:CursorAdapter"
 copilot = "adapters.copilot:CopilotAdapter"

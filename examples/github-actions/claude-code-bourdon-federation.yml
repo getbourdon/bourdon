@@ -1,0 +1,87 @@
+# Drop-in workflow snippet for federating claude-code-action runs into Bourdon.
+#
+# This is a *template*. Adapt it to your repo:
+#   - Replace `your-org/claude-code-action@v1` with the actual claude-code-action
+#     ref you use (or whatever step invokes Claude Code in CI).
+#   - Adjust the `id` and the bullet body in the `record run` step to describe
+#     what your CI run actually did. You can interpolate ${{ github.event.* }}
+#     or the previous step's outputs to make each run summary unique.
+#
+# After this workflow runs, on your local box:
+#
+#   bourdon claude-code-automations ingest-github \
+#       --repo your-org/your-repo \
+#       --run ${{ github.run_id }} \
+#       --artifact-name claude-code-automations
+#   bourdon claude-code-automations export
+#
+# (or schedule both calls via a cron on the box that runs your local Bourdon.)
+
+name: claude-code-bourdon-federation
+
+on:
+  workflow_dispatch:
+  # ↓ Adapt to your trigger -- pull_request, issue_comment, schedule, etc.
+
+jobs:
+  run-and-federate:
+    runs-on: ubuntu-latest
+    permissions:
+      # claude-code-action typically needs more; tune to your usage.
+      contents: read
+      pull-requests: write
+
+    steps:
+      # ---- 1. Install Bourdon so we can use the writer helper ---------------
+      - name: install Bourdon
+        run: pip install bourdon
+
+      # ---- 2. Run Claude Code -----------------------------------------------
+      - name: run claude-code-action
+        id: claude
+        uses: your-org/claude-code-action@v1
+        with:
+          prompt: ${{ github.event.inputs.prompt || 'Review this PR.' }}
+          # ...your normal inputs
+
+      # ---- 3. Record the run into ~/.claude/automations/ on the runner ------
+      # Pick a stable automation_id per workflow. The same id collapses runs
+      # of the same workflow into one timeline on the federation side.
+      - name: record run
+        env:
+          AUTOMATION_ID: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Add whatever signals your run produces -- step outputs, exit codes,
+          # filenames, PR numbers. Keep each line short; the adapter caps each
+          # bullet at 280 chars before federation.
+          SUMMARY: |
+            ${{ github.workflow }} run #${{ github.run_number }} on ${{ github.repository }}.
+            Trigger: ${{ github.event_name }}. PR: ${{ github.event.pull_request.number || 'n/a' }}.
+            Outcome: ${{ steps.claude.outcome }}.
+            Run URL: ${{ env.RUN_URL }}
+        run: |
+          # ship a copy of the helper alongside bourdon, or check it out from
+          # this repo. The cleanest path: vendor it once into your repo.
+          curl -sSL \
+            https://raw.githubusercontent.com/getbourdon/bourdon/main/scripts/automation-memory-append.sh \
+            -o /tmp/automation-memory-append.sh
+          chmod +x /tmp/automation-memory-append.sh
+          # Each non-blank line in $SUMMARY becomes one bullet under today's date.
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            /tmp/automation-memory-append.sh "$AUTOMATION_ID" \
+              --name "${{ github.workflow }}" \
+              --rrule "" \
+              --kind "github-action" \
+              --cwd "$GITHUB_WORKSPACE" \
+              "$line"
+          done <<< "$SUMMARY"
+
+      # ---- 4. Upload the automations tree as a workflow artifact ------------
+      - name: upload bourdon automation memory
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-automations
+          path: ~/.claude/automations
+          if-no-files-found: warn
+          retention-days: 30

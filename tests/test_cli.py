@@ -1101,6 +1101,395 @@ def test_cli_claude_code_export_includes_role_narrative(tmp_path, monkeypatch):
     assert "manager" in role_narrative.lower()
 
 
+# ---- claude-code-automations export -----------------------------------------
+
+
+def _write_fake_automation(
+    home: Path,
+    automation_id: str = "weekly-pr-digest",
+    memory: str = "2026-06-03\n- ShipStable launch gate verified.\n",
+) -> Path:
+    """Build a ~/.claude/automations/<id>/{automation.toml, memory.md} fixture."""
+    automation_dir = home / ".claude" / "automations" / automation_id
+    automation_dir.mkdir(parents=True)
+    (automation_dir / "automation.toml").write_text(
+        f"""\
+version = 1
+id = "{automation_id}"
+kind = "loop"
+name = "Weekly PR Digest"
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO"
+cwds = ["/Users/radman/claudework"]
+""",
+        encoding="utf-8",
+    )
+    (automation_dir / "memory.md").write_text(memory, encoding="utf-8")
+    return automation_dir
+
+
+def test_cli_claude_code_automations_doctor_blocked_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """No automations dir -> doctor reports blocked + proposed_fix."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "doctor"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "blocked" in captured.out
+
+
+def test_cli_claude_code_automations_export_writes_to_default_path(
+    tmp_path, monkeypatch
+):
+    """With automations, writes to ~/agent-library/agents/claude-code-automations.l5.yaml."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    exit_code = main(["claude-code-automations", "export"])
+
+    assert exit_code == 0
+    expected = (
+        fake_home / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
+    )
+    assert expected.is_file()
+    manifest = yaml.safe_load(expected.read_text(encoding="utf-8"))
+    assert manifest["agent"]["id"] == "claude-code-automations"
+    assert manifest["agent"]["type"] == "other"
+    entity_names = {entity["name"] for entity in manifest["known_entities"]}
+    assert "weekly-pr-digest" in entity_names
+
+
+def test_cli_claude_code_automations_export_out_override(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    out_path = tmp_path / "custom" / "claude-code-automations.l5.yaml"
+    exit_code = main(
+        ["claude-code-automations", "export", "--out", str(out_path)]
+    )
+
+    assert exit_code == 0
+    assert out_path.is_file()
+
+
+def test_cli_claude_code_automations_export_no_dir_silent(
+    tmp_path, monkeypatch, capsys
+):
+    """Hook contract: missing automations dir -> exit 0, no stderr."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.err == ""
+
+
+def test_cli_claude_code_automations_export_verbose_logs_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """--verbose surfaces 'no automations directory' but still exits 0."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export", "--verbose"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "no automations" in captured.err.lower()
+
+
+# ---- claude-code-automations ingest-github (Path B) -------------------------
+
+
+def _write_ci_artifact_source(root: Path, automation_id: str = "gh-pr-digest") -> Path:
+    """Build the shape of an extracted workflow artifact: automations/<id>/..."""
+    src = root / "automations" / automation_id
+    src.mkdir(parents=True)
+    (src / "automation.toml").write_text(
+        f'id = "{automation_id}"\nname = "GH PR Digest"\n'
+        f'status = "ACTIVE"\nkind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (src / "memory.md").write_text(
+        "2026-06-03\n- Ran PR digest in CI run 42.\n- Found 2 flaky tests.\n",
+        encoding="utf-8",
+    )
+    return root / "automations"
+
+
+def test_cli_ingest_github_from_source_dir(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    src = _write_ci_artifact_source(tmp_path / "ci")
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--source", str(src)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_seen"] == 1
+    assert report["automations_created"] == 1
+    assert report["bullets_added"] == 2
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+    assert "Ran PR digest in CI run 42." in dest.read_text(encoding="utf-8")
+
+
+def test_cli_ingest_github_requires_a_mode(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "ingest-github"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "must specify one of" in captured.err.lower()
+
+
+def test_cli_ingest_github_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    # Build a workflow-artifact-shaped zip
+    payload = tmp_path / "payload"
+    _write_ci_artifact_source(payload)
+    zip_base = tmp_path / "artifact"
+    import shutil
+
+    shutil.make_archive(str(zip_base), "zip", root_dir=str(payload))
+    zip_path = Path(str(zip_base) + ".zip")
+    assert zip_path.is_file()
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--artifact-zip", str(zip_path)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_created"] == 1
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+
+
+def test_cli_ingest_github_missing_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--artifact-zip",
+            str(tmp_path / "nope.zip"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "artifact zip not found" in captured.err.lower()
+
+
+# ---- claude-code-automations ingest --gh-issue (Path C) ---------------------
+
+
+def _fake_gh_runner(payload_by_cmd):
+    """Build a subprocess.run stand-in keyed on the full argv tuple."""
+    from types import SimpleNamespace
+
+    def runner(cmd, capture_output=False, text=False):
+        key = tuple(cmd)
+        if key not in payload_by_cmd:
+            return SimpleNamespace(returncode=1, stdout="", stderr=f"unmocked: {key}")
+        rc, stdout, stderr = payload_by_cmd[key]
+        return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    return runner
+
+
+def test_cli_ingest_gh_issue_merges_comments(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    # Stub `gh issue view` to return a synthetic payload covering body + 2 comments.
+    import json as _json
+
+    payload = {
+        "title": "Routine: Weekly PR Audit",
+        "body": "- Initial summary on 2026-06-01.\n- Two PRs reviewed.",
+        "createdAt": "2026-06-01T15:00:00Z",
+        "comments": [
+            {
+                "body": "- 2026-06-08 run: 4 PRs reviewed.\n- ShipStable PR #213 needs follow-up.",
+                "createdAt": "2026-06-08T15:00:00Z",
+            },
+            {
+                "body": "Plain-text comment without bullets.",
+                "createdAt": "2026-06-15T15:00:00Z",
+            },
+        ],
+    }
+    expected_cmd = (
+        "gh", "issue", "view", "42",
+        "--repo", "foo/bar",
+        "--json", "title,body,comments,createdAt",
+    )
+    runner = _fake_gh_runner({expected_cmd: (0, _json.dumps(payload), "")})
+
+    # Patch the subprocess.run callable that the handler uses.
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.subprocess, "run", runner, raising=False)
+    # Also pretend gh is installed
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--gh-issue",
+            "foo/bar#42",
+            "--automation-id",
+            "weekly-pr-audit",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    report = _json.loads(captured.out)
+    assert report["automations_created"] == 1
+    # 3 source bullets (issue body has 2) + 2 from comment1 + 1 from comment2 = 5
+    assert report["bullets_added"] >= 5
+
+    memory = (
+        fake_home / ".claude" / "automations" / "weekly-pr-audit" / "memory.md"
+    ).read_text(encoding="utf-8")
+    assert "Two PRs reviewed." in memory
+    assert "ShipStable PR #213" in memory
+    assert "Plain-text comment without bullets." in memory
+    # Three distinct date sections
+    assert "2026-06-01" in memory
+    assert "2026-06-08" in memory
+    assert "2026-06-15" in memory
+
+
+def test_cli_ingest_gh_issue_requires_automation_id(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--gh-issue", "foo/bar#42"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "--automation-id" in captured.err
+
+
+def test_cli_ingest_gh_issue_rejects_bad_format(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--gh-issue",
+            "no-hash-here",
+            "--automation-id",
+            "anything",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "owner/repo#N" in captured.err
+
+
+def test_cli_ingest_gh_issue_idempotent_on_repeat(tmp_path, monkeypatch, capsys):
+    """Re-ingesting the same issue is a no-op (merge dedupes by bullet)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import json as _json
+
+    payload = {
+        "body": "- Only line.",
+        "createdAt": "2026-06-01T00:00:00Z",
+        "comments": [],
+    }
+    expected_cmd = (
+        "gh", "issue", "view", "1",
+        "--repo", "x/y",
+        "--json", "title,body,comments,createdAt",
+    )
+    runner = _fake_gh_runner({expected_cmd: (0, _json.dumps(payload), "")})
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.subprocess, "run", runner, raising=False)
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    args = ["claude-code-automations", "ingest-github",
+            "--gh-issue", "x/y#1", "--automation-id", "only"]
+    assert main(args) == 0
+    capsys.readouterr()  # drain
+    assert main(args) == 0
+    report = _json.loads(capsys.readouterr().out)
+    # Second pass: no new bullets, no new automations created, no new sections.
+    assert report["automations_created"] == 0
+    assert report["bullets_added"] == 0
+    assert report["sections_created"] == 0
+
+
 # ---- codex eval --recognition (Stream C harness) ----------------------------
 
 
