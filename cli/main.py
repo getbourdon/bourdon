@@ -35,6 +35,7 @@ from adapters.codex import (
     _merge_bourdon_memory_md_section,
     _safe_native_memory_text,
 )
+from adapters.codex_automations import CodexAutomationsAdapter
 from adapters.copilot import (
     CopilotAdapter,
     _inspect_copilot_memory,
@@ -68,6 +69,10 @@ def _default_claude_code_l5_path() -> Path:
 
 def _default_codex_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
+
+
+def _default_codex_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "codex-automations.l5.yaml"
 
 
 def _default_cursor_l5_path() -> Path:
@@ -199,6 +204,45 @@ def _handle_copilot_export(args: argparse.Namespace) -> int:
     write_l5_dict(data, out_path)
     if args.print_manifest:
         _print_yaml(data)
+    return 0
+
+
+def _handle_codex_automations_export(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = CodexAutomationsAdapter(automations_dir=automations_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_codex_automations_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_codex_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = CodexAutomationsAdapter(automations_dir=automations_dir)
+    health = adapter.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": adapter.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
     return 0
 
 
@@ -657,6 +701,7 @@ def _handle_cascade_build_context(args: argparse.Namespace) -> int:
 _ADAPTER_REGISTRY: list[tuple[str, type]] = [
     ("claude-code", ClaudeCodeAdapter),
     ("codex", CodexAdapter),
+    ("codex-automations", CodexAutomationsAdapter),
     ("cursor", CursorAdapter),
     ("copilot", CopilotAdapter),
     ("cascade", CascadeAdapter),
@@ -1638,6 +1683,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the exported manifest after writing it.",
     )
     cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
+    # ---- codex automation subcommands --------------------------------------
+    codex_automations = subparsers.add_parser(
+        "codex-automations",
+        help="Codex automation memory commands",
+    )
+    codex_automation_subparsers = codex_automations.add_subparsers(
+        dest="codex_automations_command"
+    )
+
+    codex_automation_export_cmd = codex_automation_subparsers.add_parser(
+        "export",
+        help="Build a Codex automations L5 manifest from local automation memory",
+    )
+    codex_automation_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    codex_automation_export_cmd.add_argument("--out")
+    codex_automation_export_cmd.add_argument("--since")
+    codex_automation_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    codex_automation_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    codex_automation_export_cmd.set_defaults(func=_handle_codex_automations_export)
+
+    codex_automation_doctor_cmd = codex_automation_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Codex automation memory coverage",
+    )
+    codex_automation_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    codex_automation_doctor_cmd.add_argument("--report-out")
+    codex_automation_doctor_cmd.set_defaults(func=_handle_codex_automations_doctor)
 
     # ---- copilot subcommands ------------------------------------------------
     copilot = subparsers.add_parser("copilot", help="GitHub Copilot-specific commands")
