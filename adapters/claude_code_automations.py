@@ -25,7 +25,10 @@ import logging
 import os
 import re
 import socket
-import tomllib
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover -- 3.10 path
+    import tomli as tomllib  # type: ignore[no-redef]
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
