@@ -492,6 +492,7 @@ def _handle_serve(args: argparse.Namespace) -> int:
 
     transport = getattr(args, "transport", "stdio")
     port = getattr(args, "port", 7500)
+    host = getattr(args, "host", "0.0.0.0")
     allow_unauthenticated = getattr(args, "allow_unauthenticated", False)
 
     # Cross-machine peer federation (Phase 1.6+): merge --peer URLs with the
@@ -512,7 +513,7 @@ def _handle_serve(args: argparse.Namespace) -> int:
         print(f"  agents:    {len(agents)} loaded ({agent_names})", file=sys.stderr)
         print(f"  transport: {transport}", file=sys.stderr)
         if transport == "http":
-            print(f"  port:      {port}", file=sys.stderr)
+            print(f"  bind:      {host}:{port}", file=sys.stderr)
             auth_state = (
                 "disabled (--allow-unauthenticated)"
                 if allow_unauthenticated
@@ -536,6 +537,7 @@ def _handle_serve(args: argparse.Namespace) -> int:
             server,
             transport=transport,
             port=port,
+            host=host,
             allow_unauthenticated=allow_unauthenticated,
         )
     except KeyboardInterrupt:
@@ -2088,6 +2090,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=7500,
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
+    )
+    serve_cmd.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help=(
+            "Bind host for HTTP transport (default: 0.0.0.0 — all interfaces, "
+            "required for cross-host / Tailnet federation; use 127.0.0.1 for "
+            "localhost only)."
+        ),
     )
     serve_cmd.add_argument(
         "--quiet",

@@ -1856,5 +1856,6 @@ def test_cli_serve_no_peers_by_default(tmp_path, monkeypatch):
     assert captured["run_kwargs"] == {
         "transport": "stdio",
         "port": 7500,
+        "host": "0.0.0.0",
         "allow_unauthenticated": False,
     }

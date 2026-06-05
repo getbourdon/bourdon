@@ -317,14 +317,16 @@ def test_load_peers_malformed_config_degrades_to_empty(tmp_path):
 class _RecordingServer:
     """Stand-in fastmcp server that records how .run() was invoked."""
 
-    def __init__(self, fail_http_typeerror: bool = False) -> None:
+    def __init__(self) -> None:
         self.calls: list[dict] = []
-        self._fail_http_typeerror = fail_http_typeerror
+        self.http_app_calls: list = []
 
     def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
-        if kwargs.get("transport") == "http" and self._fail_http_typeerror:
-            raise TypeError("this fastmcp version does not accept transport=")
         self.calls.append(dict(kwargs))
+
+    def http_app(self, middleware=None):  # noqa: ANN001
+        self.http_app_calls.append(middleware)
+        return ("ASGI_APP", middleware)
 
 
 def test_run_l6_server_stdio_uses_default_run():
@@ -333,19 +335,57 @@ def test_run_l6_server_stdio_uses_default_run():
     assert server.calls == [{}]
 
 
-def test_run_l6_server_http_unauthenticated_passes_transport():
+def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch):
+    """--allow-unauthenticated must bind 0.0.0.0 via uvicorn — NOT
+    server.run(transport='http'), which FastMCP binds to 127.0.0.1 and thereby
+    silently hides the server from the Tailnet (the bug the Mac peer caught)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(
+            app=app, host=host, port=port
+        ),
+    )
     server = _RecordingServer()
     server_module.run_l6_server(
         server, transport="http", port=7501, allow_unauthenticated=True
     )
-    assert server.calls == [{"transport": "http", "port": 7501}]
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 7501
+    assert server.http_app_calls == [None]  # no auth middleware wrapped
+    assert server.calls == []  # never falls back to server.run(transport=http)
 
 
-def test_run_l6_server_http_unauth_falls_back_when_transport_kwarg_unsupported():
-    """Old fastmcp without transport= kwarg -> fall back to stdio run()."""
-    server = _RecordingServer(fail_http_typeerror=True)
-    server_module.run_l6_server(
-        server, transport="http", port=7502, allow_unauthenticated=True
+def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(
+            host=host, port=port
+        ),
     )
-    # The http attempt raised TypeError; the fallback bare run() is recorded.
-    assert server.calls == [{}]
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server, transport="http", port=7502, allow_unauthenticated=False
+    )
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 7502
+    # Authed path passes a non-empty middleware list to http_app().
+    assert server.http_app_calls and server.http_app_calls[0] is not None
+
+
+def test_run_l6_server_http_respects_explicit_host(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(host=host),
+    )
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server,
+        transport="http",
+        port=7503,
+        host="127.0.0.1",
+        allow_unauthenticated=True,
+    )
+    assert captured["host"] == "127.0.0.1"
