@@ -1764,3 +1764,97 @@ def test_cli_codex_eval_turn_compiler_flag_attaches_routing_metrics(tmp_path):
     assert "explicit_pre_turn" in turn_compiler["primary_surfaces"]
     assert turn_compiler["results"][0]["prompt"] == "Tell me about Coolculator"
     assert "top_score" in turn_compiler["results"][0]
+
+
+# -- serve: peer federation wiring ---------------------------------------------
+
+
+def _patch_serve_runtime(monkeypatch) -> dict:
+    """Patch create_l6_server + run_l6_server so `bourdon serve` exercises its
+    peer-wiring path without actually starting an MCP server. Returns a dict
+    capturing the store the server was built from and the run() kwargs."""
+    captured: dict = {}
+
+    def fake_create(store, name="bourdon-l6"):
+        captured["store"] = store
+        return object()
+
+    def fake_run(server, **kwargs):
+        captured["run_kwargs"] = kwargs
+
+    monkeypatch.setattr("core.l6_server.create_l6_server", fake_create)
+    monkeypatch.setattr("core.l6_server.run_l6_server", fake_run)
+    return captured
+
+
+def _serve_library(tmp_path: Path) -> Path:
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "claude-code",
+        [{"name": "Bourdon", "type": "topic", "summary": "x", "visibility": "team"}],
+    )
+    return library
+
+
+def test_cli_serve_wires_peers_from_config(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"peers": [{"name": "pc", "url": "http://pc.tailnet:7500"}]}),
+        encoding="utf-8",
+    )
+    captured = _patch_serve_runtime(monkeypatch)
+
+    exit_code = main(
+        ["serve", "--library", str(library), "--peers-config", str(cfg), "--quiet"]
+    )
+
+    assert exit_code == 0
+    store = captured["store"]
+    assert [p.name for p in store.peers] == ["pc"]
+    assert store.peers[0].url == "http://pc.tailnet:7500/mcp"
+    assert captured["run_kwargs"]["transport"] == "stdio"
+
+
+def test_cli_serve_wires_inline_peer_flag(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    captured = _patch_serve_runtime(monkeypatch)
+
+    exit_code = main(
+        [
+            "serve",
+            "--library", str(library),
+            "--peer", "http://localhost:7501",
+            "--peers-config", str(tmp_path / "absent.yaml"),
+            "--quiet",
+        ]
+    )
+
+    assert exit_code == 0
+    store = captured["store"]
+    assert [p.url for p in store.peers] == ["http://localhost:7501/mcp"]
+
+
+def test_cli_serve_no_peers_by_default(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    captured = _patch_serve_runtime(monkeypatch)
+
+    # Point --peers-config at a guaranteed-absent path so a real ~/.bourdon/
+    # peers.yaml on the dev machine can't leak into this hermetic test.
+    exit_code = main(
+        [
+            "serve",
+            "--library", str(library),
+            "--peers-config", str(tmp_path / "absent.yaml"),
+            "--quiet",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["store"].peers == []
+    assert captured["run_kwargs"] == {
+        "transport": "stdio",
+        "port": 7500,
+        "allow_unauthenticated": False,
+    }

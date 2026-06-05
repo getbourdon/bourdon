@@ -251,3 +251,101 @@ def test_export_agents_tool_is_local_only(library, monkeypatch):
     assert report["agents"][0]["source"] == "pc"
     assert report["agents"][0]["source_kind"] == "local"
     assert "sources" not in report
+# -- Peer loading (load_peers) -------------------------------------------------
+
+
+def test_load_peers_empty_when_no_config_and_no_inline(tmp_path):
+    """No config file + no inline URLs -> empty peer list (federation off)."""
+    missing = tmp_path / "nope.yaml"
+    assert server_module.load_peers(missing, []) == []
+
+
+def test_load_peers_from_config_file(tmp_path):
+    """A peers.yaml is parsed into RemoteL6Client objects with token_env honored."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "peers": [
+                    {"name": "pc", "url": "http://pc.tailnet:7500", "token_env": "TOK_PC"},
+                    {"name": "mac", "url": "http://mac.tailnet:7500"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    peers = server_module.load_peers(cfg, [])
+    assert [p.name for p in peers] == ["pc", "mac"]
+    # RemoteL6Client.__post_init__ normalizes the URL with a /mcp suffix.
+    assert peers[0].url == "http://pc.tailnet:7500/mcp"
+    assert peers[0].token_env == "TOK_PC"
+    # Missing token_env defaults to the shared env var.
+    assert peers[1].token_env == "BOURDON_PEER_TOKEN"
+
+
+def test_load_peers_inline_urls(tmp_path):
+    """Inline --peer URLs become peers named after the URL."""
+    missing = tmp_path / "absent.yaml"
+    peers = server_module.load_peers(missing, ["http://localhost:7501"])
+    assert len(peers) == 1
+    assert peers[0].name == "http://localhost:7501"
+    assert peers[0].url == "http://localhost:7501/mcp"
+
+
+def test_load_peers_dedupes_config_and_inline(tmp_path):
+    """The same URL in both the config file and an inline flag yields one peer."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"peers": [{"name": "pc", "url": "http://dup:7500"}]}),
+        encoding="utf-8",
+    )
+    peers = server_module.load_peers(cfg, ["http://dup:7500"])
+    assert len(peers) == 1
+    assert peers[0].name == "pc"  # config entry wins; inline dup is skipped
+
+
+def test_load_peers_malformed_config_degrades_to_empty(tmp_path):
+    """A malformed config never raises -- it degrades to no peers."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text("peers:\n  - not-a-mapping\n  - url: ''\n", encoding="utf-8")
+    assert server_module.load_peers(cfg, []) == []
+
+
+# -- Shared run path (run_l6_server) -------------------------------------------
+
+
+class _RecordingServer:
+    """Stand-in fastmcp server that records how .run() was invoked."""
+
+    def __init__(self, fail_http_typeerror: bool = False) -> None:
+        self.calls: list[dict] = []
+        self._fail_http_typeerror = fail_http_typeerror
+
+    def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        if kwargs.get("transport") == "http" and self._fail_http_typeerror:
+            raise TypeError("this fastmcp version does not accept transport=")
+        self.calls.append(dict(kwargs))
+
+
+def test_run_l6_server_stdio_uses_default_run():
+    server = _RecordingServer()
+    server_module.run_l6_server(server, transport="stdio")
+    assert server.calls == [{}]
+
+
+def test_run_l6_server_http_unauthenticated_passes_transport():
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server, transport="http", port=7501, allow_unauthenticated=True
+    )
+    assert server.calls == [{"transport": "http", "port": 7501}]
+
+
+def test_run_l6_server_http_unauth_falls_back_when_transport_kwarg_unsupported():
+    """Old fastmcp without transport= kwarg -> fall back to stdio run()."""
+    server = _RecordingServer(fail_http_typeerror=True)
+    server_module.run_l6_server(
+        server, transport="http", port=7502, allow_unauthenticated=True
+    )
+    # The http attempt raised TypeError; the fallback bare run() is recorded.
+    assert server.calls == [{}]

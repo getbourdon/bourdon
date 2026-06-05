@@ -823,7 +823,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_peers(
+def load_peers(
     config_path: Path,
     inline_urls: list[str],
 ) -> list[RemoteL6Client]:
@@ -832,6 +832,10 @@ def _load_peers(
     Returns an empty list if no peers are configured. Import of
     :class:`RemoteL6Client` is local so importing this module without the
     ``[federation]`` extras stays cheap.
+
+    Shared by both serve entry points: ``python -m core.l6_server`` (``main``)
+    and ``bourdon serve`` (``cli.main._handle_serve``). Public so the CLI can
+    reuse the exact same flag + config-file resolution.
     """
     from core.l6_remote import RemoteL6Client
 
@@ -903,33 +907,39 @@ def _build_auth_middleware():
     return _BearerAuth
 
 
-def main() -> None:
-    args = _parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    peers = _load_peers(args.peers_config, args.peer)
-    logger.info(
-        "Bourdon L6 server starting -- library=%s, transport=%s, peers=%d",
-        args.library,
-        args.transport,
-        len(peers),
-    )
-    for p in peers:
-        logger.info("  peer: %s -> %s", p.name, p.url)
-    store = L6Store(args.library, peers=peers)
-    logger.info("Loaded %d agent(s): %s", len(store.list_agents()), store.list_agents())
-    server = create_l6_server(store)
-    if args.transport == "stdio":
+def run_l6_server(
+    server: Any,
+    *,
+    transport: str = "stdio",
+    port: int = 7500,
+    allow_unauthenticated: bool = False,
+) -> None:
+    """Run an already-created L6 MCP server under the requested transport.
+
+    Shared by both serve entry points (``python -m core.l6_server`` and
+    ``bourdon serve``) so they get identical transport selection, Bearer-auth
+    middleware, and the ``transport='http'`` fallback for older fastmcp.
+
+    - ``stdio`` (default): blocks until the connecting MCP client disconnects.
+    - ``http`` + ``allow_unauthenticated``: runs fastmcp's own HTTP transport
+      with no auth. Only safe on localhost / a closed Tailnet.
+    - ``http`` (default, authenticated): builds the Starlette ASGI app wrapped
+      with the Bearer-token middleware and runs it under uvicorn, so we own the
+      middleware stack. Fails closed (503) when ``BOURDON_PEER_TOKEN_SERVER`` is
+      unset — see :func:`_build_auth_middleware`.
+    """
+    if transport == "stdio":
         server.run()  # fastmcp default: stdio
         return
 
     # HTTP transport ----------------------------------------------------------
-    if args.allow_unauthenticated:
+    if allow_unauthenticated:
         logger.warning(
             "Serving HTTP transport WITHOUT auth (--allow-unauthenticated). "
             "Restrict to localhost / Tailnet only."
         )
         try:
-            server.run(transport="http", port=args.port)
+            server.run(transport="http", port=port)
         except TypeError:
             logger.warning(
                 "This fastmcp version does not accept transport='http'; falling back to stdio."
@@ -950,7 +960,30 @@ def main() -> None:
 
     auth_cls = _build_auth_middleware()
     app = server.http_app(middleware=[Middleware(auth_cls)])
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+
+def main() -> None:
+    args = _parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    peers = load_peers(args.peers_config, args.peer)
+    logger.info(
+        "Bourdon L6 server starting -- library=%s, transport=%s, peers=%d",
+        args.library,
+        args.transport,
+        len(peers),
+    )
+    for p in peers:
+        logger.info("  peer: %s -> %s", p.name, p.url)
+    store = L6Store(args.library, peers=peers)
+    logger.info("Loaded %d agent(s): %s", len(store.list_agents()), store.list_agents())
+    server = create_l6_server(store)
+    run_l6_server(
+        server,
+        transport=args.transport,
+        port=args.port,
+        allow_unauthenticated=args.allow_unauthenticated,
+    )
 
 
 if __name__ == "__main__":
