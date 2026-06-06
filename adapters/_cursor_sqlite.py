@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -10,6 +11,29 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_SENSITIVE_PATTERNS = (
+    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
+    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
+    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
+    re.compile(r"\bpassword\b", re.IGNORECASE),
+    re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
+    re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
+)
+
+
+def _scrub_text(value: str, limit: int = 256) -> str:
+    """Redact credential-like content and cap length."""
+    text = value.strip()
+    if not text:
+        return text
+    if any(p.search(text) for p in _SENSITIVE_PATTERNS):
+        return "[redacted credential-like text]"
+    text = re.sub(r"https?://\S+", "[link]", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 @dataclass(frozen=True)
@@ -38,6 +62,9 @@ class CursorSQLiteMemories:
 
 
 def default_cursor_dir() -> Path | None:
+    env_override = os.environ.get("CURSOR_DIR")
+    if env_override:
+        return Path(env_override)
     system = platform.system()
     if system == "Darwin":
         return Path.home() / "Library" / "Application Support" / "Cursor"
@@ -73,10 +100,12 @@ def extract_cursor_memories(cursor_dir: Path | None = None) -> CursorSQLiteMemor
                 entities_by_name.setdefault(
                     project_name,
                     CursorEntityMemory(
-                        name=project_name,
+                        name=_scrub_text(project_name, limit=120),
                         entity_type="project",
                         aliases=(parsed_session.cwd,),
-                        summary=f"Cursor workspace inferred from {parsed_session.cwd}.",
+                        summary=_scrub_text(
+                            f"Cursor workspace inferred from {parsed_session.cwd}.",
+                        ),
                         tags=("cursor", "workspace", "sqlite"),
                     ),
                 )
@@ -156,7 +185,7 @@ def _record_to_session(key: str, value: Any) -> CursorSessionMemory | None:
     return CursorSessionMemory(
         date=date,
         cwd=cwd,
-        key_actions=(action[:256],),
+        key_actions=(_scrub_text(action),),
         files_touched=files_touched,
     )
 

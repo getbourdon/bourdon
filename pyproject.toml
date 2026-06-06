@@ -92,6 +92,7 @@ claude-code-automations = "adapters.claude_code_automations:ClaudeCodeAutomation
 codex = "adapters.codex:CodexAdapter"
 codex-automations = "adapters.codex_automations:CodexAutomationsAdapter"
 cursor = "adapters.cursor:CursorAdapter"
+cursor-automations = "adapters.cursor_automations:CursorAutomationsAdapter"
 copilot = "adapters.copilot:CopilotAdapter"
 cascade = "adapters.cascade:CascadeAdapter"
 # clyde = "adapters.clyde:ClydeAdapter"     # native publisher lives in ~/.clyde/, not here

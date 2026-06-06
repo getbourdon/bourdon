@@ -50,6 +50,7 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
+from adapters.cursor_automations import CursorAutomationsAdapter
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -86,6 +87,10 @@ def _default_codex_automations_l5_path() -> Path:
 
 def _default_cursor_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cursor.l5.yaml"
+
+
+def _default_cursor_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "cursor-automations.l5.yaml"
 
 
 def _default_copilot_l5_path() -> Path:
@@ -201,6 +206,64 @@ def _handle_cursor_export(args: argparse.Namespace) -> int:
     write_l5_dict(data, out_path)
     if args.print_manifest:
         _print_yaml(data)
+    return 0
+
+
+def _handle_cursor_doctor(args: argparse.Namespace) -> int:
+    cursor_dir = Path(args.cursor_dir) if getattr(args, "cursor_dir", None) else None
+    adapter = CursorAdapter(cursor_dir=cursor_dir)
+    health = adapter.health_check()
+    report: dict[str, Any] = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "cursor_dir": adapter.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_automations_export(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = CursorAutomationsAdapter(automations_dir=automations_dir)
+    manifest = adapter.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_cursor_automations_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_cursor_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    adapter = CursorAutomationsAdapter(automations_dir=automations_dir)
+    health = adapter.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": adapter.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
     return 0
 
 
@@ -342,6 +405,7 @@ _ADAPTER_REGISTRY: list[tuple[str, type]] = [
     ("codex", CodexAdapter),
     ("codex-automations", CodexAutomationsAdapter),
     ("cursor", CursorAdapter),
+    ("cursor-automations", CursorAutomationsAdapter),
     ("copilot", CopilotAdapter),
     ("cascade", CascadeAdapter),
 ]
@@ -1657,6 +1721,51 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the exported manifest after writing it.",
     )
     cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
+    cursor_doctor_cmd = cursor_subparsers.add_parser(
+        "doctor",
+        help="Diagnose Cursor memory sources",
+    )
+    cursor_doctor_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
+    cursor_doctor_cmd.add_argument("--report-out")
+    cursor_doctor_cmd.set_defaults(func=_handle_cursor_doctor)
+
+    # ---- cursor automation subcommands -------------------------------------
+    cursor_automations = subparsers.add_parser(
+        "cursor-automations",
+        help="Cursor Cloud Agent automation memory commands",
+    )
+    cursor_automation_subparsers = cursor_automations.add_subparsers(
+        dest="cursor_automations_command"
+    )
+
+    cursor_automation_export_cmd = cursor_automation_subparsers.add_parser(
+        "export",
+        help="Build a Cursor automations L5 manifest from local automation memory",
+    )
+    cursor_automation_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cursor_automation_export_cmd.add_argument("--out")
+    cursor_automation_export_cmd.add_argument("--since")
+    cursor_automation_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cursor_automation_export_cmd.set_defaults(func=_handle_cursor_automations_export)
+
+    cursor_automation_doctor_cmd = cursor_automation_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Cursor automation memory coverage",
+    )
+    cursor_automation_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cursor_automation_doctor_cmd.add_argument("--report-out")
+    cursor_automation_doctor_cmd.set_defaults(func=_handle_cursor_automations_doctor)
 
     # ---- codex automation subcommands --------------------------------------
     codex_automations = subparsers.add_parser(
