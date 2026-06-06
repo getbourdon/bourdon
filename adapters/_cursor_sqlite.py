@@ -51,6 +51,7 @@ class CursorEntityMemory:
     aliases: tuple[str, ...]
     summary: str
     tags: tuple[str, ...]
+    last_updated: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,8 @@ def extract_cursor_memories(cursor_dir: Path | None = None) -> CursorSQLiteMemor
     databases_scanned: list[str] = []
     malformed_records = 0
 
+    project_latest: dict[str, str] = {}
+
     for db_path in _iter_state_dbs(root):
         databases_scanned.append(str(db_path))
         records, bad_records = _read_item_table(db_path)
@@ -97,19 +100,27 @@ def extract_cursor_memories(cursor_dir: Path | None = None) -> CursorSQLiteMemor
             sessions.append(parsed_session)
             project_name = _project_name(parsed_session.cwd)
             if project_name:
-                entities_by_name.setdefault(
-                    project_name,
-                    CursorEntityMemory(
-                        name=_scrub_text(project_name, limit=120),
-                        entity_type="project",
-                        aliases=(parsed_session.cwd,),
-                        summary=_scrub_text(
-                            f"Cursor workspace inferred from {parsed_session.cwd}.",
-                        ),
-                        tags=("cursor", "workspace", "sqlite"),
+                prev = project_latest.get(project_name, "")
+                if project_name not in project_latest or (
+                    parsed_session.date and parsed_session.date > prev
+                ):
+                    project_latest[project_name] = parsed_session.date
+                existing = entities_by_name.get(project_name)
+                aliases = {parsed_session.cwd} if parsed_session.cwd else set()
+                if existing:
+                    aliases = set(existing.aliases) | aliases
+                entities_by_name[project_name] = CursorEntityMemory(
+                    name=_scrub_text(project_name, limit=120),
+                    entity_type="project",
+                    aliases=tuple(sorted(aliases)),
+                    summary=_scrub_text(
+                        f"Cursor workspace inferred from {parsed_session.cwd}.",
                     ),
+                    tags=("cursor", "workspace", "sqlite"),
+                    last_updated=project_latest.get(project_name, ""),
                 )
 
+    _add_topic_entities(sessions, entities_by_name)
     sessions.sort(key=lambda session: session.date, reverse=True)
     return CursorSQLiteMemories(
         sessions=tuple(sessions),
@@ -277,6 +288,47 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             deduped.append(value)
     return deduped
+
+
+_TOPIC_MIN_MENTIONS = 3
+
+
+def _add_topic_entities(
+    sessions: list[CursorSessionMemory],
+    entities: dict[str, CursorEntityMemory],
+) -> None:
+    """Extract recurring topic entities from session key_actions."""
+    word_counts: dict[str, int] = {}
+    word_latest: dict[str, str] = {}
+    stopwords = {
+        "the", "and", "for", "with", "this", "that", "from", "have", "will",
+        "are", "was", "been", "not", "but", "all", "can", "has", "its",
+        "add", "use", "set", "get", "new", "fix", "run", "now", "also",
+        "into", "make", "just", "like", "need", "want", "work", "code",
+        "file", "test", "data", "type", "should", "would", "could",
+    }
+    for session in sessions:
+        for action in session.key_actions:
+            words = set()
+            for token in action.lower().split():
+                cleaned = token.strip(".,;:!?\"'`()[]{}#-/")
+                if len(cleaned) >= 4 and cleaned not in stopwords and cleaned.isalpha():
+                    words.add(cleaned)
+            for word in words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+                if session.date and (word not in word_latest or session.date > word_latest[word]):
+                    word_latest[word] = session.date
+
+    for word, count in word_counts.items():
+        if count >= _TOPIC_MIN_MENTIONS and word not in entities:
+            entities[word] = CursorEntityMemory(
+                name=word,
+                entity_type="topic",
+                aliases=(),
+                summary=f"Recurring topic across {count} Cursor sessions.",
+                tags=("cursor", "topic", "inferred"),
+                last_updated=word_latest.get(word, ""),
+            )
 
 
 def _project_name(cwd: str) -> str:

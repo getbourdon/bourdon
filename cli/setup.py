@@ -252,6 +252,27 @@ def init_cascade_memory_if_missing(
     return cascade_init(cascade_dir=target_dir, force=False)
 
 
+def init_cursor_automations_if_missing(
+    *,
+    dry_run: bool = False,
+    home: Optional[Path] = None,
+) -> Optional[Path]:
+    """Create ``~/.cursor/automations/cursor-cloud-agent/`` starter if missing.
+
+    Returns the automation directory path if created, None if already present.
+    """
+    from adapters.cursor_automations import default_cursor_automations_dir, init_automations_dir
+
+    h = home or Path.home()
+    base = default_cursor_automations_dir() if not home else h / ".cursor" / "automations"
+    target = base / "cursor-cloud-agent"
+    if target.is_dir():
+        return None
+    if dry_run:
+        return target
+    return init_automations_dir(automations_dir=base, automation_id="cursor-cloud-agent")
+
+
 # ---------------------------------------------------------------------------
 # Plan + outcome
 # ---------------------------------------------------------------------------
@@ -264,6 +285,7 @@ class SetupChoices:
     wire_claude_code_hook: bool = True
     init_copilot: bool = False
     init_cascade: bool = False
+    init_cursor_automations: bool = True
     run_codex_sync: bool = True
     run_initial_export: bool = True
 
@@ -276,6 +298,7 @@ class SetupOutcome:
     claude_code_hook_wired: Optional[bool] = None  # None = skipped
     copilot_init: Optional[Path] = None
     cascade_init: Optional[Path] = None
+    cursor_automations_init: Optional[Path] = None
     codex_sync_ran: Optional[bool] = None  # None = skipped, True/False = ran with success/fail
     initial_export_ran: Optional[bool] = None
     notes: list[str] = field(default_factory=list)
@@ -320,6 +343,13 @@ def apply_choices(
     cas_present = any(a.id == "cascade" and a.present for a in detected)
     if choices.init_cascade and not cas_present:
         outcome.cascade_init = init_cascade_memory_if_missing(dry_run=dry_run, home=home)
+
+    # 4b. Cursor automations init
+    cur_present = any(a.id == "cursor" and a.present for a in detected)
+    if choices.init_cursor_automations and cur_present:
+        outcome.cursor_automations_init = init_cursor_automations_if_missing(
+            dry_run=dry_run, home=home
+        )
 
     # 5. Initial export-all
     if choices.run_initial_export and not dry_run:
@@ -391,6 +421,11 @@ def render_outcome(
         print(f"  copilot memory: initialized at {outcome.copilot_init}", file=stream)
     if outcome.cascade_init:
         print(f"  cascade memory: initialized at {outcome.cascade_init}", file=stream)
+    if outcome.cursor_automations_init:
+        print(
+            f"  cursor automations: initialized at {outcome.cursor_automations_init}",
+            file=stream,
+        )
     if outcome.initial_export_ran is True:
         print("  initial export-all: ok", file=stream)
     elif outcome.initial_export_ran is False:
@@ -538,6 +573,7 @@ def handle_setup(args: argparse.Namespace) -> int:
             wire_claude_code_hook=any(a.id == "claude-code" and a.present for a in detected),
             init_copilot=False,
             init_cascade=False,
+            init_cursor_automations=any(a.id == "cursor" and a.present for a in detected),
             run_codex_sync=any(a.id == "codex" and a.present for a in detected),
             run_initial_export=True,
         )
@@ -593,6 +629,7 @@ __all__ = [
     "handle_setup",
     "init_cascade_memory_if_missing",
     "init_copilot_memory_if_missing",
+    "init_cursor_automations_if_missing",
     "is_claude_code_hook_wired",
     "render_detection",
     "render_outcome",

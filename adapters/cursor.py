@@ -107,10 +107,25 @@ class CursorAdapter:
                 "Pass an explicit ``cursor_dir`` to CursorAdapter() if Cursor "
                 "stores its state somewhere non-standard."
             )
+        from adapters._cursor_sqlite import _iter_state_dbs
+
+        dbs = _iter_state_dbs(path)
+        db_details = []
+        for db in dbs:
+            try:
+                size = db.stat().st_size
+            except OSError:
+                size = -1
+            db_details.append({"path": str(db), "size_bytes": size})
+
         return AgentStore(
             path=str(path),
             version="unknown",
-            metadata={"platform_default": str(default_cursor_dir())},
+            metadata={
+                "platform_default": str(default_cursor_dir()),
+                "databases_found": len(dbs),
+                "databases": db_details,
+            },
         )
 
     def export_sessions(
@@ -245,4 +260,5 @@ def _to_entity(raw) -> Entity:
         aliases=list(raw.aliases),
         summary=raw.summary or None,
         tags=list(raw.tags),
+        last_touched=raw.last_updated or None,
     )

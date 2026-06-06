@@ -50,7 +50,7 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
-from adapters.cursor_automations import CursorAutomationsAdapter
+from adapters.cursor_automations import CursorAutomationsAdapter, init_automations_dir
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -225,6 +225,31 @@ def _handle_cursor_doctor(args: argparse.Namespace) -> int:
         report["health"]["proposed_fix"] = health.proposed_fix
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_init(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    automation_id = getattr(args, "automation_id", None) or "cursor-cloud-agent"
+    force = getattr(args, "force", False)
+    try:
+        path = init_automations_dir(
+            automations_dir=automations_dir,
+            automation_id=automation_id,
+            force=force,
+        )
+        print(f"Created {path}")
+        print(
+            f"Edit {path / 'memory.md'} to add run entries, then run "
+            "`bourdon cursor-automations export`."
+        )
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1729,6 +1754,23 @@ def _build_parser() -> argparse.ArgumentParser:
     cursor_doctor_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
     cursor_doctor_cmd.add_argument("--report-out")
     cursor_doctor_cmd.set_defaults(func=_handle_cursor_doctor)
+
+    cursor_init_cmd = cursor_subparsers.add_parser(
+        "init",
+        help="Create a starter ~/.cursor/automations/ directory for automation memory",
+    )
+    cursor_init_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cursor_init_cmd.add_argument(
+        "--automation-id",
+        default="cursor-cloud-agent",
+        help="ID for the starter automation (default: cursor-cloud-agent).",
+    )
+    cursor_init_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing automation directory.",
+    )
+    cursor_init_cmd.set_defaults(func=_handle_cursor_init)
 
     # ---- cursor automation subcommands -------------------------------------
     cursor_automations = subparsers.add_parser(

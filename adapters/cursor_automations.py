@@ -346,6 +346,57 @@ def _entities_from_configs_and_runs(
     return list(entities_by_name.values())
 
 
+_INIT_TOML_TEMPLATE = """\
+id = "{automation_id}"
+name = "{automation_id}"
+status = "ACTIVE"
+rrule = ""
+kind = ""
+cwds = []
+"""
+
+_INIT_MEMORY_TEMPLATE = """\
+# {automation_id}
+#
+# Append dated sections below. Each YYYY-MM-DD header starts a new run;
+# bullets under it become key_actions in the L5 manifest.
+#
+# Example:
+# 2026-06-01
+# - Reviewed open PRs in Bourdon and ILTT.
+# - No critical issues found.
+"""
+
+
+def init_automations_dir(
+    automations_dir: Path | None = None,
+    automation_id: str = "cursor-cloud-agent",
+    force: bool = False,
+) -> Path:
+    """Create a starter automation directory with toml + memory.md.
+
+    Returns the path of the created automation directory.
+    Raises ``FileExistsError`` when the directory already exists unless
+    ``force=True``.
+    """
+    base = automations_dir or default_cursor_automations_dir()
+    target = base / automation_id
+    if target.exists() and not force:
+        raise FileExistsError(
+            f"{target} already exists. Pass --force to overwrite."
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    (target / _AUTOMATION_TOML).write_text(
+        _INIT_TOML_TEMPLATE.format(automation_id=automation_id),
+        encoding="utf-8",
+    )
+    (target / _MEMORY_MD).write_text(
+        _INIT_MEMORY_TEMPLATE.format(automation_id=automation_id),
+        encoding="utf-8",
+    )
+    return target
+
+
 class CursorAutomationsAdapter:
     """External adapter for Cursor Cloud Agent automation memory artifacts."""
 
