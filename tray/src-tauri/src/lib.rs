@@ -28,7 +28,7 @@ use tauri::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{App, AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{App, AppHandle, Emitter, Manager, WindowEvent};
 
 // ===========================================================================
 // CONFIG POINT — how the tray invokes the Bourdon read CLI.
@@ -525,6 +525,33 @@ fn build_tray(app: &App) -> tauri::Result<()> {
 // ===========================================================================
 // App entry point
 // ===========================================================================
+
+/// Headless self-test / doctor: run the read path, print the full result as
+/// JSON plus a one-line summary, and return a process exit code (0 unless
+/// health is Red). Invoked via `bourdon-tray --selftest` — NO GUI, no tray.
+/// Useful for CI smoke, and for diagnosing the CLI wiring on a fresh machine
+/// without launching the desktop app.
+pub fn selftest() -> i32 {
+    let result = run_cli();
+    let count = result
+        .report
+        .as_ref()
+        .map(|r| r.agents.len())
+        .unwrap_or(0);
+    match serde_json::to_string_pretty(&result) {
+        Ok(j) => println!("{j}"),
+        Err(e) => eprintln!("selftest: could not serialize result: {e}"),
+    }
+    eprintln!(
+        "selftest: health={:?} agents={} command=[{}]",
+        result.health, count, result.command
+    );
+    if result.health == Health::Red {
+        1
+    } else {
+        0
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
