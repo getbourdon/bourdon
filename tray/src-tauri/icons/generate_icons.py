@@ -93,15 +93,27 @@ def make_icon(size: int, badge: tuple[int, int, int, int] | None) -> Image.Image
     def sc(v):
         return v * s
 
-    # paper card (rounded rect, rx=56)
+    # Enlarge the mark within the card to cut negative space. The mark's content
+    # bbox is x[80..304] y[70..318]; we scale it up around its center and recenter
+    # on the card (200,200). MARK_FILL=1.0 reproduces the raw SVG margins.
+    MARK_FILL = 1.34
+    ccx, ccy = 192.0, 194.0  # mark content bbox center
+
+    def mx(x):
+        return sc(200 + (x - ccx) * MARK_FILL)
+
+    def my(y):
+        return sc(200 + (y - ccy) * MARK_FILL)
+
+    # paper card (rounded rect, rx=56) — full bleed, not scaled
     d.rounded_rectangle([0, 0, big - 1, big - 1], radius=sc(56), fill=PAPER)
-    # pipes + mouth slits
+    # pipes + mouth slits (mark-space, enlarged)
     for x, y, w, h in PIPES:
-        d.rectangle([sc(x), sc(y), sc(x + w), sc(y + h)], fill=ROSE)
+        d.rectangle([mx(x), my(y), mx(x + w), my(y + h)], fill=ROSE)
     # bowl of the b
-    d.polygon([(sc(px), sc(py)) for px, py in _bowl_polygon()], fill=ROSE)
+    d.polygon([(mx(px), my(py)) for px, py in _bowl_polygon()], fill=ROSE)
     for x, y, w, h in SLITS:
-        d.rectangle([sc(x), sc(y), sc(x + w), sc(y + h)], fill=PAPER)
+        d.rectangle([mx(x), my(y), mx(x + w), my(y + h)], fill=PAPER)
 
     # health badge — bottom-right, paper ring for separation, large enough to
     # read at 16px (~35% of the icon).
