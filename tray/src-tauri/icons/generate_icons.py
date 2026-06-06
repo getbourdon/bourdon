@@ -18,26 +18,28 @@ Produces, in this `icons/` folder:
     tray-yellow.png     32x32   (stale / partial parse errors)
     tray-red.png        32x32   (CLI failed / all agents broken)
 
-Design: a filled hexagon ("honeycomb cell" — Bourdon = bumblebee/forager motif)
-on a transparent background, with a small darker hex border. The four tray
-variants differ ONLY in fill color so they are unmistakably distinct at 16px:
+Design: a NEUTRAL status disc (filled circle, darker rim) — a placeholder, NOT
+the brand logo. Bourdon is named for the pipe-organ "bourdon" (the deep drone
+tone), NOT a bumblebee; the official mark comes from claude.design / the Bourdon
+Design System kit and will replace this disc. The four tray variants differ ONLY
+in fill color so they are unmistakably distinct at 16px:
   grey   = #9AA0A6  (neutral, benign — NOT red)
   green  = #2EA043
   yellow = #D29922
   red    = #D1242F
-The app icon uses the brand amber (#E3A008) so the installed app is on-brand
-while the tray's resting "all good" state is unambiguous green.
+The app icon uses the brand amber (#E3A008); the tray's resting "all good" state
+is unambiguous green.
 
-Why a hexagon dot rather than a detailed bee: at 16x16 (the effective tray
-render size on Windows/macOS) fine detail is mud. A solid color-coded shape
-reads instantly, which is the whole point of the health indicator.
+Why a solid disc rather than detail: at 16x16 (the effective tray render size on
+Windows/macOS) fine detail is mud. A solid color-coded shape reads instantly,
+which is the whole point of the health indicator.
 
 Requires Pillow (PIL). On this machine: Pillow 12.2.0, Python 3.12.
 """
 from __future__ import annotations
 
 import math
-from PIL import Image, ImageDraw, ImageChops
+from PIL import Image, ImageDraw
 
 # --- palette -----------------------------------------------------------------
 BRAND_AMBER = (227, 160, 8, 255)   # #E3A008  app icon fill
@@ -61,59 +63,23 @@ def _darken(rgba: tuple[int, int, int, int], f: float = 0.62) -> tuple[int, int,
     return (int(r * f), int(g * f), int(b * f), a)
 
 
-DARK = (22, 27, 34, 255)        # #161b22  stripes/head (matches UI bg-elev)
-WING = (191, 224, 255, 150)     # #bfe0ff  translucent wings
+def make_disc_icon(size: int, fill: tuple[int, int, int, int]) -> Image.Image:
+    """NEUTRAL PLACEHOLDER — a filled status disc whose color encodes health.
 
-
-def make_bee_icon(size: int, body: tuple[int, int, int, int]) -> Image.Image:
-    """The Bourdon bee: a striped bumblebee whose BODY color encodes health.
-
-    Rendered at 4x SSAA then downscaled. Bold + simple so it survives 16px tray
-    rasterization: angled translucent wings, a dark head, a color-coded body with
-    three dark stripes clipped to the body silhouette.
+    This is intentionally NOT a brand mark. The official Bourdon logo (the
+    pipe-organ "bourdon" drone motif) comes from claude.design and will replace
+    this; until then a plain disc is an honest status light, not invented brand.
+    Rendered at 4x SSAA then downscaled; darker rim for definition on light trays.
     """
     ss = 4
     big = size * ss
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    cx = big / 2
-
-    # body geometry (vertical ellipse)
-    bw, bh = big * 0.46, big * 0.60
-    bx0, bx1 = cx - bw / 2, cx + bw / 2
-    by0 = big * 0.30
-    by1 = by0 + bh
-
-    # wings — drawn on their own layers and rotated for a natural splay
-    ww, wh = big * 0.30, big * 0.185
-    wy = big * 0.205
-    lw = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    ImageDraw.Draw(lw).ellipse([cx - big * 0.33, wy, cx - big * 0.33 + ww, wy + wh], fill=WING)
-    lw = lw.rotate(18, center=(cx, wy + wh / 2), resample=Image.BICUBIC)
-    rw = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    ImageDraw.Draw(rw).ellipse([cx + big * 0.33 - ww, wy, cx + big * 0.33, wy + wh], fill=WING)
-    rw = rw.rotate(-18, center=(cx, wy + wh / 2), resample=Image.BICUBIC)
-    img = Image.alpha_composite(img, lw)
-    img = Image.alpha_composite(img, rw)
-
     d = ImageDraw.Draw(img)
-    # head
-    hr = big * 0.105
-    d.ellipse([cx - hr, big * 0.18 - hr, cx + hr, big * 0.18 + hr], fill=DARK)
-    # body
-    d.ellipse([bx0, by0, bx1, by1], fill=body)
-
-    # three stripes, clipped to the body silhouette
-    stripes = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(stripes)
-    sh = bh * 0.135
-    for i in range(3):
-        y = by0 + bh * (0.20 + i * 0.265)
-        sd.rectangle([bx0 - 4, y, bx1 + 4, y + sh], fill=DARK)
-    body_mask = Image.new("L", (big, big), 0)
-    ImageDraw.Draw(body_mask).ellipse([bx0, by0, bx1, by1], fill=255)
-    stripes.putalpha(ImageChops.multiply(stripes.split()[3], body_mask))
-    img = Image.alpha_composite(img, stripes)
-
+    cx = cy = big / 2
+    r = big * 0.42
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=_darken(fill, 0.55))  # rim
+    ri = r * 0.80
+    d.ellipse([cx - ri, cy - ri, cx + ri, cy + ri], fill=fill)            # face
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -126,11 +92,11 @@ def main() -> None:
         ("tray-yellow", YELLOW),
         ("tray-red", RED),
     ):
-        make_bee_icon(32, color).save(f"{here}/{name}.png")
+        make_disc_icon(32, color).save(f"{here}/{name}.png")
         print(f"wrote {name}.png")
 
     # App icon set (brand amber). 512 source then downscales.
-    master = make_bee_icon(512, BRAND_AMBER)
+    master = make_disc_icon(512, BRAND_AMBER)
     master.save(f"{here}/icon.png")
     for px in (32, 128, 256):
         out = master.resize((px, px), Image.LANCZOS)

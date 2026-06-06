@@ -77,13 +77,13 @@ a {
   gap: 7px;
   font-weight: 600;
 }
-.bee {
-  display: inline-flex;
-  line-height: 0;
-}
-.bee .wing {
-  fill: #bfe0ff;
-  opacity: 0.55;
+/* neutral placeholder mark (status disc) — replace with official logo */
+.mark {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--amber);
+  display: inline-block;
 }
 .brand-name {
   letter-spacing: 0.2px;
