@@ -28,9 +28,11 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from adapters._cursor_sqlite import (
     CursorSQLiteMemories,
@@ -82,8 +84,13 @@ class CursorAdapter:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
-    def __init__(self, cursor_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        cursor_dir: Path | None = None,
+        workspace_root: Path | None = None,
+    ) -> None:
         self._cursor_dir = cursor_dir
+        self._workspace_root = workspace_root
         self._policy = DEFAULT_POLICY
 
     @property
@@ -159,6 +166,14 @@ class CursorAdapter:
             sessions = [s for s in sessions if not s.date or s.date >= since_iso]
 
         entities = [_to_entity(e) for e in memories.entities]
+        short_index_entities = _short_index_to_entities(
+            self._workspace_root, self._cursor_dir,
+        )
+        seen_names = {e.name.lower() for e in entities}
+        for si_entity in short_index_entities:
+            if si_entity.name.lower() not in seen_names:
+                entities.append(si_entity)
+                seen_names.add(si_entity.name.lower())
         visible_entities = filter_for_federation(entities, self._policy)
 
         return L5Manifest(
@@ -241,6 +256,73 @@ class CursorAdapter:
 
 
 # -- Conversion helpers -------------------------------------------------------
+
+
+def _read_short_index(path: Path) -> list[dict[str, Any]]:
+    """Read a short-index.json and return normalized entries."""
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("CursorAdapter: cannot read short-index %s: %s", path, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("topic_key")]
+
+
+def _short_index_to_entities(
+    workspace_root: Path | None,
+    cursor_dir: Path | None,
+) -> list[Entity]:
+    """Merge workspace + global short-index files into Entity objects."""
+    paths: list[Path] = []
+    if workspace_root:
+        paths.append(workspace_root / ".cursor" / "memory" / "short-index.json")
+    home_index = (cursor_dir or Path.home() / ".cursor") / "memory" / "short-index.json"
+    paths.append(home_index)
+
+    merged: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        for entry in _read_short_index(path):
+            key = str(entry["topic_key"]).strip().lower()
+            merged[key] = entry
+
+    entities: list[Entity] = []
+    for entry in merged.values():
+        name = str(entry.get("topic_name", entry.get("topic_key", ""))).strip()
+        if not name:
+            continue
+        aliases_raw = entry.get("triggers", entry.get("aliases", []))
+        aliases = (
+            [str(a).strip() for a in aliases_raw if str(a).strip()]
+            if isinstance(aliases_raw, list) else []
+        )
+        summary = str(entry.get("summary", "")).strip()
+        tags_raw = entry.get("tags", [])
+        tags = (
+            [str(t).strip() for t in tags_raw if str(t).strip()]
+            if isinstance(tags_raw, list) else []
+        )
+        tags.append("short-index")
+        access = str(entry.get("access_level", "team")).strip().lower()
+        visibility = Visibility.PRIVATE if access == "private" else (
+            Visibility.PUBLIC if access == "public" else Visibility.TEAM
+        )
+        entities.append(Entity(
+            name=name,
+            type="topic",
+            aliases=aliases,
+            summary=summary or None,
+            tags=tags,
+            last_touched=str(entry.get("last_updated", "")) or None,
+            visibility=visibility,
+        ))
+    return entities
 
 
 def _to_session(raw) -> Session:
