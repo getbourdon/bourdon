@@ -44,7 +44,7 @@ htmlcov/
 *.cover
 .hypothesis/
 
-# Node (for potential JS adapters in future)
+# Node (for potential JS participants in future)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -57,6 +57,7 @@ build/
 # Editors
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~

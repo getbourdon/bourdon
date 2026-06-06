@@ -1,15 +1,15 @@
-"""Tests for adapters.claude_code_automations."""
+"""Tests for participants.claude_code_automations."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
 
-from adapters.base import BourdonAdapter, Visibility
-from adapters.claude_code_automations import (
+from participants.base import BourdonParticipant, Visibility
+from participants.claude_code_automations import (
     AGENT_ID,
     AGENT_TYPE,
-    ClaudeCodeAutomationsAdapter,
+    ClaudeCodeAutomationsParticipant,
     MergeResult,
     _build_config,
     _extract_memory_runs,
@@ -42,14 +42,14 @@ cwds = ["/Users/radman/claudework"]
     return automation_dir
 
 
-def test_adapter_satisfies_protocol(tmp_path):
+def test_participant_satisfies_protocol(tmp_path):
     _write_automation(tmp_path, memory="2026-06-03\n- ShipStable launch gate found\n")
 
-    adapter = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path)
+    participant = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path)
 
-    assert isinstance(adapter, BourdonAdapter)
-    assert adapter.agent_id == AGENT_ID
-    assert adapter.agent_type == AGENT_TYPE
+    assert isinstance(participant, BourdonParticipant)
+    assert participant.agent_id == AGENT_ID
+    assert participant.agent_type == AGENT_TYPE
 
 
 def test_agent_id_is_claude_code_automations():
@@ -110,7 +110,7 @@ def test_export_l5_emits_automation_sessions_and_entities(tmp_path):
 """,
     )
 
-    manifest = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path).export_l5()
+    manifest = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path).export_l5()
     data = manifest.to_dict()
 
     assert data["agent"]["id"] == "claude-code-automations"
@@ -140,7 +140,7 @@ def test_export_sessions_filters_since(tmp_path):
 """,
     )
 
-    sessions = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path).export_sessions(
+    sessions = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path).export_sessions(
         since=datetime(2026, 6, 2, tzinfo=timezone.utc)
     )
 
@@ -148,9 +148,9 @@ def test_export_sessions_filters_since(tmp_path):
 
 
 def test_health_check_reports_blocked_missing_dir(tmp_path):
-    adapter = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path / "missing")
+    participant = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path / "missing")
 
-    health = adapter.health_check()
+    health = participant.health_check()
 
     assert health.status == "blocked"
     assert "automations directory not found" in (health.reason or "").lower()
@@ -160,7 +160,7 @@ def test_health_check_reports_blocked_missing_dir(tmp_path):
 def test_health_check_counts_runs(tmp_path):
     _write_automation(tmp_path, memory="2026-06-03\n- ShipStable launch report.\n")
 
-    health = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path).health_check()
+    health = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path).health_check()
 
     assert health.status == "ok"
     assert health.details["automation_count"] == 1
@@ -171,9 +171,9 @@ def test_health_check_counts_runs(tmp_path):
 
 def test_health_check_degraded_empty_dir(tmp_path):
     """Existing dir with no automation.toml -> degraded, not blocked."""
-    adapter = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path)
+    participant = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path)
 
-    health = adapter.health_check()
+    health = participant.health_check()
 
     assert health.status == "degraded"
     assert "no automation.toml" in (health.reason or "").lower()
@@ -185,7 +185,7 @@ def test_redacts_secret_words_in_run_actions(tmp_path):
         memory="2026-06-03\n- Found api_key in the automation note.\n",
     )
 
-    manifest = ClaudeCodeAutomationsAdapter(automations_dir=tmp_path).export_l5()
+    manifest = ClaudeCodeAutomationsParticipant(automations_dir=tmp_path).export_l5()
     action_text = " ".join(manifest.recent_sessions[0].key_actions)
 
     assert "api_key" not in action_text
@@ -195,7 +195,7 @@ def test_redacts_secret_words_in_run_actions(tmp_path):
 
 def test_default_automations_dir_uses_claude_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
-    from adapters.claude_code_automations import default_claude_code_automations_dir
+    from participants.claude_code_automations import default_claude_code_automations_dir
 
     assert default_claude_code_automations_dir() == tmp_path / "automations"
 
@@ -203,7 +203,7 @@ def test_default_automations_dir_uses_claude_home(monkeypatch, tmp_path):
 def test_default_automations_dir_falls_back_to_home(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_HOME", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    from adapters.claude_code_automations import default_claude_code_automations_dir
+    from participants.claude_code_automations import default_claude_code_automations_dir
 
     assert default_claude_code_automations_dir() == tmp_path / ".claude" / "automations"
 

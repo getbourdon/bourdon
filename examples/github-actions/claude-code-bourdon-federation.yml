@@ -52,7 +52,7 @@ jobs:
           AUTOMATION_ID: ${{ github.workflow }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Add whatever signals your run produces -- step outputs, exit codes,
-          # filenames, PR numbers. Keep each line short; the adapter caps each
+          # filenames, PR numbers. Keep each line short; the participant caps each
           # bullet at 280 chars before federation.
           SUMMARY: |
             ${{ github.workflow }} run #${{ github.run_number }} on ${{ github.repository }}.

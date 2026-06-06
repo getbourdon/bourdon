@@ -17,12 +17,12 @@ Project renamed Continuo → Bourdon on 2026-05-05 (v0.1.0); relicensed MIT → 
 ### Earlier version history
 
 - **v0.0.1** -- initial scaffold, Phase 1 orchestrator working standalone
-- **v0.0.2** -- L5 JSON Schema + adapter contract, base adapter module, first external adapter stub (Claude Code, discovers memory sources), test suite (49 tests), CI workflow (Windows + Ubuntu + macOS x Python 3.10-3.12)
-- **v0.0.3** -- Claude Code adapter full parsing: PROJECTS/*/OVERVIEW.md -> project entities, LOG/*.md -> sessions, auto-memory frontmatter -> entities, memory.jsonl knowledge graph -> entities. Entity dedupe across sources. Conservative visibility policy.
+- **v0.0.2** -- L5 JSON Schema + participant contract, base participant module, first external participant stub (Claude Code, discovers memory sources), test suite (49 tests), CI workflow (Windows + Ubuntu + macOS x Python 3.10-3.12)
+- **v0.0.3** -- Claude Code participant full parsing: PROJECTS/*/OVERVIEW.md -> project entities, LOG/*.md -> sessions, auto-memory frontmatter -> entities, memory.jsonl knowledge graph -> entities. Entity dedupe across sources. Conservative visibility policy.
 - **v0.0.4** -- L2 UltraRAG async integration. `core/l2.py` with `L2Config` (YAML + env-var overrides), `L2Client` Protocol, `FastMCPL2Client`, `query_l2()` that never blocks / never raises. Disabled by default; opt in via `core/l2_config.yaml` or `BOURDON_L2_ENABLED=true`. Optional extra: `pip install 'bourdon[ultrarag]'`.
 - **v0.0.5** -- L6 MCP server. The federation layer. `core/l6_store.py` loads every `~/agent-library/agents/*.l5.yaml`, builds a cross-agent entity index, and exposes query primitives (`list_agents`, `find_entity`, `list_recent_work`, `get_cross_agent_summary`) with visibility filtering re-applied at query time. `core/l6_server.py` wraps the store in a `fastmcp` server exposing `agent-library://` resources + `query_agent_memory` / `list_recent_work` / `find_entity` / `get_cross_agent_summary` MCP tools. Launch via `python -m core.l6_server`. Optional extra: `pip install 'bourdon[server]'`. 33 new tests (149 total): store query semantics, private-entity filter, reload behavior, lazy-import guard, server construction.
-- **v0.0.6** (this release) -- Codex adapter + atomic L5 write. `adapters/codex.py` reads Codex session metadata, now preferring live `~/.codex/state_5.sqlite` threads when available and falling back to `~/.codex/session_index.jsonl` for older installs. It emits `Session` rows and dedupes thread names into topic-type `Entity` rows with `last_touched` preserved. Registered under `bourdon.adapters` entry point. New `core/l5_io.py` provides `write_l5()` / `write_l5_dict()` with tmp+rename atomic semantics so L6 file watchers never see half-written manifests. 39 new tests (188 total): session parsing, rollout resolution, timestamp normalization, dedupe, schema round-trip, Codex L5 round-tripped through `L6Store` end-to-end.
-- **v0.0.7** -- Generic Codex memory pipeline + first-class CLI. `adapters/codex.py` now treats `~/.codex/memories/*` as the primary distilled source, enriches with rollout chronology and structured `apply_patch` file evidence, and defaults Codex-derived entities/sessions to `team` visibility. New `bourdon codex export`, `bourdon codex build-context`, and `bourdon codex eval` commands turn that normalized model into L5 federation output plus Codex-oriented L0/L1 timing artifacts. `core/l6_store.py` and `core/l6_server.py` now support `access_level=public|team|private` while preserving `include_private` compatibility. **Plus `agent.role_narrative`** -- new optional L5 schema field that differentiates agents sharing the same `type` slug (Claude Code = manager; Codex = lead author; Cursor = debugger; Cline = throwaway; Clyde = general-purpose). Inspired by [Intrinsic Memory Agents](https://hf.co/papers/2508.08997). Both shipping adapters populate it; Clyde publisher does too. **Plus temporal validity windows** (`valid_from` / `valid_to` ISO 8601 dates on Entities, Zep-Graphiti-inspired) so federation queries can answer "what was active in Q1 2026?" not just "what's in memory?". **Plus `bourdon claude-code export`** subcommand designed for SessionEnd hook use -- writes the Claude Code L5 manifest to `~/agent-library/agents/claude-code.l5.yaml` silently, never raises, exits 0 in all failure modes. Wire it into `~/.claude/settings.json`:
+- **v0.0.6** (this release) -- Codex participant + atomic L5 write. `participants/codex.py` reads Codex session metadata, now preferring live `~/.codex/state_5.sqlite` threads when available and falling back to `~/.codex/session_index.jsonl` for older installs. It emits `Session` rows and dedupes thread names into topic-type `Entity` rows with `last_touched` preserved. Registered under `bourdon.participants` entry point. New `core/l5_io.py` provides `write_l5()` / `write_l5_dict()` with tmp+rename atomic semantics so L6 file watchers never see half-written manifests. 39 new tests (188 total): session parsing, rollout resolution, timestamp normalization, dedupe, schema round-trip, Codex L5 round-tripped through `L6Store` end-to-end.
+- **v0.0.7** -- Generic Codex memory pipeline + first-class CLI. `participants/codex.py` now treats `~/.codex/memories/*` as the primary distilled source, enriches with rollout chronology and structured `apply_patch` file evidence, and defaults Codex-derived entities/sessions to `team` visibility. New `bourdon codex export`, `bourdon codex build-context`, and `bourdon codex eval` commands turn that normalized model into L5 federation output plus Codex-oriented L0/L1 timing artifacts. `core/l6_store.py` and `core/l6_server.py` now support `access_level=public|team|private` while preserving `include_private` compatibility. **Plus `agent.role_narrative`** -- new optional L5 schema field that differentiates agents sharing the same `type` slug (Claude Code = manager; Codex = lead author; Cursor = debugger; Cline = throwaway; Clyde = general-purpose). Inspired by [Intrinsic Memory Agents](https://hf.co/papers/2508.08997). Both shipping participants populate it; Clyde publisher does too. **Plus temporal validity windows** (`valid_from` / `valid_to` ISO 8601 dates on Entities, Zep-Graphiti-inspired) so federation queries can answer "what was active in Q1 2026?" not just "what's in memory?". **Plus `bourdon claude-code export`** subcommand designed for SessionEnd hook use -- writes the Claude Code L5 manifest to `~/agent-library/agents/claude-code.l5.yaml` silently, never raises, exits 0 in all failure modes. Wire it into `~/.claude/settings.json`:
 
 ```json
 {
@@ -171,7 +171,7 @@ The acceptance demo — one agent writes, a different agent reads via Bourdon
 MCP — is documented step-by-step in [`docs/PROOF.md`](docs/PROOF.md). Per-host
 MCP wiring lives in [`docs/integrations/`](docs/integrations/) (Claude Code,
 Claude Desktop, Cursor, OpenManus, more on the way). The `bourdon dogfood` command runs the same
-round-trip against your local stores and prints a per-adapter matrix — useful
+round-trip against your local stores and prints a per-participant matrix — useful
 for verifying the federation is healthy before standing up the demo.
 
 ## Quick Start (Hybrid Memory Cycle)
@@ -237,24 +237,24 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 - **v0.1.0** — L2 UltraRAG async integration + session-close L5 export
 - **v0.2.0** — Relicense MIT → BSL 1.1
 - **v0.3.0** — Codex operational layer: memory doctor + fallback recognition + L6 prep
-- **v0.4.0** — Copilot adapter (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public adapter-authoring guide (`docs/AUTHORING_AN_ADAPTER.md`)
-- **v0.4.1** — Cascade (Windsurf) adapter (5th IDE adapter; self-authored against the public guide) + project-level `SECURITY.md` + `bourdon doctor` / `bourdon export-all` cross-adapter CLI surfaces
+- **v0.4.0** — Copilot participant (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public participant-authoring guide (`docs/AUTHORING_A_PARTICIPANT.md`)
+- **v0.4.1** — Cascade (Windsurf) participant (5th IDE participant; self-authored against the public guide) + project-level `SECURITY.md` + `bourdon doctor` / `bourdon export-all` cross-participant CLI surfaces
 - **v0.5.0** — Cross-agent acceptance: three-layer test stack (federation round-trip CI + `bourdon dogfood` smoke test + `docs/PROOF.md` walkthrough) + `bourdon serve` MCP launcher + Claude Desktop integration doc + paginated `list_recent_work` (default 20, cursor-based, 14-day default-since window — closes a first-call UX cliff observed during the acceptance demo)
 - **v0.6.0** — Bidirectional federation: write-side `commit_to_federation` MCP tool so cloud-only / webview-wrapper agents (Claude Desktop, ChatGPT desktop, etc.) can push their own L5 contributions in. Plus unified recognition-manifest dedupe (name-only with `types` list), `BOURDON_DEFAULT_ACCESS_LEVEL` env var to flip default access per install, and `docs/PROOF_CASCADE.md` self-installation proof. Same-day acceptance demo: Claude Desktop wrote and then read its own contribution via Bourdon.
-- **v1.0.0** — Docs site, community adapter contributions, public launch
-- **v1.x** — Framework adapters (LangChain, CrewAI, AutoGen) and additional agents (Cline once memory store is known, Aider, Continue)
+- **v1.0.0** — Docs site, community participant contributions, public launch
+- **v1.x** — Framework participants (LangChain, CrewAI, AutoGen) and additional agents (Cline once memory store is known, Aider, Continue)
 
-## Adapter Compatibility
+## Participant Compatibility
 
 | Agent          | Difficulty        | Status    |
 |----------------|-------------------|-----------|
 | Clyde          | Native            | Planned   |
 | Clair          | Native            | Planned   |
-| Claude Code    | Native + Adapter  | Export hook available |
+| Claude Code    | Native + Participant  | Export hook available |
 | Codex          | Moderate          | Fallback + prepare-turn available |
-| Cursor         | SQLite            | Adapter available; `bourdon cursor export` |
+| Cursor         | SQLite            | Participant available; `bourdon cursor export` |
 | Cline          | Unknown           | Blocked pending native store path/schema |
-| Copilot        | Convention file   | Adapter available; `bourdon copilot export` |
+| Copilot        | Convention file   | Participant available; `bourdon copilot export` |
 
 ## Philosophy
 
@@ -274,10 +274,10 @@ Bourdon is an open-source memory protocol and reference implementation seeded by
 
 - Ryan Davis -- creator, thesis, architecture, implementation direction
 - Claude -- thesis drafting, architecture planning, early implementation
-- Codex -- Codex adapter expansion, CLI implementation, timing-artifact generation, access-level model
+- Codex -- Codex participant expansion, CLI implementation, timing-artifact generation, access-level model
 - OpenAI Codex 5.3 -- hybrid memory cycle tooling, MCP smoke assertions, CI/report automation, starter template packaging
-- GitHub Copilot -- Copilot adapter (convention-based memory layer), CLI `bourdon copilot` subcommands, test suite
-- Cascade -- Cascade adapter (convention-based memory layer), CLI `bourdon cascade` subcommands, unified `bourdon doctor` and `bourdon export-all`, test suite
+- GitHub Copilot -- Copilot participant (convention-based memory layer), CLI `bourdon copilot` subcommands, test suite
+- Cascade -- Cascade participant (convention-based memory layer), CLI `bourdon cascade` subcommands, unified `bourdon doctor` and `bourdon export-all`, test suite
 
 ## Other RADLAB Projects
 

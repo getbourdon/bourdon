@@ -4,21 +4,21 @@
 What it does
 ------------
 1. Generates a unique marker entity name (``BourdonDogfood-<short uuid>``).
-2. For convention-file adapters (Copilot, Cascade) whose ``memory.md`` exists
+2. For convention-file participants (Copilot, Cascade) whose ``memory.md`` exists
    on this machine, appends the marker as a TEAM-visibility entity.
-3. Runs ``export_l5()`` on every registered adapter against the real local
+3. Runs ``export_l5()`` on every registered participant against the real local
    stores, writing each manifest into an ephemeral ``agent-library/``.
 4. Loads the manifests into ``L6Store`` and queries for the marker at the
    federation's realistic access level (default ``team``).
-5. Prints a per-adapter matrix of (discovered, planted, exported, surfaced).
+5. Prints a per-participant matrix of (discovered, planted, exported, surfaced).
 6. Removes the planted marker entries unless ``--keep-marker`` was passed.
 
 Design choices
 --------------
-- **Plants only in convention-file adapters.** Cursor's SQLite and Codex's
+- **Plants only in convention-file participants.** Cursor's SQLite and Codex's
   session index are owned by their IDE/CLI; writing to them is invasive.
   Claude Code's ``~/claude-brain`` is a real git repo; planting there commits
-  to history if cleanup races. Those three adapters appear in the matrix as
+  to history if cleanup races. Those three participants appear in the matrix as
   "snapshot" rows -- we export what's there but don't manipulate it.
 - **Ephemeral library.** The exports land in a ``tempfile.mkdtemp`` directory
   that's deleted on exit. The user's real ``~/agent-library/`` is untouched.
@@ -26,8 +26,8 @@ Design choices
   ``entities`` list by exact name match. If the user manually added an
   entity with the same name (vanishingly unlikely given the UUID suffix),
   it would also be removed -- this is documented in the marker scheme.
-- **Best-effort.** Any single adapter failure is reported in the matrix
-  but does not abort the run. Exit code is 0 if every plantable adapter
+- **Best-effort.** Any single participant failure is reported in the matrix
+  but does not abort the run. Exit code is 0 if every plantable participant
   round-tripped its marker, 1 otherwise.
 
 This is Layer 2 of the cross-agent test plan documented in
@@ -49,36 +49,36 @@ from typing import Any, Callable
 
 import yaml
 
-from adapters.base import Visibility
-from adapters.cascade import CascadeAdapter, default_cascade_memory_path
-from adapters.claude_code import ClaudeCodeAdapter
-from adapters.codex import CodexAdapter
-from adapters.copilot import CopilotAdapter, default_copilot_memory_path
-from adapters.cursor import CursorAdapter
+from participants.base import Visibility
+from participants.cascade import CascadeParticipant, default_cascade_memory_path
+from participants.claude_code import ClaudeCodeParticipant
+from participants.codex import CodexParticipant
+from participants.copilot import CopilotParticipant, default_copilot_memory_path
+from participants.cursor import CursorParticipant
 from core.codex_context import filter_manifest_for_access
 from core.l5_io import write_l5_dict
 from core.l6_store import L6Store
 
 logger = logging.getLogger(__name__)
 
-# Adapters dogfood will attempt to plant in. The rest are exported and
+# Participants dogfood will attempt to plant in. The rest are exported and
 # observed but never written to.
 PLANTABLE_AGENTS = {"copilot", "cascade"}
 
-# Adapter registry kept in sync with cli.main._ADAPTER_REGISTRY. Mirroring
+# Participant registry kept in sync with cli.main._PARTICIPANT_REGISTRY. Mirroring
 # rather than importing avoids a circular-import surface in main.py.
 _REGISTRY: list[tuple[str, type]] = [
-    ("claude-code", ClaudeCodeAdapter),
-    ("codex", CodexAdapter),
-    ("cursor", CursorAdapter),
-    ("copilot", CopilotAdapter),
-    ("cascade", CascadeAdapter),
+    ("claude-code", ClaudeCodeParticipant),
+    ("codex", CodexParticipant),
+    ("cursor", CursorParticipant),
+    ("copilot", CopilotParticipant),
+    ("cascade", CascadeParticipant),
 ]
 
 
 @dataclass
-class AdapterReport:
-    """Per-adapter result row for the dogfood matrix."""
+class ParticipantReport:
+    """Per-participant result row for the dogfood matrix."""
 
     agent_id: str
     plantable: bool
@@ -98,7 +98,7 @@ class DogfoodReport:
     access_level: str
     started_at: str
     finished_at: str
-    adapters: list[AdapterReport]
+    participants: list[ParticipantReport]
     passed: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,7 +109,7 @@ class DogfoodReport:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "passed": self.passed,
-            "adapters": [asdict(r) for r in self.adapters],
+            "participants": [asdict(r) for r in self.participants],
         }
 
 
@@ -180,7 +180,7 @@ def _plant_marker_in_convention_file(path: Path, marker: str) -> None:
             "summary": "Bourdon dogfood marker. Safe to remove if found stranded.",
             "tags": ["bourdon-dogfood"],
             # Explicit TEAM so the marker is visible at team access regardless
-            # of the adapter's default-policy resolution.
+            # of the participant's default-policy resolution.
             "visibility": Visibility.TEAM.value,
         }
     )
@@ -209,29 +209,29 @@ def _remove_marker_from_convention_file(path: Path, marker: str) -> bool:
 
 def _export_one(
     agent_id: str,
-    adapter_cls: type,
+    participant_cls: type,
     library_agents_dir: Path,
     access_level: str,
 ) -> tuple[bool, bool, list[str]]:
     """
-    Return (discovered, exported, notes) for one adapter against real local state.
+    Return (discovered, exported, notes) for one participant against real local state.
 
-    Discovery is a soft signal: ``adapter.discover()`` may raise
-    ``AdapterDiscoveryError`` if no native store is present on this machine,
+    Discovery is a soft signal: ``participant.discover()`` may raise
+    ``ParticipantDiscoveryError`` if no native store is present on this machine,
     which is the normal "agent isn't installed here" case. We surface it as
     ``discovered=False`` without aborting the run.
     """
     notes: list[str] = []
-    adapter = adapter_cls()
+    participant = participant_cls()
     try:
-        adapter.discover()
+        participant.discover()
         discovered = True
-    except Exception as exc:  # noqa: BLE001 -- adapters raise their own subclass
+    except Exception as exc:  # noqa: BLE001 -- participants raise their own subclass
         notes.append(f"discover: {exc}")
         discovered = False
 
     try:
-        manifest = adapter.export_l5()
+        manifest = participant.export_l5()
         data = filter_manifest_for_access(manifest, access_level=access_level)
         write_l5_dict(data, library_agents_dir / f"{agent_id}.l5.yaml")
         exported = True
@@ -259,7 +259,7 @@ def run_dogfood(
         debugging or to leave a trail an external agent can pick up.
     access_level
         L6Store query access level. Defaults to ``team`` because three of
-        five adapters default-tag entities as TEAM and ``public`` queries
+        five participants default-tag entities as TEAM and ``public`` queries
         would silently miss them. See ``claude-brain`` Finding 2 for context.
     library_dir
         Override the ephemeral library path. When None (default), a fresh
@@ -274,13 +274,13 @@ def run_dogfood(
     agents_dir.mkdir(parents=True, exist_ok=True)
 
     cleanups: list[Callable[[], None]] = []
-    reports: dict[str, AdapterReport] = {
-        agent_id: AdapterReport(agent_id=agent_id, plantable=(agent_id in PLANTABLE_AGENTS))
+    reports: dict[str, ParticipantReport] = {
+        agent_id: ParticipantReport(agent_id=agent_id, plantable=(agent_id in PLANTABLE_AGENTS))
         for agent_id, _ in _REGISTRY
     }
 
     try:
-        # Phase 1: plant marker in convention-file adapters whose memory.md exists.
+        # Phase 1: plant marker in convention-file participants whose memory.md exists.
         for agent_id in PLANTABLE_AGENTS:
             rep = reports[agent_id]
             try:
@@ -306,10 +306,10 @@ def run_dogfood(
                 rep.notes.append(f"plant: {exc}")
                 rep.planted = False
 
-        # Phase 2: export every adapter to the ephemeral library.
-        for agent_id, adapter_cls in _REGISTRY:
+        # Phase 2: export every participant to the ephemeral library.
+        for agent_id, participant_cls in _REGISTRY:
             discovered, exported, notes = _export_one(
-                agent_id, adapter_cls, agents_dir, access_level
+                agent_id, participant_cls, agents_dir, access_level
             )
             rep = reports[agent_id]
             rep.discovered = discovered
@@ -332,7 +332,7 @@ def run_dogfood(
             else:
                 rep.surfaced = None
 
-        # If we couldn't plant in any plantable adapter, the test isn't meaningful.
+        # If we couldn't plant in any plantable participant, the test isn't meaningful.
         any_planted = any(r.planted for r in reports.values() if r.plantable)
         if not any_planted:
             passed = False
@@ -344,7 +344,7 @@ def run_dogfood(
             access_level=access_level,
             started_at=started,
             finished_at=finished,
-            adapters=[reports[a] for a, _ in _REGISTRY],
+            participants=[reports[a] for a, _ in _REGISTRY],
             passed=passed,
         )
     finally:
@@ -369,7 +369,7 @@ def format_matrix(report: DogfoodReport) -> str:
             return "  --"
         return "  OK " if value else " FAIL"
 
-    for r in report.adapters:
+    for r in report.participants:
         notes = "; ".join(r.notes) if r.notes else ""
         rows.append(
             f"{r.agent_id:<14} "

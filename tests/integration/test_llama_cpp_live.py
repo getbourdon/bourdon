@@ -1,5 +1,5 @@
 """
-Live integration tests for adapters.llama_cpp_backend.
+Live integration tests for participants.llama_cpp_backend.
 
 These run against an actual ``llama-server`` instance, exercising real SSE
 streaming, real slot enumeration, and real connection-close cancellation
@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from adapters.llama_cpp_backend import LlamaCppBackend
+from participants.llama_cpp_backend import LlamaCppBackend
 from core.inference_protocol import register_backend
 
 pytestmark = pytest.mark.integration

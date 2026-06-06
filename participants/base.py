@@ -1,7 +1,7 @@
 """
-Bourdon adapter base -- Protocol + dataclasses + exceptions.
+Bourdon participant base -- Protocol + dataclasses + exceptions.
 
-See spec/ADAPTER_CONTRACT.md for the full adapter contract.
+See spec/PARTICIPANT_CONTRACT.md for the full participant contract.
 See spec/L5_schema.json for the normative L5 manifest schema.
 
 Version: contract v0.1 (tied to Bourdon spec v0.1)
@@ -20,20 +20,20 @@ SPEC_VERSION = "0.1"
 
 # -- Exceptions ----------------------------------------------------------------
 
-class AdapterError(Exception):
-    """Base class for adapter errors."""
+class ParticipantError(Exception):
+    """Base class for participant errors."""
 
 
-class AdapterDiscoveryError(AdapterError):
+class ParticipantDiscoveryError(ParticipantError):
     """Raised by discover() when the native store cannot be found or read."""
 
 
-class AdapterExportError(AdapterError):
+class ParticipantExportError(ParticipantError):
     """Raised by export_l5() or export_sessions() when export fails mid-operation."""
 
 
-class AdapterVersionMismatchError(AdapterDiscoveryError):
-    """Raised when the native store's version is outside the adapter's supported range."""
+class ParticipantVersionMismatchError(ParticipantDiscoveryError):
+    """Raised when the native store's version is outside the participant's supported range."""
 
 
 # -- Enums ---------------------------------------------------------------------
@@ -157,11 +157,11 @@ class HealthStatus:
 # -- Protocol ------------------------------------------------------------------
 
 @runtime_checkable
-class BourdonAdapter(Protocol):
+class BourdonParticipant(Protocol):
     """
-    Protocol that every adapter (native publisher or external adapter) must satisfy.
+    Protocol that every participant (native publisher or external participant) must satisfy.
 
-    See spec/ADAPTER_CONTRACT.md for semantic requirements beyond the Protocol
+    See spec/PARTICIPANT_CONTRACT.md for semantic requirements beyond the Protocol
     shape (visibility enforcement, idempotency, error handling).
     """
 
@@ -170,7 +170,7 @@ class BourdonAdapter(Protocol):
     native_path: str
 
     def discover(self) -> AgentStore:
-        """Check that the native store exists; return metadata. Raises AdapterDiscoveryError if missing."""
+        """Check that the native store exists; return metadata. Raises ParticipantDiscoveryError if missing."""
         ...
 
     def export_l5(self, since: Optional[datetime] = None) -> L5Manifest:

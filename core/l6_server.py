@@ -43,7 +43,7 @@ Tools exposed
 - ``commit_to_federation(agent_id, agent_type, entities, sessions, mode, ...)``
   Write-side tool. Cloud-only / webview-wrapper agents (Claude Desktop,
   ChatGPT desktop, etc.) call this to push L5 contributions when they
-  have no readable on-disk store for a Bourdon adapter to scrape.
+  have no readable on-disk store for a Bourdon participant to scrape.
 """
 
 from __future__ import annotations

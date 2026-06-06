@@ -1,10 +1,10 @@
 """
-Bourdon external adapter for GitHub Copilot.
+Bourdon external participant for GitHub Copilot.
 
 GitHub Copilot has no accessible local session index -- it runs as an IDE
 extension whose reasoning is cloud-side, and its native memory is not
-exposed on disk in a readable format.  This adapter takes the same fallback
-approach that the Codex adapter uses for pre-distillation state: it reads
+exposed on disk in a readable format.  This participant takes the same fallback
+approach that the Codex participant uses for pre-distillation state: it reads
 from a **convention-based memory file** at ``~/.copilot-bourdon/memory.md``.
 
 The file uses YAML front-matter for structured entity and session data,
@@ -24,26 +24,26 @@ as plain context:
       - date: "2026-05-10"
         cwd: /projects/bourdon
         key_actions:
-          - Implemented Copilot adapter for Bourdon
+          - Implemented Copilot participant for Bourdon
     ---
 
     # Copilot notes
 
     Freeform markdown below the closing ``---`` is available to Copilot
-    Chat as context but is not parsed by this adapter.
+    Chat as context but is not parsed by this participant.
 
 Users (or Copilot Chat itself, when instructed) maintain this file.  The
-adapter normalises its content into a Bourdon L5 manifest so Copilot's
+participant normalises its content into a Bourdon L5 manifest so Copilot's
 cross-session context is visible in the L6 federation library alongside
 Claude Code, Codex, and Cursor.
 
 Usage::
 
-    from adapters.copilot import CopilotAdapter
+    from participants.copilot import CopilotParticipant
 
-    adapter = CopilotAdapter()
-    store   = adapter.discover()
-    manifest = adapter.export_l5()
+    participant = CopilotParticipant()
+    store   = participant.discover()
+    manifest = participant.export_l5()
 
 Paths checked (in order):
 
@@ -62,12 +62,12 @@ from typing import Any, Optional
 
 import yaml
 
-from adapters.base import (
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
+    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
-    BourdonAdapter,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
@@ -76,7 +76,7 @@ from adapters.base import (
     VisibilityPolicy,
     filter_for_federation,
 )
-from adapters.codex import _NATIVE_MEMORY_SENSITIVE_PATTERNS, _safe_native_memory_text
+from participants.codex import _NATIVE_MEMORY_SENSITIVE_PATTERNS, _safe_native_memory_text
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ sessions: []
 # Copilot notes
 
 Add project notes, preferences, or anything else you want Copilot Chat to
-remember here. This section is freeform -- the adapter only reads the YAML
+remember here. This section is freeform -- the participant only reads the YAML
 front-matter above.
 """
 
@@ -172,7 +172,7 @@ def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, An
         where = f" in {source}" if source is not None else ""
         detail = str(exc).replace("\n", " ")[:200]
         logger.warning(
-            "CopilotAdapter: malformed YAML frontmatter%s; "
+            "CopilotParticipant: malformed YAML frontmatter%s; "
             "treating as no-frontmatter (%s)",
             where,
             detail,
@@ -183,7 +183,7 @@ def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, An
 def _read_memory_file(path: Path) -> dict[str, Any]:
     """Read and parse a copilot-bourdon memory file.
 
-    Returns an empty dict on any I/O or parse error -- the adapter degrades
+    Returns an empty dict on any I/O or parse error -- the participant degrades
     gracefully to an empty manifest rather than raising.
     """
     if not path.is_file():
@@ -191,7 +191,7 @@ def _read_memory_file(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        logger.warning("CopilotAdapter: cannot read %s: %s", path, exc)
+        logger.warning("CopilotParticipant: cannot read %s: %s", path, exc)
         return {}
     return _parse_frontmatter(text, source=path)
 
@@ -207,11 +207,11 @@ def _build_entity(raw: Any) -> Optional[Entity]:
     Skips malformed entries (logs at DEBUG). Never raises.
     """
     if not isinstance(raw, dict):
-        logger.debug("CopilotAdapter: skipping non-dict entity record: %r", raw)
+        logger.debug("CopilotParticipant: skipping non-dict entity record: %r", raw)
         return None
     name = raw.get("name")
     if not isinstance(name, str) or not name.strip():
-        logger.debug("CopilotAdapter: skipping entity with missing name: %r", raw)
+        logger.debug("CopilotParticipant: skipping entity with missing name: %r", raw)
         return None
 
     summary_raw = raw.get("summary") or ""
@@ -241,11 +241,11 @@ def _build_session(raw: Any) -> Optional[Session]:
     Skips malformed entries (logs at DEBUG). Never raises.
     """
     if not isinstance(raw, dict):
-        logger.debug("CopilotAdapter: skipping non-dict session record: %r", raw)
+        logger.debug("CopilotParticipant: skipping non-dict session record: %r", raw)
         return None
     date_val = raw.get("date")
     if not date_val:
-        logger.debug("CopilotAdapter: skipping session with no date: %r", raw)
+        logger.debug("CopilotParticipant: skipping session with no date: %r", raw)
         return None
     date_str = str(date_val)[:10]  # keep YYYY-MM-DD prefix only
 
@@ -306,15 +306,15 @@ def _inspect_copilot_memory(copilot_dir: Optional[Path]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Adapter
+# Participant
 # ---------------------------------------------------------------------------
 
 
-class CopilotAdapter:
-    """External adapter for GitHub Copilot via ``~/.copilot-bourdon/memory.md``.
+class CopilotParticipant:
+    """External participant for GitHub Copilot via ``~/.copilot-bourdon/memory.md``.
 
-    Implements the :class:`~adapters.base.BourdonAdapter` Protocol structurally.
-    Defensive throughout: missing convention directory → ``AdapterDiscoveryError``
+    Implements the :class:`~participants.base.BourdonParticipant` Protocol structurally.
+    Defensive throughout: missing convention directory → ``ParticipantDiscoveryError``
     from ``discover()``; bad YAML degrades to empty results rather than raising,
     matching the contract spec.
     """
@@ -334,13 +334,13 @@ class CopilotAdapter:
     def discover(self) -> AgentStore:
         """Locate the copilot-bourdon convention directory and return metadata.
 
-        Raises ``AdapterDiscoveryError`` if the convention directory is absent.
+        Raises ``ParticipantDiscoveryError`` if the convention directory is absent.
         Users create it with ``bourdon copilot init`` or by placing a
         ``~/.copilot-bourdon/memory.md`` file manually.
         """
         path = self._copilot_dir or default_copilot_bourdon_dir()
         if not path.is_dir():
-            raise AdapterDiscoveryError(
+            raise ParticipantDiscoveryError(
                 f"Copilot convention directory not found at {path!r}. "
                 "Run `bourdon copilot init` to create it with a starter template, "
                 "or create ~/.copilot-bourdon/memory.md manually."
@@ -442,7 +442,7 @@ class CopilotAdapter:
         try:
             data = self._read()
         except Exception as exc:  # noqa: BLE001 -- health_check must not raise
-            logger.warning("CopilotAdapter health_check failed: %s", exc)
+            logger.warning("CopilotParticipant health_check failed: %s", exc)
             return HealthStatus(
                 status="degraded",
                 reason="Memory file present but could not be parsed.",
@@ -493,4 +493,4 @@ def init_memory_file(copilot_dir: Optional[Path] = None, force: bool = False) ->
 
 
 # Protocol conformance check at import time -- catches missing methods before CI.
-_: BourdonAdapter = CopilotAdapter()
+_: BourdonParticipant = CopilotParticipant()

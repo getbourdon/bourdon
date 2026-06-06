@@ -1,7 +1,7 @@
 # Agent Integration Status
 
 This page tracks the operational Bourdon layer available for each agent. It is
-the current implementation map, not the long-term adapter wishlist.
+the current implementation map, not the long-term participant wishlist.
 
 ## Claude Code
 
@@ -33,10 +33,10 @@ Status: SQLite-backed fallback and turn preparation available.
 
 ## Cursor
 
-Status: adapter available; `bourdon cursor export` is the native SQLite export
+Status: participant available; `bourdon cursor export` is the native SQLite export
 path.
 
-- `CursorAdapter` reads Cursor's SQLite state through a read-only temp copy.
+- `CursorParticipant` reads Cursor's SQLite state through a read-only temp copy.
 - `bourdon cursor export` writes `~/agent-library/agents/cursor.l5.yaml`.
 - **Setup walkthrough:** [`docs/integrations/cursor.md`](integrations/cursor.md) (MCP in Cursor IDE + export).
 - The existing short-index memory-cycle scripts remain available for manually
@@ -46,7 +46,7 @@ path.
 
 Status: blocked pending confirmed native memory store path/schema.
 
-- No Cline adapter should be added until its durable local memory source is
+- No Cline participant should be added until its durable local memory source is
   known.
 - Until then, Cline can consume Bourdon through the generic MCP or shell
   surfaces: `prepare_recognition_context` or `bourdon prepare-turn`.
@@ -69,15 +69,15 @@ an MCP source.
 - OpenManus consumes Bourdon by default via read tools and can **publish**
   federation updates through `commit_to_federation` whenever the orchestrator
   surfaces that MCP surface to its model loop (same pattern documented in
-  `docs/AUTHORING_AN_ADAPTER.md` for other cloud-first agents).
+  `docs/AUTHORING_A_PARTICIPANT.md` for other cloud-first agents).
 
 ## Cascade (Windsurf)
 
-Status: adapter available; `bourdon cascade export` is the convention-file
+Status: participant available; `bourdon cascade export` is the convention-file
 export path.
 
 - Cascade has no standardized on-disk session state (similar to Copilot). The
-  adapter reads from a **convention-based memory file** at
+  participant reads from a **convention-based memory file** at
   `~/.cascade-bourdon/memory.md` that Cascade maintains at session end.
 - `bourdon cascade init` creates `~/.cascade-bourdon/memory.md` with a starter
   template. Edit the YAML front-matter to add entities and sessions.
@@ -85,7 +85,7 @@ export path.
   writes `~/agent-library/agents/cascade.l5.yaml`.
 - `bourdon cascade doctor` diagnoses the memory file and reports entity/session
   counts, front-matter validity, and health status.
-- Credential redaction uses the canonical pattern set from `adapters/codex.py`,
+- Credential redaction uses the canonical pattern set from `participants/codex.py`,
   extended with Cascade-specific patterns (`secret`, `sk_test_*`). See
   [`SECURITY.md`](../SECURITY.md) for the full runtime security model.
 - Current role: agentic pair-programmer with multi-step planning for L6
@@ -93,11 +93,11 @@ export path.
 
 ## GitHub Copilot
 
-Status: adapter available; `bourdon copilot export` is the convention-file
+Status: participant available; `bourdon copilot export` is the convention-file
 export path.
 
 - GitHub Copilot has no accessible on-disk session index (cloud-side reasoning,
-  no session JSONL). The adapter reads from a **convention-based memory file**
+  no session JSONL). The participant reads from a **convention-based memory file**
   at `~/.copilot-bourdon/memory.md` that users or Copilot Chat can maintain.
 - `bourdon copilot init` creates `~/.copilot-bourdon/memory.md` with a starter
   template. Edit the YAML front-matter to add entities and sessions.

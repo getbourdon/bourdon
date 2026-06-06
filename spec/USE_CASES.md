@@ -61,7 +61,7 @@ If the thesis (`THESIS.md`) is right — that NeuroLayer is not a dev tool but a
 
 **Without NeuroLayer:** The AI assistant knows nothing about the specific client, has to be re-briefed on constraints, cannot catch the architect if they propose something that contradicts a previous client request.
 
-**With NeuroLayer:** L1 synopsis per client + project. L6 federates across past design reviews, client email threads (via adapter), Notion project notes (via adapter). The AI catches: *"The client said in the March 12 meeting they didn't want south-facing glazing because of the neighbor's pool. This plan adds a south-facing wall of windows."*
+**With NeuroLayer:** L1 synopsis per client + project. L6 federates across past design reviews, client email threads (via participant), Notion project notes (via participant). The AI catches: *"The client said in the March 12 meeting they didn't want south-facing glazing because of the neighbor's pool. This plan adds a south-facing wall of windows."*
 
 **Entities in L5:** `client`, `project`, `site`, `constraint`, `decision`, `meeting`
 

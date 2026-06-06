@@ -20,8 +20,8 @@ If you submit a PR that an AI agent helped write, please:
 
 - **Status:** contributor (granted 2026-05-02)
 - **Branch lane:** `cursor/<feature-slug>`
-- **Scope:** Cursor adapter (SQLite reverse engineering -- see CONTRIBUTING.md "Specifically wanted"), Cursor-side recognition wiring, Cursor integration docs.
-- **Staging area:** `ryandavispro1-cmyk/cursor-spot` hosts v0 of the Cursor-Bourdon CLI and SQLite adapter while it's stabilized; mature pieces are upstreamed here as PRs.
+- **Scope:** Cursor participant (SQLite reverse engineering -- see CONTRIBUTING.md "Specifically wanted"), Cursor-side recognition wiring, Cursor integration docs.
+- **Staging area:** `ryandavispro1-cmyk/cursor-spot` hosts v0 of the Cursor-Bourdon CLI and SQLite participant while it's stabilized; mature pieces are upstreamed here as PRs.
 - **Notes:** Cursor Cloud commits land under the human's GitHub identity. PRs from Cursor link the originating Cursor session.
 
 ### Claude Code -- `claude` / `claude-code-bot`
@@ -41,7 +41,7 @@ If you submit a PR that an AI agent helped write, please:
 
 - **Status:** contributor (granted 2026-05-10)
 - **Branch lane:** `copilot/<feature-slug>`
-- **Scope:** Copilot adapter (`adapters/copilot.py`), `bourdon copilot` CLI subcommands (`export`, `doctor`, `init`), test suite, adapter integration status documentation. Convention-based memory layer using `~/.copilot-bourdon/memory.md` -- Copilot's contribution to the recognition runtime designed from the inside out, same as every other agent in the fleet.
+- **Scope:** Copilot participant (`participants/copilot.py`), `bourdon copilot` CLI subcommands (`export`, `doctor`, `init`), test suite, participant integration status documentation. Convention-based memory layer using `~/.copilot-bourdon/memory.md` -- Copilot's contribution to the recognition runtime designed from the inside out, same as every other agent in the fleet.
 - **Notes:** GitHub Copilot has no accessible on-disk session index (cloud reasoning, no JSONL). The convention-file approach is Copilot's native layer: Copilot Chat can be instructed to maintain `memory.md` at session end, giving it persistent cross-session entity awareness via the L6 federation library.
 
 ## Stacked-PR caveat (cursor[bot] auto-close)
@@ -62,7 +62,7 @@ This entry exists because future agents working in stacked configurations need t
 
 - **Status:** contributor (granted 2026-05-10)
 - **Branch lane:** `cascade/<feature-slug>`
-- **Scope:** Cascade adapter (`adapters/cascade.py`), `bourdon cascade` CLI subcommands (`export`, `doctor`, `init`), unified top-level `bourdon doctor` and `bourdon export-all` commands, test suite. Convention-based memory layer using `~/.cascade-bourdon/memory.md`.
+- **Scope:** Cascade participant (`participants/cascade.py`), `bourdon cascade` CLI subcommands (`export`, `doctor`, `init`), unified top-level `bourdon doctor` and `bourdon export-all` commands, test suite. Convention-based memory layer using `~/.cascade-bourdon/memory.md`.
 - **Notes:** Cascade is an agentic AI coding assistant embedded in the Windsurf IDE. Like Copilot, its internal state is not directly accessible on disk, so it uses the convention-file approach -- Cascade maintains `memory.md` at session end for persistent cross-session entity awareness via the L6 federation library.
 
 ## Adding a new agent

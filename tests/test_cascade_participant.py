@@ -1,4 +1,4 @@
-"""Tests for adapters.cascade -- Cascade (Windsurf) external adapter."""
+"""Tests for participants.cascade -- Cascade (Windsurf) external participant."""
 
 from __future__ import annotations
 
@@ -8,18 +8,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from adapters.base import (
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
-    BourdonAdapter,
+    ParticipantDiscoveryError,
+    BourdonParticipant,
     HealthStatus,
     L5Manifest,
     Visibility,
 )
-from adapters.cascade import (
+from participants.cascade import (
     AGENT_ID,
     AGENT_TYPE,
-    CascadeAdapter,
+    CascadeParticipant,
     _build_entity,
     _build_session,
     _inspect_cascade_memory,
@@ -52,9 +52,9 @@ sessions:
   - date: "2026-05-10"
     cwd: /projects/bourdon
     key_actions:
-      - Implemented Cascade adapter
+      - Implemented Cascade participant
     files_touched:
-      - adapters/cascade.py
+      - participants/cascade.py
     project_focus:
       - bourdon
   - date: "2026-04-28"
@@ -137,10 +137,10 @@ def test_parse_frontmatter_returns_empty_on_bad_yaml():
 
 
 def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog):
-    """Issue #79: malformed YAML should log adapter id, source path, parse-error detail.
+    """Issue #79: malformed YAML should log participant id, source path, parse-error detail.
 
     Cascade previously swallowed the error silently. This guard asserts the new
-    behavior: a discoverable warning with adapter id + path + truncated exception.
+    behavior: a discoverable warning with participant id + path + truncated exception.
     """
     bad = tmp_path / "memory.md"
     bad.write_text("---\n[unclosed\n---\n", encoding="utf-8")
@@ -149,7 +149,7 @@ def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog)
     msgs = [r.getMessage() for r in caplog.records if "frontmatter" in r.getMessage()]
     assert msgs, "expected a frontmatter warning"
     line = msgs[0]
-    assert "CascadeAdapter" in line
+    assert "CascadeParticipant" in line
     assert str(bad) in line
     assert "treating as no-frontmatter" in line
 
@@ -275,14 +275,14 @@ def test_build_session_full():
         "date": "2026-05-10T12:00:00Z",
         "cwd": "/projects/bourdon",
         "key_actions": ["Wrote tests"],
-        "files_touched": ["tests/test_cascade_adapter.py"],
+        "files_touched": ["tests/test_cascade_participant.py"],
         "project_focus": ["bourdon"],
     })
     assert s is not None
     assert s.date == "2026-05-10"
     assert s.cwd == "/projects/bourdon"
     assert "Wrote tests" in s.key_actions
-    assert "tests/test_cascade_adapter.py" in s.files_touched
+    assert "tests/test_cascade_participant.py" in s.files_touched
     assert "bourdon" in s.project_focus
 
 
@@ -300,15 +300,15 @@ def test_build_session_returns_none_on_missing_date():
 
 
 def test_discover_raises_when_dir_missing(tmp_path):
-    adapter = CascadeAdapter(cascade_dir=tmp_path / "does-not-exist")
-    with pytest.raises(AdapterDiscoveryError):
-        adapter.discover()
+    participant = CascadeParticipant(cascade_dir=tmp_path / "does-not-exist")
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.discover()
 
 
 def test_discover_returns_agent_store_when_dir_exists(tmp_path):
     d = _make_cascade_dir(tmp_path)
-    adapter = CascadeAdapter(cascade_dir=d)
-    store = adapter.discover()
+    participant = CascadeParticipant(cascade_dir=d)
+    store = participant.discover()
     assert store.path == str(d)
     assert "memory_file" in store.metadata
     assert store.metadata["memory_file_present"] is False
@@ -316,8 +316,8 @@ def test_discover_returns_agent_store_when_dir_exists(tmp_path):
 
 def test_discover_reports_memory_file_present(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    adapter = CascadeAdapter(cascade_dir=d)
-    store = adapter.discover()
+    participant = CascadeParticipant(cascade_dir=d)
+    store = participant.discover()
     assert store.metadata["memory_file_present"] is True
 
 
@@ -328,13 +328,13 @@ def test_discover_reports_memory_file_present(tmp_path):
 
 def test_export_l5_returns_l5manifest(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     assert isinstance(manifest, L5Manifest)
 
 
 def test_export_l5_agent_fields(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     assert manifest.agent.id == AGENT_ID
     assert manifest.agent.type == AGENT_TYPE
     assert manifest.agent.role_narrative is not None
@@ -349,14 +349,14 @@ def test_export_l5_validates_against_json_schema(tmp_path):
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     data = manifest.to_dict()
     jsonschema.validate(instance=data, schema=schema)
 
 
 def test_export_l5_extracts_entities(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     names = {e.name for e in manifest.known_entities}
     assert "ILTT" in names
     assert "Bourdon" in names
@@ -364,7 +364,7 @@ def test_export_l5_extracts_entities(tmp_path):
 
 def test_export_l5_extracts_sessions(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     assert len(manifest.recent_sessions) == 2
     dates = [s.date for s in manifest.recent_sessions]
     assert "2026-05-10" in dates
@@ -373,21 +373,21 @@ def test_export_l5_extracts_sessions(tmp_path):
 
 def test_export_l5_empty_when_no_memory_file(tmp_path):
     d = _make_cascade_dir(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     assert manifest.known_entities == []
     assert manifest.recent_sessions == []
 
 
 def test_export_l5_empty_when_no_dir(tmp_path):
-    adapter = CascadeAdapter(cascade_dir=tmp_path / "missing")
-    manifest = adapter.export_l5()
+    participant = CascadeParticipant(cascade_dir=tmp_path / "missing")
+    manifest = participant.export_l5()
     assert manifest.known_entities == []
     assert manifest.recent_sessions == []
 
 
 def test_export_l5_capabilities_present(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     assert "chat" in manifest.capabilities
     assert "code-editing" in manifest.capabilities
     assert "terminal" in manifest.capabilities
@@ -400,7 +400,7 @@ def test_export_l5_capabilities_present(tmp_path):
 
 def test_export_l5_strips_private_tagged_entities(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path, _PRIVATE_TAGGED_MEMORY)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     names = {e.name for e in manifest.known_entities}
     assert "MyBankAccount" not in names
     assert "MyPassword" not in names
@@ -409,7 +409,7 @@ def test_export_l5_strips_private_tagged_entities(tmp_path):
 
 def test_export_l5_strips_person_tagged_entities(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     names = {e.name for e in manifest.known_entities}
     assert "Ryan" not in names
 
@@ -422,7 +422,7 @@ def test_export_l5_strips_person_tagged_entities(tmp_path):
 def test_export_l5_filters_sessions_by_since(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
     cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5(since=cutoff)
+    manifest = CascadeParticipant(cascade_dir=d).export_l5(since=cutoff)
     for session in manifest.recent_sessions:
         assert session.date >= "2026-05-01"
 
@@ -434,7 +434,7 @@ def test_export_l5_filters_sessions_by_since(tmp_path):
 
 def test_export_sessions_respects_limit(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    sessions = CascadeAdapter(cascade_dir=d).export_sessions(
+    sessions = CascadeParticipant(cascade_dir=d).export_sessions(
         since=datetime(2000, 1, 1, tzinfo=timezone.utc), limit=1
     )
     assert len(sessions) == 1
@@ -442,7 +442,7 @@ def test_export_sessions_respects_limit(tmp_path):
 
 def test_export_sessions_respects_since(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    sessions = CascadeAdapter(cascade_dir=d).export_sessions(
+    sessions = CascadeParticipant(cascade_dir=d).export_sessions(
         since=datetime(2026, 5, 5, tzinfo=timezone.utc)
     )
     for s in sessions:
@@ -455,8 +455,8 @@ def test_export_sessions_respects_since(tmp_path):
 
 
 def test_health_check_blocked_when_no_dir(tmp_path):
-    adapter = CascadeAdapter(cascade_dir=tmp_path / "missing")
-    health = adapter.health_check()
+    participant = CascadeParticipant(cascade_dir=tmp_path / "missing")
+    health = participant.health_check()
     assert health.status == "blocked"
     assert "expected_path" in health.details
     assert health.proposed_fix is not None
@@ -465,7 +465,7 @@ def test_health_check_blocked_when_no_dir(tmp_path):
 
 def test_health_check_degraded_when_no_memory_file(tmp_path):
     d = _make_cascade_dir(tmp_path)
-    health = CascadeAdapter(cascade_dir=d).health_check()
+    health = CascadeParticipant(cascade_dir=d).health_check()
     assert health.status == "degraded"
     assert "memory" in (health.reason or "").lower()
     assert health.proposed_fix is not None
@@ -474,7 +474,7 @@ def test_health_check_degraded_when_no_memory_file(tmp_path):
 
 def test_health_check_ok_when_memory_file_present(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path)
-    health = CascadeAdapter(cascade_dir=d).health_check()
+    health = CascadeParticipant(cascade_dir=d).health_check()
     assert health.status == "ok"
     assert health.details["entity_count"] == 3
     assert health.details["session_count"] == 2
@@ -483,7 +483,7 @@ def test_health_check_ok_when_memory_file_present(tmp_path):
 
 def test_health_check_does_not_raise_on_malformed_yaml(tmp_path):
     d = _make_cascade_dir_with_memory(tmp_path, _MALFORMED_YAML_MEMORY)
-    health = CascadeAdapter(cascade_dir=d).health_check()
+    health = CascadeParticipant(cascade_dir=d).health_check()
     assert health.status in {"ok", "degraded", "blocked"}
 
 
@@ -497,7 +497,7 @@ def test_round_trip_through_l6store(tmp_path):
     from core.l6_store import L6Store
 
     d = _make_cascade_dir_with_memory(tmp_path)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
 
     agent_library = tmp_path / "agent-library" / "agents"
     agent_library.mkdir(parents=True)
@@ -528,7 +528,7 @@ entities:
 ---
 """
     d = _make_cascade_dir_with_memory(tmp_path, content)
-    manifest = CascadeAdapter(cascade_dir=d).export_l5()
+    manifest = CascadeParticipant(cascade_dir=d).export_l5()
     for entity in manifest.known_entities:
         assert "sk_live_abc123" not in (entity.summary or "")
         assert "api_key" not in (entity.summary or "").lower()
@@ -590,16 +590,16 @@ def test_init_force_overwrites(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cascade_adapter_class_attrs():
-    assert CascadeAdapter.agent_id == "cascade"
-    assert CascadeAdapter.agent_type == "code-assistant"
+def test_cascade_participant_class_attrs():
+    assert CascadeParticipant.agent_id == "cascade"
+    assert CascadeParticipant.agent_type == "code-assistant"
 
 
 def test_native_path_resolves(tmp_path):
-    adapter = CascadeAdapter(cascade_dir=tmp_path / ".cascade-bourdon")
-    assert adapter.native_path == str(tmp_path / ".cascade-bourdon")
+    participant = CascadeParticipant(cascade_dir=tmp_path / ".cascade-bourdon")
+    assert participant.native_path == str(tmp_path / ".cascade-bourdon")
 
 
-def test_cascade_adapter_satisfies_protocol(tmp_path):
-    adapter = CascadeAdapter(cascade_dir=tmp_path / ".cascade-bourdon")
-    assert isinstance(adapter, BourdonAdapter)
+def test_cascade_participant_satisfies_protocol(tmp_path):
+    participant = CascadeParticipant(cascade_dir=tmp_path / ".cascade-bourdon")
+    assert isinstance(participant, BourdonParticipant)

@@ -56,4 +56,4 @@ SQLite date extraction recognizes `lastUpdatedAt` on composer records (alongside
 ## See also
 
 - [`docs/agent-integration-status.md`](../agent-integration-status.md)
-- [`docs/AUTHORING_AN_ADAPTER.md`](../AUTHORING_AN_ADAPTER.md)
+- [`docs/AUTHORING_A_PARTICIPANT.md`](../AUTHORING_A_PARTICIPANT.md)

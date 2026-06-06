@@ -17,7 +17,7 @@ Store layout on disk::
     |   +-- clyde.l5.yaml
     |   ...
 
-Each `*.l5.yaml` file is an L5 manifest produced by an adapter. See
+Each `*.l5.yaml` file is an L5 manifest produced by a participant. See
 ``spec/L5_schema.json`` for the manifest schema.
 
 Design invariants
@@ -213,7 +213,7 @@ class ProjectSummary:
         }
 
 
-# -- Visibility helpers (module-local, independent of adapters.base) ----------
+# -- Visibility helpers (module-local, independent of participants.base) ----------
 
 
 def _entity_visibility(entity: dict) -> str:
@@ -244,7 +244,7 @@ def _resolve_access_level(
     Default is ``public`` (most restrictive view of federation content).
     For single-user federations where the user trusts their own agents,
     set ``BOURDON_DEFAULT_ACCESS_LEVEL=team`` (or ``private``) in the
-    environment. Without this override, three of five shipping adapters
+    environment. Without this override, three of five shipping participants
     (Codex always, Copilot + Cursor by default policy) tag entities
     ``team``, which are silently filtered from default ``public`` queries.
     Finding #2 from the Layer 1 federation work.
@@ -1046,7 +1046,7 @@ class L6Store:
         This is the write-side companion to the existing read APIs. It exists
         so cloud-only or webview-wrapper agents (Claude Desktop, ChatGPT
         desktop, etc.) -- which have no readable on-disk store for a Bourdon
-        adapter to scrape -- can contribute to federation by calling this
+        participant to scrape -- can contribute to federation by calling this
         method (via the ``commit_to_federation`` MCP tool).
 
         Parameters
@@ -1181,7 +1181,7 @@ class L6Store:
 
         # -- write atomically -----------------------------------------------
         # Lazy import to avoid a circular dependency: core.l5_io imports
-        # adapters.base.L5Manifest which imports nothing in core, but the
+        # participants.base.L5Manifest which imports nothing in core, but the
         # lazy import keeps the import graph tidy in case that ever flips.
         from core.l5_io import write_l5_dict
 

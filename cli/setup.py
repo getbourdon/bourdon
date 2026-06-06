@@ -8,7 +8,7 @@ The flow:
 2. Ensure ``~/agent-library/`` exists.
 3. For Claude Code specifically, offer to wire a SessionEnd hook that runs
    ``bourdon claude-code export`` so manifests stay fresh automatically.
-4. For Copilot / Cascade convention-file adapters, offer to initialize the
+4. For Copilot / Cascade convention-file participants, offer to initialize the
    memory file template.
 5. For Codex specifically, offer to run ``sync-native --from-library --memory-md --write``
    immediately so the user can see federation content in Codex on their next turn.
@@ -222,7 +222,7 @@ def init_copilot_memory_if_missing(
 
     Returns the file path if created, None if already present.
     """
-    from adapters.copilot import default_copilot_bourdon_dir, init_memory_file
+    from participants.copilot import default_copilot_bourdon_dir, init_memory_file
 
     h = home or Path.home()
     target_dir = default_copilot_bourdon_dir() if not home else h / ".copilot-bourdon"
@@ -240,7 +240,7 @@ def init_cascade_memory_if_missing(
     home: Optional[Path] = None,
 ) -> Optional[Path]:
     """Create ``~/.cascade-bourdon/memory.md`` template if missing."""
-    from adapters.cascade import default_cascade_dir, init_memory_file as cascade_init
+    from participants.cascade import default_cascade_dir, init_memory_file as cascade_init
 
     h = home or Path.home()
     target_dir = default_cascade_dir() if not home else h / ".cascade-bourdon"
@@ -403,7 +403,7 @@ def render_outcome(
         print(f"  note: {note}", file=stream)
 
     print("\nNext steps:", file=stream)
-    print("  - `bourdon doctor`            -- check current adapter health", file=stream)
+    print("  - `bourdon doctor`            -- check current participant health", file=stream)
     print("  - `bourdon export-all`        -- refresh all manifests anytime", file=stream)
     print(
         "  - `bourdon sync push <dest>`  -- distribute the library to another machine",

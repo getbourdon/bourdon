@@ -79,7 +79,7 @@ non-conflicting solutions.
 data into structured, retrievable knowledge.
 
 **What we adopt:** Nothing. Cognee solves a different problem (raw doc
-ingestion); we expect adapters to handle ingestion in their domain-
+ingestion); we expect participants to handle ingestion in their domain-
 specific way before emitting L5.
 
 ### Supermemory / SuperLocalMemory
@@ -221,7 +221,7 @@ not memory representation or retrieval quality. So we deliberately do
   don't optimize for these. If we ranked, that would be a side effect
   of integration with backends like UltraRAG (L2), not a primary goal.
 - **Knowledge graph richness.** We use simple entity rows. KG
-  integrations are something Bourdon could consume from (via adapters
+  integrations are something Bourdon could consume from (via participants
   emitting graph-shaped Entities) but we don't build a graph engine.
 - **Compliance certifications.** Our local-first, free-OSS posture
   defers SOC 2 / HIPAA to whoever wants to take Bourdon to enterprise.

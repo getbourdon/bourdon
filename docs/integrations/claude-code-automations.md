@@ -1,8 +1,8 @@
 # Bourdon × Claude Code automations
 
-The `claude-code` adapter only sees what an **interactive** Claude Code session writes — `claude-brain/`, `~/.claude/projects/<workspace>/memory/`, the MCP knowledge graph. Automations escape that path: GitHub Action runs of `claude-code-action`, CronCreate-fired prompts, `/loop` wake-ups, and `/schedule`-driven remote routines never touch any of those three stores. Result: the federation graph thinks Claude Code only worked when a human typed at the terminal.
+The `claude-code` participant only sees what an **interactive** Claude Code session writes — `claude-brain/`, `~/.claude/projects/<workspace>/memory/`, the MCP knowledge graph. Automations escape that path: GitHub Action runs of `claude-code-action`, CronCreate-fired prompts, `/loop` wake-ups, and `/schedule`-driven remote routines never touch any of those three stores. Result: the federation graph thinks Claude Code only worked when a human typed at the terminal.
 
-The `claude-code-automations` adapter closes that gap. It reads a parallel local convention — `~/.claude/automations/<id>/{automation.toml, memory.md}` — that automation entry points write to.
+The `claude-code-automations` participant closes that gap. It reads a parallel local convention — `~/.claude/automations/<id>/{automation.toml, memory.md}` — that automation entry points write to.
 
 ## The convention
 
@@ -37,7 +37,7 @@ cwds = ["/Users/radman/claudework"]
 - ShipStable PR #213 surfaced two CI gaps; filed punchlist.
 ```
 
-The adapter parses one **Run** per dated header. Bullets become the run's `key_actions`. Project hints in the bullets (ShipStable, ILTT, Bourdon, …) become known entities, and signal patterns (release, billing, ci-failure, …) become `automation-signal` entities so the federation can answer *"what kinds of work did Claude Code's automations do this month?"*
+The participant parses one **Run** per dated header. Bullets become the run's `key_actions`. Project hints in the bullets (ShipStable, ILTT, Bourdon, …) become known entities, and signal patterns (release, billing, ci-failure, …) become `automation-signal` entities so the federation can answer *"what kinds of work did Claude Code's automations do this month?"*
 
 ## Writing entries
 
