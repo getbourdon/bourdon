@@ -1,0 +1,18 @@
+Bourdon Desktop Tray — License
+==============================
+
+The Bourdon Desktop Tray (everything under `tray/`) is part of Bourdon's
+server-side surface and is licensed under the **Business Source License 1.1**,
+identical to the rest of the Bourdon server-side code.
+
+The canonical, full BSL 1.1 text and parameters (Licensor: RADLAB LLC; Change
+Date; Additional Use Grant) live in the repository-root `LICENSE` file. This
+note exists only to make the boundary explicit: the tray sits on the
+**BSL-server** side of the MIT-cli / BSL-server split, NOT the MIT side.
+
+The repository convention is a single top-level `LICENSE` plus a module
+docstring in source files (Python uses no per-file SPDX header); the Rust and
+JS sources here follow the same convention with a short `BSL 1.1 (see repo root
+LICENSE)` line in their header comment rather than a full per-file header.
+
+See also: repository-root `LICENSE_FAQ.md`.

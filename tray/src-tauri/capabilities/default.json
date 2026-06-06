@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the Bourdon tray main window. Read-only Phase 0: no shell plugin (the CLI is invoked via std::process::Command in Rust, not through any frontend-reachable API), no fs, no network. Only window show/hide/focus, tray, menu, and event APIs the frontend touches.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-unminimize",
+    "core:event:default",
+    "core:menu:default",
+    "core:tray:default"
+  ]
+}

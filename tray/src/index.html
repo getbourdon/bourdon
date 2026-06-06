@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!--
+  Bourdon Desktop Tray — Phase 0 main window.
+  Licensed under the Business Source License 1.1 (see ../src-tauri/../LICENSE
+  via the repo root LICENSE; tray is server-side of the MIT/BSL boundary).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bourdon</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo-hex" aria-hidden="true"></span>
+        <span class="brand-name">Bourdon</span>
+      </div>
+      <div class="topbar-right">
+        <div class="scope-switcher" role="group" aria-label="Scope">
+          <button class="scope-btn active" id="scope-local" aria-pressed="true">
+            This machine
+          </button>
+          <button
+            class="scope-btn disabled"
+            id="scope-federated"
+            disabled
+            title="Configure a peer to enable"
+            aria-disabled="true"
+          >
+            Federated — all peers
+          </button>
+        </div>
+        <span class="health-badge" id="health-badge" data-health="grey">
+          <span class="health-dot"></span>
+          <span class="health-text" id="health-text">Reading…</span>
+        </span>
+        <button class="refresh-btn" id="refresh-btn" title="Re-read memory">
+          ↻ Refresh
+        </button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- States are toggled by main.js: .loading / .error / .empty / .ok -->
+      <section id="state-loading" class="state-panel">
+        <p class="muted">Reading the local memory layer…</p>
+      </section>
+
+      <section id="state-error" class="state-panel hidden">
+        <h2 class="state-title error-title">Can't read memory</h2>
+        <p class="muted" id="error-detail"></p>
+        <pre class="diag" id="error-command"></pre>
+      </section>
+
+      <section id="state-empty" class="state-panel hidden">
+        <h2 class="state-title">No agents found yet</h2>
+        <p>
+          Bourdon makes your AI tools' memory <strong>shared</strong> and
+          <strong>visible</strong>. Found <strong>0 agents</strong> — here's how
+          to publish one.
+        </p>
+        <p>
+          <a
+            href="https://github.com/RADLABtech/bourdon#readme"
+            target="_blank"
+            rel="noopener"
+            class="docs-link"
+            >Read the publishing docs →</a
+          >
+        </p>
+        <p class="muted small" id="empty-source"></p>
+      </section>
+
+      <section id="state-ok" class="state-panel hidden">
+        <div class="columns">
+          <div class="col col-agents">
+            <h2 class="col-title">
+              Agents <span class="count-chip" id="agent-count">0</span>
+            </h2>
+            <div id="agent-list" class="agent-list"></div>
+          </div>
+          <div class="col col-activity">
+            <h2 class="col-title">Recent activity</h2>
+            <div id="activity-list" class="activity-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
