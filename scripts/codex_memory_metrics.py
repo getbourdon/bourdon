@@ -229,11 +229,23 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator
 
 
+def _l5_staleness_cutoff_for(collected_at: datetime, staleness_days: int) -> str:
+    return (collected_at - timedelta(days=staleness_days)).date().isoformat()
+
+
+def _is_l5_stale(last_updated: Any, cutoff: str) -> bool:
+    if not last_updated:
+        return False
+    return str(last_updated) < cutoff
+
+
 def _derived_metrics(
     state_db_report: dict[str, Any],
     fallback_recall: dict[str, Any],
     memory_files: dict[str, Any],
     agent_library: dict[str, Any],
+    collected_at: datetime,
+    l5_staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
 ) -> dict[str, Any]:
     schema = state_db_report.get("schema") or {}
     stage1_outputs = state_db_report.get("stage1_outputs") or {}
@@ -244,6 +256,11 @@ def _derived_metrics(
     done_jobs = int(by_status.get("done") or 0)
     error_jobs = int(by_status.get("error") or 0)
     codex_l5 = agent_library.get("codex_l5") or {}
+    codex_l5_last_updated = codex_l5.get("last_updated")
+    codex_l5_staleness_cutoff = _l5_staleness_cutoff_for(
+        collected_at,
+        l5_staleness_days,
+    )
     distilled_memory_items = int(fallback_recall.get("distilled_memory_items") or 0)
     return {
         "state_schema_variant": schema.get("variant"),
@@ -271,7 +288,12 @@ def _derived_metrics(
         "rollout_summary_count": memory_files["rollout_summaries"]["count"],
         "codex_l5_entity_count": int(codex_l5.get("entity_count") or 0),
         "codex_l5_session_count": int(codex_l5.get("session_count") or 0),
-        "codex_l5_last_updated": codex_l5.get("last_updated"),
+        "codex_l5_last_updated": codex_l5_last_updated,
+        "codex_l5_staleness_cutoff": codex_l5_staleness_cutoff,
+        "codex_l5_stale": _is_l5_stale(
+            codex_l5_last_updated,
+            codex_l5_staleness_cutoff,
+        ),
         "native_memory_present": distilled_memory_items > 0,
     }
 
@@ -399,6 +421,7 @@ def build_snapshot(
     collected_at: datetime | None = None,
     run_codex_mcp: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = _run_codex_mcp,
     previous_snapshot: dict[str, Any] | None = None,
+    l5_staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
 ) -> dict[str, Any]:
     resolved_codex_home = codex_home or _resolve_codex_home()
     resolved_library_path = library_path or DEFAULT_LIBRARY_PATH
@@ -429,6 +452,8 @@ def build_snapshot(
         fallback_recall,
         memory_files,
         agent_library,
+        timestamp,
+        l5_staleness_days,
     )
     snapshot["trend"] = _trend(snapshot, previous_snapshot)
     snapshot["graph"] = _graph(snapshot)
@@ -563,7 +588,7 @@ def _l5_staleness_cutoff(snapshot: dict[str, Any], staleness_days: int) -> str:
         collected_at = datetime.fromisoformat(collected_at_raw)
     except ValueError:
         collected_at = _now()
-    return (collected_at - timedelta(days=staleness_days)).date().isoformat()
+    return _l5_staleness_cutoff_for(collected_at, staleness_days)
 
 
 def _dashboard_status(
@@ -571,13 +596,15 @@ def _dashboard_status(
     staleness_days: int = DEFAULT_L5_STALENESS_DAYS,
 ) -> dict[str, Any]:
     derived = snapshot["derived"]
-    codex_l5_last_updated = str(derived.get("codex_l5_last_updated") or "")
-    cutoff = _l5_staleness_cutoff(snapshot, staleness_days)
+    cutoff = str(
+        derived.get("codex_l5_staleness_cutoff")
+        or _l5_staleness_cutoff(snapshot, staleness_days)
+    )
     blockers: list[str] = []
     if not derived.get("stage1_counters_available"):
         blockers.append("Legacy Stage 1 metric continuity unavailable")
-    if codex_l5_last_updated and codex_l5_last_updated < cutoff:
-        blockers.append("Codex L5 publication stale")
+    if derived.get("codex_l5_stale"):
+        blockers.append("Codex L5 publisher not recently run")
     if not snapshot.get("codex_mcp", {}).get("installed"):
         blockers.append("Codex MCP unavailable")
     if not derived.get("native_memory_present"):
@@ -599,6 +626,12 @@ def _dashboard_status(
             if derived.get("native_memory_present")
             else "Native memory accumulation inactive"
         ),
+        "publisher_freshness": (
+            "Codex L5 publisher recently run"
+            if not derived.get("codex_l5_stale")
+            else "Codex L5 publisher not recently run"
+        ),
+        "publisher_staleness_cutoff": cutoff,
         "readiness": readiness,
         "blockers": blockers,
     }
@@ -714,13 +747,22 @@ def _render_html_dashboard(
             changed=bool(trend.get("raw_memories_bytes_delta")),
         ),
         _metric_card(
-            "Codex L5",
+            "Codex L5 Publisher",
+            status["publisher_freshness"],
+            f"last {derived.get('codex_l5_last_updated')}; stale before {status['publisher_staleness_cutoff']}",
+            kind="evidence",
+            path_kind="collector",
+            accent="orange" if derived.get("codex_l5_stale") else "leaf",
+            changed=bool(trend.get("codex_l5_entity_count_delta") or trend.get("codex_l5_session_count_delta")),
+        ),
+        _metric_card(
+            "Codex L5 Manifest",
             f"{_format_metric(derived['codex_l5_entity_count'])} entities",
-            f"{_format_metric(derived['codex_l5_session_count'])} sessions; last {derived.get('codex_l5_last_updated')}",
+            f"{_format_metric(derived['codex_l5_session_count'])} sessions",
             kind="memory",
             path_kind="collector",
-            accent="orange",
-            changed=False,
+            accent="orchid",
+            changed=bool(trend.get("codex_l5_entity_count_delta") or trend.get("codex_l5_session_count_delta")),
         ),
         _metric_card(
             "Codex MCP",
@@ -744,6 +786,7 @@ def _render_html_dashboard(
 
     commands = [
         "./.venv/bin/python scripts/codex_memory_metrics.py --reports-dir /Users/radman/agent-library/reports/codex-memory-metrics --html-report-dir /Users/radman/.codex/automation-reports/check-codex-native-memory-integration --format json",
+        "./.venv/bin/bourdon codex export --out /Users/radman/agent-library/agents/codex.l5.yaml --access-level team",
         "codex mcp get bourdon",
     ]
     paths = [
@@ -816,11 +859,12 @@ def _render_html_dashboard(
       <div class="status-strip">
         <span class="chip">Run {collected_at}</span>
         <span class="chip">Collector present</span>
+        <span class="chip">{_html_escape(status["publisher_freshness"])}</span>
         <span class="chip">Blockers {len(status["blockers"])}</span>
         <span class="chip">{_html_escape(status["readiness"])}</span>
       </div>
       <h1>Codex Native Memory Health</h1>
-      <p class="sub">Schema detection is fixed. The remaining native-readiness gap is legacy Stage 1 metric continuity plus publication freshness, while native memory accumulation is measured from current artifacts.</p>
+      <p class="sub">Schema detection is fixed. Native memory health stays read-only here; Codex L5 freshness is reported separately as whether the publisher has recently run.</p>
     </header>
     <section class="filters">
       <span class="chip">Filters</span>
@@ -955,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
         collected_at=collected_at,
         previous_snapshot=previous,
         run_codex_mcp=None if args.skip_mcp else _run_codex_mcp,
+        l5_staleness_days=args.l5_staleness_days,
     )
     timestamped_path, latest_path = _attach_reporting_metadata(
         snapshot,

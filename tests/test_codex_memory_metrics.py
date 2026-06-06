@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -129,6 +130,8 @@ def test_metrics_script_writes_reports_dir_and_detects_current_schema(tmp_path, 
     assert latest["trend"]["available"] is True
     assert latest["trend"]["raw_memories_bytes_delta"] > 0
     assert latest["agent_library"]["codex_l5"]["entity_count"] == 1
+    assert isinstance(latest["derived"]["codex_l5_stale"], bool)
+    assert latest["derived"]["codex_l5_staleness_cutoff"]
     assert len(timestamped_reports) == 1
 
 
@@ -166,9 +169,28 @@ def test_metrics_script_writes_html_dashboard_with_precise_readiness_language(
     assert "Legacy Stage 1 metric continuity unavailable" in rendered
     assert "Native memory accumulation active" in rendered
     assert "Native-primary adoption blocked" in rendered
+    assert "Codex L5 Publisher" in rendered
     assert "schema issue" not in rendered.lower()
     assert "data-filter-kind" in rendered
     assert "Exact Evidence" in rendered
+
+
+def test_l5_staleness_is_exposed_as_snapshot_data(tmp_path):
+    module = _load_metrics_module()
+    codex_home = _build_codex_home(tmp_path)
+    library = _build_agent_library(tmp_path)
+
+    snapshot = module.build_snapshot(
+        codex_home=codex_home,
+        library_path=library,
+        collected_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+        run_codex_mcp=None,
+        l5_staleness_days=7,
+    )
+
+    assert snapshot["derived"]["codex_l5_last_updated"] == "2026-06-04T00:00:00+00:00"
+    assert snapshot["derived"]["codex_l5_staleness_cutoff"] == "2026-06-05"
+    assert snapshot["derived"]["codex_l5_stale"] is True
 
 
 def test_l5_staleness_threshold_is_parameterized(tmp_path, capsys):
@@ -207,7 +229,8 @@ def test_l5_staleness_threshold_is_parameterized(tmp_path, capsys):
     rendered_stale = (html_dir / "latest.html").read_text(encoding="utf-8")
 
     assert exit_code == 0
-    assert "Codex L5 publication stale" in rendered_stale
+    assert "Codex L5 publisher not recently run" in rendered_stale
+    assert "Codex L5 publication stale" not in rendered_stale
 
     fresh_library = tmp_path / "fresh-library"
     fresh_library = _build_agent_library(tmp_path)
@@ -229,4 +252,4 @@ def test_l5_staleness_threshold_is_parameterized(tmp_path, capsys):
     rendered_fresh = (html_dir_fresh / "latest.html").read_text(encoding="utf-8")
 
     assert exit_code_fresh == 0
-    assert "Codex L5 publication stale" not in rendered_fresh
+    assert "Codex L5 publisher not recently run" not in rendered_fresh
