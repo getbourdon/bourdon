@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -283,7 +284,9 @@ def _short_index_to_entities(
     paths: list[Path] = []
     if workspace_root:
         paths.append(workspace_root / ".cursor" / "memory" / "short-index.json")
-    home_index = (cursor_dir or Path.home() / ".cursor") / "memory" / "short-index.json"
+    cursor_home = Path(os.environ.get("CURSOR_DIR", "")) if os.environ.get("CURSOR_DIR") else None
+    home_base = cursor_home or Path.home() / ".cursor"
+    home_index = home_base / "memory" / "short-index.json"
     paths.append(home_index)
 
     merged: dict[str, dict[str, Any]] = {}

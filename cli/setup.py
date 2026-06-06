@@ -31,8 +31,6 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Agent detection
@@ -48,7 +46,7 @@ class AgentDetection:
     hint_path: Path  # where we looked; useful when present=False
 
 
-def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
+def detect_agents(home: Path | None = None) -> list[AgentDetection]:
     """Inspect the user's home directory for known agent paths.
 
     Returns a list ordered so the "most common to wire" agents appear first.
@@ -108,7 +106,7 @@ def _command_marks_bourdon_hook(command: str) -> bool:
     return "bourdon" in lowered and "claude-code" in lowered and "export" in lowered
 
 
-def claude_code_settings_path(home: Optional[Path] = None) -> Path:
+def claude_code_settings_path(home: Path | None = None) -> Path:
     """Return the path to Claude Code's settings.json."""
     return (home or Path.home()) / ".claude" / "settings.json"
 
@@ -216,8 +214,8 @@ def wire_claude_code_hook(
 def init_copilot_memory_if_missing(
     *,
     dry_run: bool = False,
-    home: Optional[Path] = None,
-) -> Optional[Path]:
+    home: Path | None = None,
+) -> Path | None:
     """Create ``~/.copilot-bourdon/memory.md`` template if missing.
 
     Returns the file path if created, None if already present.
@@ -237,10 +235,11 @@ def init_copilot_memory_if_missing(
 def init_cascade_memory_if_missing(
     *,
     dry_run: bool = False,
-    home: Optional[Path] = None,
-) -> Optional[Path]:
+    home: Path | None = None,
+) -> Path | None:
     """Create ``~/.cascade-bourdon/memory.md`` template if missing."""
-    from adapters.cascade import default_cascade_dir, init_memory_file as cascade_init
+    from adapters.cascade import default_cascade_dir
+    from adapters.cascade import init_memory_file as cascade_init
 
     h = home or Path.home()
     target_dir = default_cascade_dir() if not home else h / ".cascade-bourdon"
@@ -255,8 +254,8 @@ def init_cascade_memory_if_missing(
 def init_cursor_automations_if_missing(
     *,
     dry_run: bool = False,
-    home: Optional[Path] = None,
-) -> Optional[Path]:
+    home: Path | None = None,
+) -> Path | None:
     """Create ``~/.cursor/automations/cursor-cloud-agent/`` starter if missing.
 
     Returns the automation directory path if created, None if already present.
@@ -295,12 +294,12 @@ class SetupOutcome:
     """What the wizard actually did. Each field is a one-line summary."""
     detected: list[AgentDetection]
     library_created: bool
-    claude_code_hook_wired: Optional[bool] = None  # None = skipped
-    copilot_init: Optional[Path] = None
-    cascade_init: Optional[Path] = None
-    cursor_automations_init: Optional[Path] = None
-    codex_sync_ran: Optional[bool] = None  # None = skipped, True/False = ran with success/fail
-    initial_export_ran: Optional[bool] = None
+    claude_code_hook_wired: bool | None = None  # None = skipped
+    copilot_init: Path | None = None
+    cascade_init: Path | None = None
+    cursor_automations_init: Path | None = None
+    codex_sync_ran: bool | None = None  # None = skipped, True/False = ran with success/fail
+    initial_export_ran: bool | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -309,8 +308,8 @@ def apply_choices(
     choices: SetupChoices,
     *,
     dry_run: bool = False,
-    home: Optional[Path] = None,
-    bourdon_binary: Optional[str] = None,
+    home: Path | None = None,
+    bourdon_binary: str | None = None,
 ) -> SetupOutcome:
     """Execute the user's choices against the filesystem.
 
@@ -379,7 +378,7 @@ def apply_choices(
 
 
 def _run_bourdon_subprocess(
-    argv: list[str], *, bourdon_binary: Optional[str] = None
+    argv: list[str], *, bourdon_binary: str | None = None
 ) -> bool:
     """Invoke a Bourdon subcommand. Returns True on returncode == 0."""
     binary = bourdon_binary or resolve_bourdon_binary()
@@ -550,7 +549,7 @@ def handle_setup(args: argparse.Namespace) -> int:
     """``bourdon setup`` entry point."""
     from core.l6_store import DEFAULT_LIBRARY_PATH
 
-    home: Optional[Path] = None  # honor real $HOME
+    home: Path | None = None  # honor real $HOME
 
     detected = detect_agents(home=home)
     render_detection(detected)

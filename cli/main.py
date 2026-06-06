@@ -1910,8 +1910,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "compile-turn",
         help="Compile a turn-scoped Cursor recognition brief",
     )
-    cursor_compile_turn_cmd.add_argument("prompt", help="The user prompt to compile recognition for.")
-    cursor_compile_turn_cmd.add_argument("--cwd", help="Current working directory for project context.")
+    cursor_compile_turn_cmd.add_argument(
+        "prompt", help="The user prompt to compile recognition for.",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "--cwd", help="Current working directory for project context.",
+    )
     cursor_compile_turn_cmd.add_argument(
         "--access-level",
         choices=("public", "team", "private"),
