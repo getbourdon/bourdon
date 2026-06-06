@@ -37,7 +37,7 @@ Requires Pillow (PIL). On this machine: Pillow 12.2.0, Python 3.12.
 from __future__ import annotations
 
 import math
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageChops
 
 # --- palette -----------------------------------------------------------------
 BRAND_AMBER = (227, 160, 8, 255)   # #E3A008  app icon fill
@@ -61,18 +61,59 @@ def _darken(rgba: tuple[int, int, int, int], f: float = 0.62) -> tuple[int, int,
     return (int(r * f), int(g * f), int(b * f), a)
 
 
-def make_hex_icon(size: int, fill: tuple[int, int, int, int]) -> Image.Image:
-    """A filled flat-top hexagon with a darker rim, antialiased via 4x SSAA."""
+DARK = (22, 27, 34, 255)        # #161b22  stripes/head (matches UI bg-elev)
+WING = (191, 224, 255, 150)     # #bfe0ff  translucent wings
+
+
+def make_bee_icon(size: int, body: tuple[int, int, int, int]) -> Image.Image:
+    """The Bourdon bee: a striped bumblebee whose BODY color encodes health.
+
+    Rendered at 4x SSAA then downscaled. Bold + simple so it survives 16px tray
+    rasterization: angled translucent wings, a dark head, a color-coded body with
+    three dark stripes clipped to the body silhouette.
+    """
     ss = 4
     big = size * ss
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    cx = big / 2
+
+    # body geometry (vertical ellipse)
+    bw, bh = big * 0.46, big * 0.60
+    bx0, bx1 = cx - bw / 2, cx + bw / 2
+    by0 = big * 0.30
+    by1 = by0 + bh
+
+    # wings — drawn on their own layers and rotated for a natural splay
+    ww, wh = big * 0.30, big * 0.185
+    wy = big * 0.205
+    lw = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(lw).ellipse([cx - big * 0.33, wy, cx - big * 0.33 + ww, wy + wh], fill=WING)
+    lw = lw.rotate(18, center=(cx, wy + wh / 2), resample=Image.BICUBIC)
+    rw = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(rw).ellipse([cx + big * 0.33 - ww, wy, cx + big * 0.33, wy + wh], fill=WING)
+    rw = rw.rotate(-18, center=(cx, wy + wh / 2), resample=Image.BICUBIC)
+    img = Image.alpha_composite(img, lw)
+    img = Image.alpha_composite(img, rw)
+
     d = ImageDraw.Draw(img)
-    cx = cy = big / 2
-    r = big * 0.46
-    # rim (slightly larger, darker)
-    d.polygon(_hex_points(cx, cy, r), fill=_darken(fill, 0.55))
-    # face
-    d.polygon(_hex_points(cx, cy, r * 0.82), fill=fill)
+    # head
+    hr = big * 0.105
+    d.ellipse([cx - hr, big * 0.18 - hr, cx + hr, big * 0.18 + hr], fill=DARK)
+    # body
+    d.ellipse([bx0, by0, bx1, by1], fill=body)
+
+    # three stripes, clipped to the body silhouette
+    stripes = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(stripes)
+    sh = bh * 0.135
+    for i in range(3):
+        y = by0 + bh * (0.20 + i * 0.265)
+        sd.rectangle([bx0 - 4, y, bx1 + 4, y + sh], fill=DARK)
+    body_mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(body_mask).ellipse([bx0, by0, bx1, by1], fill=255)
+    stripes.putalpha(ImageChops.multiply(stripes.split()[3], body_mask))
+    img = Image.alpha_composite(img, stripes)
+
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -85,11 +126,11 @@ def main() -> None:
         ("tray-yellow", YELLOW),
         ("tray-red", RED),
     ):
-        make_hex_icon(32, color).save(f"{here}/{name}.png")
+        make_bee_icon(32, color).save(f"{here}/{name}.png")
         print(f"wrote {name}.png")
 
     # App icon set (brand amber). 512 source then downscales.
-    master = make_hex_icon(512, BRAND_AMBER)
+    master = make_bee_icon(512, BRAND_AMBER)
     master.save(f"{here}/icon.png")
     for px in (32, 128, 256):
         out = master.resize((px, px), Image.LANCZOS)

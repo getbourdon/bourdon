@@ -1,8 +1,13 @@
 <!DOCTYPE html>
 <!--
   Bourdon Desktop Tray — Phase 0 main window.
-  Licensed under the Business Source License 1.1 (see ../src-tauri/../LICENSE
-  via the repo root LICENSE; tray is server-side of the MIT/BSL boundary).
+  Licensed under the Business Source License 1.1 (repo root LICENSE; the tray is
+  server-side of the MIT/BSL boundary).
+
+  Design: a compact tray popover. The OVERVIEW is deliberately quiet — just the
+  agents and their pulse. Click an agent to drill into its DEEP REPORT (full
+  role, capabilities, complete session history). Progressive disclosure keeps the
+  surface calm while the depth stays one click away.
 -->
 <html lang="en">
   <head>
@@ -14,38 +19,43 @@
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="logo-hex" aria-hidden="true"></span>
+        <span class="bee" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <defs>
+              <clipPath id="beebody">
+                <ellipse cx="12" cy="13.2" rx="5.1" ry="6.4" />
+              </clipPath>
+            </defs>
+            <ellipse class="wing" cx="8.4" cy="8" rx="3.3" ry="2.1"
+                     transform="rotate(-28 8.4 8)" />
+            <ellipse class="wing" cx="15.6" cy="8" rx="3.3" ry="2.1"
+                     transform="rotate(28 15.6 8)" />
+            <circle cx="12" cy="5.7" r="2" fill="#161b22" />
+            <ellipse cx="12" cy="13.2" rx="5.1" ry="6.4" fill="#e3a008" />
+            <g clip-path="url(#beebody)" fill="#161b22">
+              <rect x="6" y="9.6" width="12" height="1.8" />
+              <rect x="6" y="12.6" width="12" height="1.8" />
+              <rect x="6" y="15.6" width="12" height="1.8" />
+            </g>
+          </svg>
+        </span>
         <span class="brand-name">Bourdon</span>
       </div>
       <div class="topbar-right">
-        <div class="scope-switcher" role="group" aria-label="Scope">
-          <button class="scope-btn active" id="scope-local" aria-pressed="true">
-            This machine
-          </button>
-          <button
-            class="scope-btn disabled"
-            id="scope-federated"
-            disabled
-            title="Configure a peer to enable"
-            aria-disabled="true"
-          >
-            Federated — all peers
-          </button>
-        </div>
         <span class="health-badge" id="health-badge" data-health="grey">
           <span class="health-dot"></span>
           <span class="health-text" id="health-text">Reading…</span>
         </span>
-        <button class="refresh-btn" id="refresh-btn" title="Re-read memory">
-          ↻ Refresh
+        <button class="icon-btn" id="refresh-btn" title="Re-read memory" aria-label="Refresh">
+          ↻
         </button>
       </div>
     </header>
 
     <main class="content">
-      <!-- States are toggled by main.js: .loading / .error / .empty / .ok -->
+      <!-- States toggled by main.js: loading / error / empty / overview / detail -->
       <section id="state-loading" class="state-panel">
-        <p class="muted">Reading the local memory layer…</p>
+        <p class="muted center">Reading the local memory layer…</p>
       </section>
 
       <section id="state-error" class="state-panel hidden">
@@ -55,39 +65,43 @@
       </section>
 
       <section id="state-empty" class="state-panel hidden">
-        <h2 class="state-title">No agents found yet</h2>
-        <p>
+        <h2 class="state-title">No agents yet</h2>
+        <p class="muted">
           Bourdon makes your AI tools' memory <strong>shared</strong> and
-          <strong>visible</strong>. Found <strong>0 agents</strong> — here's how
-          to publish one.
+          <strong>visible</strong>. None are publishing here yet.
         </p>
         <p>
           <a
-            href="https://github.com/RADLABtech/bourdon#readme"
+            href="https://github.com/getbourdon/bourdon#readme"
             target="_blank"
             rel="noopener"
             class="docs-link"
-            >Read the publishing docs →</a
+            >Publish an agent →</a
           >
         </p>
         <p class="muted small" id="empty-source"></p>
       </section>
 
-      <section id="state-ok" class="state-panel hidden">
-        <div class="columns">
-          <div class="col col-agents">
-            <h2 class="col-title">
-              Agents <span class="count-chip" id="agent-count">0</span>
-            </h2>
-            <div id="agent-list" class="agent-list"></div>
-          </div>
-          <div class="col col-activity">
-            <h2 class="col-title">Recent activity</h2>
-            <div id="activity-list" class="activity-list"></div>
-          </div>
+      <!-- OVERVIEW: quiet agent list -->
+      <section id="state-overview" class="state-panel hidden">
+        <div class="list-head">
+          <span class="list-title">Agents</span>
+          <span class="count-chip" id="agent-count">0</span>
         </div>
+        <div id="agent-list" class="agent-list"></div>
+      </section>
+
+      <!-- DETAIL: per-agent deep report -->
+      <section id="state-detail" class="state-panel hidden">
+        <button class="back-btn" id="back-btn">‹ Agents</button>
+        <div id="detail-body"></div>
       </section>
     </main>
+
+    <footer class="statusbar">
+      <span class="scope" id="scope-line">This machine</span>
+      <span class="scope-fed" title="Configure a peer to enable">· Federated (configure a peer)</span>
+    </footer>
 
     <script src="main.js"></script>
   </body>
