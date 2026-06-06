@@ -1,0 +1,18 @@
+{
+  "name": "bourdon-tray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bourdon Desktop Tray — read-only Phase 0 visibility into the local cross-agent memory layer.",
+  "license": "BSL-1.1",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.2"
+  }
+}
