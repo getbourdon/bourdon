@@ -287,6 +287,49 @@ a {
   font-size: 15px;
 }
 
+/* ---- agent brand logos ---- */
+.agent-logo-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+}
+.agent-logo {
+  fill: var(--text);
+  display: block;
+}
+.agent-logo--row {
+  width: 22px;
+  height: 22px;
+}
+.agent-logo--detail {
+  width: 30px;
+  height: 30px;
+}
+.agent-logo--fallback {
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+}
+/* freshness pulse becomes a small corner badge on the logo */
+.agent-logo-wrap .agent-pulse {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.agent-row:hover .agent-logo-wrap .agent-pulse {
+  box-shadow: 0 0 0 2px var(--bg-elev);
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 4px;
+}
+
 /* ---- detail: deep report ---- */
 .back-btn {
   background: transparent;
