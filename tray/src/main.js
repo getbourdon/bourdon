@@ -1,33 +1,46 @@
 // Bourdon Desktop Tray — Phase 0 frontend logic.
-// BSL 1.1 (see repo root LICENSE). No framework: plain DOM.
+// BSL 1.1 (repo root LICENSE). No framework: plain DOM.
 //
-// Data flow: invoke the Rust `get_agents` command, which runs the Bourdon CLI
-// (argv array, no shell), returns a typed AgentsResult { health, report, error,
-// command }, and as a side effect updates the tray icon. We render the result
-// into one of four UI states. The tray "Refresh" item emits an `agents-refreshed`
-// event carrying the same payload, so an open window stays in sync.
+// Data flow: invoke the Rust `get_agents` command (runs the Bourdon CLI via an
+// argv array, no shell), which returns AgentsResult { health, report, error,
+// command } and updates the tray icon as a side effect. We render one of:
+//   loading / error / empty / overview / detail
+// The OVERVIEW is a quiet agent list; clicking an agent opens its DEEP REPORT
+// (detail). The tray "Refresh" item emits `agents-refreshed` with the same
+// payload so an open window stays in sync.
 
-// `withGlobalTauri: true` exposes the API on window.__TAURI__.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-// ---- helpers ----------------------------------------------------------------
+const FRESHNESS_DAYS = 7;
 
 const HEALTH_TEXT = {
-  grey: "No agents yet",
-  green: "Present & fresh",
-  yellow: "Attention warranted",
-  red: "Can't read memory",
+  grey: "No agents",
+  green: "Fresh",
+  yellow: "Attention",
+  red: "Unreadable",
 };
+
+// ---- view state -------------------------------------------------------------
+
+let lastResult = null; // most recent AgentsResult
+let openAgentId = null; // id of the agent in the detail view, or null
+
+// ---- helpers ----------------------------------------------------------------
 
 function el(id) {
   return document.getElementById(id);
 }
 
+const STATES = [
+  "state-loading",
+  "state-error",
+  "state-empty",
+  "state-overview",
+  "state-detail",
+];
 function showOnly(stateId) {
-  for (const s of ["state-loading", "state-error", "state-empty", "state-ok"]) {
-    el(s).classList.toggle("hidden", s !== stateId);
-  }
+  for (const s of STATES) el(s).classList.toggle("hidden", s !== stateId);
 }
 
 function setHealth(health) {
@@ -36,23 +49,26 @@ function setHealth(health) {
   el("health-text").textContent = HEALTH_TEXT[health] || health;
 }
 
-// Humanize an ISO-ish timestamp into "today / N days ago / a date".
-function humanizeLastTouched(iso) {
-  if (!iso) return "unknown";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const dayMs = 86400000;
-  const days = Math.floor((startOfDay(now) - startOfDay(d)) / dayMs);
-  if (days <= 0) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 7) return `${days} days ago`;
-  if (days < 30) return `${Math.floor(days / 7)} wk ago`;
-  return d.toISOString().slice(0, 10);
-}
-
 function startOfDay(dt) {
   return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+}
+
+function daysSince(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return Math.floor((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+}
+
+function humanize(iso) {
+  const days = daysSince(iso);
+  if (days == null) return "unknown";
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
 }
 
 function esc(s) {
@@ -67,107 +83,155 @@ function visClass(v) {
   return "";
 }
 
-// ---- renderers --------------------------------------------------------------
+// Freshness "pulse" class for an agent's overview dot.
+function pulseClass(a) {
+  if (a.parse_error) return "err";
+  const days = daysSince(a.freshest_session_date);
+  if (days == null) return "idle"; // no sessions yet
+  if (days <= FRESHNESS_DAYS) return "fresh";
+  return "stale";
+}
 
-function renderAgents(agents) {
+// ---- overview ---------------------------------------------------------------
+
+function renderOverview(agents) {
+  el("agent-count").textContent = String(agents.length);
   const root = el("agent-list");
   root.innerHTML = "";
   for (const a of agents) {
-    const card = document.createElement("div");
-    card.className = "agent-card" + (a.parse_error ? " has-error" : "");
+    const row = document.createElement("div");
+    row.className = "agent-row";
+    row.tabIndex = 0;
 
-    if (a.parse_error) {
-      card.innerHTML = `
-        <div class="agent-head">
-          <span class="agent-id">${esc(a.id)}</span>
-          <span class="agent-type">manifest error</span>
-        </div>
-        <div class="agent-error">⚠ Could not parse this agent's memory: ${esc(
-          a.parse_error
-        )}</div>`;
-      root.appendChild(card);
-      continue;
-    }
+    const sub = a.parse_error
+      ? "manifest error"
+      : [
+          a.type || "agent",
+          a.instance || null,
+          typeof a.session_count === "number"
+            ? a.session_count > 0
+              ? `${a.session_count} session${a.session_count === 1 ? "" : "s"}`
+              : "no sessions yet"
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
 
-    const sessions = a.session_count;
-    const hasSessions = typeof sessions === "number" && sessions > 0;
-    const sessionText = hasSessions
-      ? `${sessions} session${sessions === 1 ? "" : "s"}`
-      : `<span class="badge-nosessions">no sessions yet</span>`;
-    const caps =
-      typeof a.capability_count === "number"
-        ? `${a.capability_count} capabilit${
-            a.capability_count === 1 ? "y" : "ies"
-          }`
-        : "—";
+    const touch = a.parse_error ? "" : humanize(a.last_updated);
 
-    card.innerHTML = `
-      <div class="agent-head">
-        <span class="agent-id">${esc(a.id)}</span>
-        <span class="agent-type">${esc(a.type || "agent")}${
-      a.instance ? " · " + esc(a.instance) : ""
-    }</span>
-      </div>
-      <div class="agent-meta">
-        <span>last touched ${esc(humanizeLastTouched(a.last_updated))}</span>
-        <span>${caps}</span>
-        <span>${sessionText}</span>
-      </div>
-      ${
-        a.role_narrative
-          ? `<div class="agent-role">${esc(a.role_narrative)}</div>`
-          : ""
-      }`;
-    root.appendChild(card);
+    row.innerHTML = `
+      <span class="agent-pulse ${pulseClass(a)}"></span>
+      <span class="agent-main">
+        <div class="agent-id">${esc(a.id)}</div>
+        <div class="agent-sub">${esc(sub)}</div>
+      </span>
+      <span class="agent-touch">${esc(touch)}</span>
+      <span class="chev">›</span>`;
+
+    row.addEventListener("click", () => openDetail(a.id));
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") openDetail(a.id);
+    });
+    root.appendChild(row);
   }
 }
 
-function renderActivity(agents) {
-  // Aggregate every agent's recent_activity into one date-desc list, cap ~30.
-  const rows = [];
-  for (const a of agents) {
-    if (a.parse_error) continue;
-    for (const act of a.recent_activity || []) {
-      rows.push({ agentId: a.id, ...act });
-    }
-  }
-  rows.sort((x, y) => (y.date || "").localeCompare(x.date || ""));
-  const capped = rows.slice(0, 30);
+// ---- detail (deep report) ---------------------------------------------------
 
-  const root = el("activity-list");
-  root.innerHTML = "";
-  if (capped.length === 0) {
-    root.innerHTML = `<p class="muted small">No recorded activity yet.</p>`;
+function openDetail(id) {
+  openAgentId = id;
+  renderDetail();
+  if (!el("state-detail").classList.contains("hidden")) return;
+  showOnly("state-detail");
+}
+
+function renderDetail() {
+  const agents = (lastResult && lastResult.report && lastResult.report.agents) || [];
+  const a = agents.find((x) => x.id === openAgentId);
+  const body = el("detail-body");
+  if (!a) {
+    // Agent vanished between refreshes — fall back to the overview.
+    showOverview();
     return;
   }
-  for (const r of capped) {
-    const action = (r.key_actions && r.key_actions[0]) || "";
-    const focus =
-      r.project_focus && r.project_focus.length
-        ? r.project_focus.join(", ")
-        : "";
-    const row = document.createElement("div");
-    row.className = "activity-row";
-    row.innerHTML = `
-      <div class="activity-line1">
-        <span class="activity-date">${esc(r.date || "—")}</span>
-        <span class="activity-agent">${esc(r.agentId)}</span>
-        ${focus ? `<span class="activity-focus">${esc(focus)}</span>` : ""}
-        <span class="vis-badge ${visClass(r.visibility)}">${esc(
-      r.visibility || "team"
-    )}</span>
-      </div>
-      ${action ? `<div class="activity-action">${esc(action)}</div>` : ""}`;
-    root.appendChild(row);
+
+  if (a.parse_error) {
+    body.innerHTML = `
+      <div class="detail-id">${esc(a.id)}</div>
+      <div class="detail-type">manifest error</div>
+      <div class="detail-error" style="margin-top:12px">⚠ Could not parse this agent's memory:<br />${esc(
+        a.parse_error
+      )}</div>`;
+    return;
   }
+
+  const stat = (val, label) =>
+    `<div class="stat"><b>${esc(val)}</b><span>${esc(label)}</span></div>`;
+
+  const sessions = (a.recent_activity || [])
+    .map((s) => {
+      const focus =
+        s.project_focus && s.project_focus.length
+          ? `<div class="sess-focus">${esc(s.project_focus.join(", "))}</div>`
+          : "";
+      const actions =
+        s.key_actions && s.key_actions.length
+          ? `<ul class="sess-actions">${s.key_actions
+              .map((k) => `<li>${esc(k)}</li>`)
+              .join("")}</ul>`
+          : "";
+      return `
+        <div class="sess">
+          <div class="sess-head">
+            <span class="sess-date">${esc(s.date || "—")}</span>
+            <span class="vis-badge ${visClass(s.visibility)}">${esc(
+        s.visibility || "team"
+      )}</span>
+          </div>
+          ${focus}
+          ${actions}
+        </div>`;
+    })
+    .join("");
+
+  const sessionBlock =
+    a.session_count > 0
+      ? `<div class="detail-section-title">Recent sessions</div>${
+          sessions || `<p class="muted small">No detail recorded.</p>`
+        }`
+      : `<p class="muted small">No sessions recorded yet — this agent is registered but hasn't published activity.</p>`;
+
+  body.innerHTML = `
+    <div class="detail-id">${esc(a.id)}</div>
+    <div class="detail-type">${esc(a.type || "agent")}${
+    a.instance ? " · " + esc(a.instance) : ""
+  }</div>
+    <div class="detail-stats">
+      ${stat(humanize(a.last_updated), "last touched")}
+      ${stat(a.session_count ?? "—", "sessions")}
+      ${stat(a.capability_count ?? "—", "capabilities")}
+    </div>
+    ${
+      a.role_narrative
+        ? `<div class="detail-role">${esc(a.role_narrative)}</div>`
+        : ""
+    }
+    ${sessionBlock}`;
+}
+
+function showOverview() {
+  openAgentId = null;
+  const agents = (lastResult && lastResult.report && lastResult.report.agents) || [];
+  renderOverview(agents);
+  showOnly("state-overview");
 }
 
 // ---- main render dispatch ---------------------------------------------------
 
 function render(result) {
+  lastResult = result;
   setHealth(result.health);
 
-  // Red CLI-failure path: no report, show error + the command we ran.
   if (result.health === "red" && !result.report) {
     el("error-detail").textContent =
       result.error || "The Bourdon CLI could not be read.";
@@ -187,10 +251,14 @@ function render(result) {
     return;
   }
 
-  el("agent-count").textContent = String(agents.length);
-  renderAgents(agents);
-  renderActivity(agents);
-  showOnly("state-ok");
+  // If we were viewing a detail and that agent still exists, stay there.
+  if (openAgentId && agents.some((a) => a.id === openAgentId)) {
+    renderOverview(agents); // keep the back-target fresh
+    renderDetail();
+    showOnly("state-detail");
+  } else {
+    showOverview();
+  }
 }
 
 // ---- load + wiring ----------------------------------------------------------
@@ -206,7 +274,6 @@ async function load() {
     const result = await invoke("get_agents");
     render(result);
   } catch (e) {
-    // Hard failure invoking the command itself (should be rare).
     setHealth("red");
     el("error-detail").textContent =
       "Internal error invoking the read command: " + String(e);
@@ -219,8 +286,8 @@ async function load() {
 }
 
 el("refresh-btn").addEventListener("click", load);
+el("back-btn").addEventListener("click", showOverview);
 
-// Tray "Refresh" pushes a fresh payload — render it without a second CLI call.
 listen("agents-refreshed", (event) => {
   if (event.payload) render(event.payload);
 });
@@ -228,5 +295,4 @@ listen("agents-refreshed", (event) => {
 // Re-read when the window regains focus (covers tray "Open Bourdon" + reshow).
 window.addEventListener("focus", load);
 
-// Initial load.
 load();
