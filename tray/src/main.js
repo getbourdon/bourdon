@@ -49,19 +49,31 @@ const AGENT_BRANDING = {
   },
 };
 
+// Official brand hex per agent (from simple-icons metadata). Most of these
+// products use a black/near-black mark; Claude is coral.
+const AGENT_HEX = {
+  "claude-code": "#D97757",
+  codex: "#000000",
+  copilot: "#000000",
+  cursor: "#000000",
+  cascade: "#0B100F",
+};
+
 function agentBrand(id) {
   const base = (id || "").replace(/-automations$/, "");
   const b = AGENT_BRANDING[base];
-  if (!b) return { name: id || "agent", d: null };
+  if (!b) return { name: id || "agent", d: null, hex: null };
   return {
     name: id.endsWith("-automations") ? `${b.name} · Automations` : b.name,
     d: b.d,
+    hex: AGENT_HEX[base] || null,
   };
 }
 
-function logoMarkup(d, cls) {
+function logoMarkup(d, cls, hex) {
   if (!d) return `<span class="agent-logo agent-logo--fallback ${cls}"></span>`;
-  return `<svg class="agent-logo ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}" /></svg>`;
+  const style = hex ? ` style="fill:${hex}"` : "";
+  return `<svg class="agent-logo ${cls}" viewBox="0 0 24 24" aria-hidden="true"${style}><path d="${d}" /></svg>`;
 }
 
 // ---- view state -------------------------------------------------------------
@@ -165,7 +177,7 @@ function renderOverview(agents) {
 
     row.innerHTML = `
       <span class="agent-logo-wrap">
-        ${logoMarkup(brand.d, "agent-logo--row")}
+        ${logoMarkup(brand.d, "agent-logo--row", brand.hex)}
         <span class="agent-pulse ${pulseClass(a)}"></span>
       </span>
       <span class="agent-main">
@@ -205,7 +217,7 @@ function renderDetail() {
   if (a.parse_error) {
     body.innerHTML = `
       <div class="detail-head">
-        ${logoMarkup(agentBrand(a.id).d, "agent-logo--detail")}
+        ${logoMarkup(agentBrand(a.id).d, "agent-logo--detail", agentBrand(a.id).hex)}
         <div>
           <div class="detail-id">${esc(agentBrand(a.id).name)}</div>
           <div class="detail-type">manifest error</div>
@@ -256,7 +268,7 @@ function renderDetail() {
   const brand = agentBrand(a.id);
   body.innerHTML = `
     <div class="detail-head">
-      ${logoMarkup(brand.d, "agent-logo--detail")}
+      ${logoMarkup(brand.d, "agent-logo--detail", brand.hex)}
       <div>
         <div class="detail-id">${esc(brand.name)}</div>
         <div class="detail-type">${esc(a.type || "agent")}${
