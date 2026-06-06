@@ -96,6 +96,11 @@ def _default_cascade_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cascade.l5.yaml"
 
 
+def _default_agents_dir() -> Path:
+    """Resolve ~/agent-library/agents at call time (test-monkeypatch friendly)."""
+    return Path.home() / "agent-library" / "agents"
+
+
 def _parse_since(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -489,6 +494,157 @@ def _handle_export_all(args: argparse.Namespace) -> int:
     report = {"exports": results}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
+    return 0
+
+
+_AGENTS_SCHEMA = "bourdon.agents/v1"
+_AGENTS_MAX_RECENT_SESSIONS = 10
+
+
+def _redact_field(value: Any) -> Any:
+    """Run a single emitted string field through the canonical redaction.
+
+    Reuses ``adapters.codex._safe_native_memory_text`` -- the audited
+    credential-redaction + URL-strip + length-cap pipeline -- so the tray
+    never sees raw secrets regardless of session visibility. Non-strings
+    pass through untouched.
+    """
+    if isinstance(value, str):
+        return _safe_native_memory_text(value)
+    return value
+
+
+def _redact_str_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [_safe_native_memory_text(str(item)) for item in values]
+
+
+def _summarize_agent_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Build one redacted summary object from a parsed L5 manifest."""
+    agent = manifest.get("agent") or {}
+    sessions = manifest.get("recent_sessions") or []
+    if not isinstance(sessions, list):
+        sessions = []
+
+    def _session_date(session: Any) -> str:
+        if isinstance(session, dict):
+            return str(session.get("date") or "")
+        return ""
+
+    sorted_sessions = sorted(sessions, key=_session_date, reverse=True)
+    recent_activity = [
+        {
+            "date": _session_date(session),
+            "project_focus": _redact_str_list(
+                session.get("project_focus") if isinstance(session, dict) else None
+            ),
+            "key_actions": _redact_str_list(
+                session.get("key_actions") if isinstance(session, dict) else None
+            ),
+            "visibility": (
+                str(session.get("visibility") or "team")
+                if isinstance(session, dict)
+                else "team"
+            ),
+        }
+        for session in sorted_sessions[:_AGENTS_MAX_RECENT_SESSIONS]
+    ]
+    freshest = _session_date(sorted_sessions[0]) if sorted_sessions else None
+
+    capabilities = manifest.get("capabilities") or []
+
+    return {
+        "id": _redact_field(str(agent.get("id") or "")),
+        "type": _redact_field(str(agent.get("type") or "")) or None,
+        "instance": _redact_field(str(agent.get("instance") or "")) or None,
+        "role_narrative": (
+            _redact_field(str(agent.get("role_narrative")))
+            if agent.get("role_narrative")
+            else None
+        ),
+        "last_updated": manifest.get("last_updated"),
+        "capability_count": (
+            len(capabilities) if isinstance(capabilities, list) else 0
+        ),
+        "session_count": len(sessions),
+        "freshest_session_date": freshest or None,
+        "recent_activity": recent_activity,
+        "parse_error": None,
+    }
+
+
+def _error_agent_entry(agent_id: str, message: str) -> dict[str, Any]:
+    """Partial-failure entry so the tray can represent a broken manifest."""
+    return {
+        "id": agent_id,
+        "type": None,
+        "instance": None,
+        "role_narrative": None,
+        "last_updated": None,
+        "capability_count": None,
+        "session_count": None,
+        "freshest_session_date": None,
+        "recent_activity": [],
+        "parse_error": message,
+    }
+
+
+def _handle_agents(args: argparse.Namespace) -> int:
+    """Enumerate local L5 manifests as a stable, redacted JSON array.
+
+    Read foundation for the Phase 0 desktop tray: keeps redaction and
+    access-level handling server-side so the tray never reads raw YAML.
+    Exits nonzero only if the agents dir itself is missing/unreadable;
+    per-manifest parse errors are represented inline (parse_error) and
+    still exit 0 so the tray can distinguish "no data" from "broken".
+    """
+    agents_dir = (
+        Path(args.agents_dir)
+        if getattr(args, "agents_dir", None)
+        else _default_agents_dir()
+    )
+    if not agents_dir.is_dir():
+        print(
+            f"agents: agent-library directory not found: {agents_dir}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        manifest_paths = sorted(
+            p for p in agents_dir.glob("*.l5.yaml") if p.is_file()
+        )
+    except OSError as exc:
+        print(f"agents: could not read {agents_dir}: {exc}", file=sys.stderr)
+        return 2
+
+    agents: list[dict[str, Any]] = []
+    for path in manifest_paths:
+        stem = path.name[: -len(".l5.yaml")]
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+            agents.append(_error_agent_entry(stem, str(exc)))
+            continue
+        if not isinstance(loaded, dict):
+            agents.append(
+                _error_agent_entry(stem, "manifest is not a YAML mapping")
+            )
+            continue
+        try:
+            agents.append(_summarize_agent_manifest(loaded))
+        except Exception as exc:  # noqa: BLE001 -- partial failure must be representable
+            agents.append(_error_agent_entry(stem, str(exc)))
+
+    agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
+
+    report = {
+        "schema": _AGENTS_SCHEMA,
+        "generated_from": str(agents_dir),
+        "agents": agents,
+    }
+    print(json.dumps(report, indent=2, sort_keys=False))
     return 0
 
 
@@ -1809,6 +1965,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_all_cmd.add_argument("--report-out")
     export_all_cmd.set_defaults(func=_handle_export_all)
+
+    agents_cmd = subparsers.add_parser(
+        "agents",
+        help=(
+            "Enumerate local L5 manifests as a redacted JSON array "
+            "(read foundation for the desktop tray)."
+        ),
+    )
+    agents_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON (the stable tray contract; currently the default).",
+    )
+    agents_cmd.add_argument("--agents-dir", help=argparse.SUPPRESS)
+    agents_cmd.set_defaults(func=_handle_agents)
 
     dogfood_cmd = subparsers.add_parser(
         "dogfood",
