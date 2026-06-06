@@ -1,110 +1,139 @@
 #!/usr/bin/env python3
-"""Generate Bourdon tray + app icon assets.
+"""Generate Bourdon tray + app icon assets from the OFFICIAL brand mark.
 
 Run from this directory:  python generate_icons.py
 
-Produces, in this `icons/` folder:
+The mark is the Bourdon organ-pipe "b" (the pipe-organ *bourdon* / drone motif) —
+reproduced pixel-faithfully in Pillow from the official `brand/favicon.svg`
+geometry (rounded paper card + six rising rose pipes + the bowl of the "b").
+We redraw rather than rasterize the SVG because Windows has no cairo/rsvg
+delegate; the coordinates below are copied exactly from the brand SVG, so this
+is the real mark, not a reinterpretation.
 
-  App icon (Tauri bundle.icon set — used by the installer/binary, NOT swapped):
-    icon.png            512x512  (source PoT for bundlers)
-    32x32.png           32x32
-    128x128.png         128x128
-    128x128@2x.png      256x256
-    icon.ico            multi-size Windows ICO (16/24/32/48/64/256)
+Brand palette (from the Bourdon Design System `colors_and_type.css`):
+  paper  #f7f1e8   card background
+  drone  #c17c74   the mark (dusty rose) — primary accent
+Health is shown as a corner BADGE in brand-native semantic colors, sized large
+enough (~35% of the icon) to read at 16px:
+  fresh    moss   #4f6b50
+  attention ochre #a47b3a
+  error    clay   #a8543a
+  idle/grey ink-faint #8a7d75
 
-  Tray state icons (swapped at runtime by src/lib.rs to reflect health):
-    tray-grey.png       32x32   (0 agents — installed, nothing published)
-    tray-green.png      32x32   (>=1 agent, fresh, no parse errors)
-    tray-yellow.png     32x32   (stale / partial parse errors)
-    tray-red.png        32x32   (CLI failed / all agents broken)
+Produces:
+  Tray state icons (swapped at runtime by src/lib.rs):
+    tray-grey/green/yellow/red.png   32px, mark + health badge
+  App icon set (bundle.icon — no health badge):
+    icon.png 512, 32x32, 128x128, 128x128@2x (256), icon.ico (multi-size)
 
-Design: a NEUTRAL status disc (filled circle, darker rim) — a placeholder, NOT
-the brand logo. Bourdon is named for the pipe-organ "bourdon" (the deep drone
-tone), NOT a bumblebee; the official mark comes from claude.design / the Bourdon
-Design System kit and will replace this disc. The four tray variants differ ONLY
-in fill color so they are unmistakably distinct at 16px:
-  grey   = #9AA0A6  (neutral, benign — NOT red)
-  green  = #2EA043
-  yellow = #D29922
-  red    = #D1242F
-The app icon uses the brand amber (#E3A008); the tray's resting "all good" state
-is unambiguous green.
-
-Why a solid disc rather than detail: at 16x16 (the effective tray render size on
-Windows/macOS) fine detail is mud. A solid color-coded shape reads instantly,
-which is the whole point of the health indicator.
-
-Requires Pillow (PIL). On this machine: Pillow 12.2.0, Python 3.12.
+Requires Pillow. On this machine: Pillow 12.x, Python 3.12.
 """
 from __future__ import annotations
 
-import math
 from PIL import Image, ImageDraw
 
 # --- palette -----------------------------------------------------------------
-BRAND_AMBER = (227, 160, 8, 255)   # #E3A008  app icon fill
-GREY = (154, 160, 166, 255)        # #9AA0A6
-GREEN = (46, 160, 67, 255)         # #2EA043
-YELLOW = (210, 153, 34, 255)       # #D29922
-RED = (209, 36, 47, 255)           # #D1242F
+PAPER = (247, 241, 232, 255)   # #f7f1e8
+ROSE = (193, 124, 116, 255)    # #c17c74  (drone / mark)
+MOSS = (79, 107, 80, 255)      # #4f6b50  fresh
+OCHRE = (164, 123, 58, 255)    # #a47b3a  attention
+CLAY = (168, 84, 58, 255)      # #a8543a  error
+FAINT = (138, 125, 117, 255)   # #8a7d75  idle/grey
+
+# Official favicon.svg geometry (viewBox 0 0 400 400).
+PIPES = [  # (x, y, w, h)
+    (80, 250, 16, 70),
+    (104, 220, 16, 100),
+    (128, 185, 16, 135),
+    (152, 150, 16, 170),
+    (176, 115, 16, 205),
+    (194, 70, 22, 250),
+]
+SLITS = [  # paper mouth-slit on each pipe (x, y, w, h)
+    (83, 306, 10, 3),
+    (107, 306, 10, 3),
+    (131, 306, 10, 3),
+    (155, 306, 10, 3),
+    (179, 306, 10, 3),
+    (199, 306, 14, 3),
+]
 
 
-def _hex_points(cx: float, cy: float, r: float) -> list[tuple[float, float]]:
-    """Flat-top hexagon vertices centered at (cx, cy) with circumradius r."""
+def _cubic(p0, p1, p2, p3, n=26):
+    """Sample a cubic Bézier into n points."""
     pts = []
-    for i in range(6):
-        ang = math.radians(60 * i)  # flat-top
-        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    for i in range(n + 1):
+        t = i / n
+        mt = 1 - t
+        x = mt**3 * p0[0] + 3 * mt**2 * t * p1[0] + 3 * mt * t**2 * p2[0] + t**3 * p3[0]
+        y = mt**3 * p0[1] + 3 * mt**2 * t * p1[1] + 3 * mt * t**2 * p2[1] + t**3 * p3[1]
+        pts.append((x, y))
     return pts
 
 
-def _darken(rgba: tuple[int, int, int, int], f: float = 0.62) -> tuple[int, int, int, int]:
-    r, g, b, a = rgba
-    return (int(r * f), int(g * f), int(b * f), a)
+def _bowl_polygon():
+    """The bowl of the 'b' from favicon.svg, as one closed polygon (400-space)."""
+    pts = _cubic((216, 198), (258, 182), (304, 200), (304, 244))
+    pts += _cubic((304, 244), (304, 286), (262, 314), (216, 318))[1:]
+    pts += [(216, 258)]
+    pts += _cubic((216, 258), (238, 256), (256, 248), (256, 234))[1:]
+    pts += _cubic((256, 234), (256, 220), (240, 218), (216, 230))[1:]
+    return pts
 
 
-def make_disc_icon(size: int, fill: tuple[int, int, int, int]) -> Image.Image:
-    """NEUTRAL PLACEHOLDER — a filled status disc whose color encodes health.
-
-    This is intentionally NOT a brand mark. The official Bourdon logo (the
-    pipe-organ "bourdon" drone motif) comes from claude.design and will replace
-    this; until then a plain disc is an honest status light, not invented brand.
-    Rendered at 4x SSAA then downscaled; darker rim for definition on light trays.
-    """
+def make_icon(size: int, badge: tuple[int, int, int, int] | None) -> Image.Image:
+    """The Bourdon mark at `size` px (4x SSAA). If `badge` is given, overlay a
+    health badge in the bottom-right corner."""
     ss = 4
     big = size * ss
+    s = big / 400.0  # brand-space -> pixel scale
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    cx = cy = big / 2
-    r = big * 0.42
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=_darken(fill, 0.55))  # rim
-    ri = r * 0.80
-    d.ellipse([cx - ri, cy - ri, cx + ri, cy + ri], fill=fill)            # face
+
+    def sc(v):
+        return v * s
+
+    # paper card (rounded rect, rx=56)
+    d.rounded_rectangle([0, 0, big - 1, big - 1], radius=sc(56), fill=PAPER)
+    # pipes + mouth slits
+    for x, y, w, h in PIPES:
+        d.rectangle([sc(x), sc(y), sc(x + w), sc(y + h)], fill=ROSE)
+    # bowl of the b
+    d.polygon([(sc(px), sc(py)) for px, py in _bowl_polygon()], fill=ROSE)
+    for x, y, w, h in SLITS:
+        d.rectangle([sc(x), sc(y), sc(x + w), sc(y + h)], fill=PAPER)
+
+    # health badge — bottom-right, paper ring for separation, large enough to
+    # read at 16px (~35% of the icon).
+    if badge is not None:
+        cx, cy = sc(312), sc(316)
+        ring = sc(78)
+        fill = sc(62)
+        d.ellipse([cx - ring, cy - ring, cx + ring, cy + ring], fill=PAPER)
+        d.ellipse([cx - fill, cy - fill, cx + fill, cy + fill], fill=badge)
+
     return img.resize((size, size), Image.LANCZOS)
 
 
 def main() -> None:
     here = "."
-    # Tray state icons — 32px source (renders crisp down to 16px).
-    for name, color in (
-        ("tray-grey", GREY),
-        ("tray-green", GREEN),
-        ("tray-yellow", YELLOW),
-        ("tray-red", RED),
+    for name, badge in (
+        ("tray-grey", FAINT),
+        ("tray-green", MOSS),
+        ("tray-yellow", OCHRE),
+        ("tray-red", CLAY),
     ):
-        make_disc_icon(32, color).save(f"{here}/{name}.png")
+        make_icon(32, badge).save(f"{here}/{name}.png")
         print(f"wrote {name}.png")
 
-    # App icon set (brand amber). 512 source then downscales.
-    master = make_disc_icon(512, BRAND_AMBER)
+    master = make_icon(512, None)  # app icon: mark only, no health badge
     master.save(f"{here}/icon.png")
     for px in (32, 128, 256):
-        out = master.resize((px, px), Image.LANCZOS)
+        out = make_icon(px, None)
         fname = "128x128@2x.png" if px == 256 else f"{px}x{px}.png"
         out.save(f"{here}/{fname}")
         print(f"wrote {fname}")
 
-    # Windows .ico (multi-resolution) for the bundle + window icon.
     ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)]
     master.save(f"{here}/icon.ico", sizes=ico_sizes)
     print("wrote icon.ico")

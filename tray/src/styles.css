@@ -14,11 +14,12 @@
   --text: #e6edf3;
   --text-muted: #8b949e;
   --text-dim: #6e7681;
-  --amber: #e3a008;
-  --grey: #9aa0a6;
-  --green: #2ea043;
-  --yellow: #d29922;
-  --red: #d1242f;
+  /* brand-native accents (Bourdon Design System): drone-rose + moss/ochre/clay */
+  --amber: #c17c74; /* drone rose — primary accent / links */
+  --grey: #8a7d75; /* ink-faint */
+  --green: #6f9e70; /* moss, lifted for dark-bg legibility */
+  --yellow: #c79a4e; /* ochre, lifted */
+  --red: #c56a4d; /* clay, lifted */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
 }
@@ -77,13 +78,10 @@ a {
   gap: 7px;
   font-weight: 600;
 }
-/* neutral placeholder mark (status disc) — replace with official logo */
+/* official Bourdon mark (inline SVG) */
 .mark {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: var(--amber);
-  display: inline-block;
+  display: inline-flex;
+  line-height: 0;
 }
 .brand-name {
   letter-spacing: 0.2px;
