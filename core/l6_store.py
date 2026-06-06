@@ -789,6 +789,133 @@ class L6Store:
                     agents.add(a)
         return sorted(agents)
 
+    async def export_agents_federated(
+        self,
+        local_name: str | None = None,
+    ) -> dict:
+        """Source-attributed export of local + peer agents for the desktop tray.
+
+        Produces the multi-machine ``bourdon.agents/v1`` envelope: this
+        machine's own agents (``source_kind="local"``) plus each peer's
+        ``export_agents`` output, with every peer agent's ``source`` re-tagged
+        caller-side to the peer's configured name (``source_kind="peer"``).
+        The peer's self-reported ``machine`` / per-agent ``source`` is never
+        trusted -- this is what prevents the bidirectional-federation echo (the
+        Mac federating the PC's agents back to the PC) and source spoofing.
+
+        Agents dedupe by ``(source, id)`` so a same-named agent that exists on
+        two machines (e.g. ``claude-code`` on both) is kept as two distinct
+        rows, one per source.
+
+        A peer that raises, returns ``None``, returns no agents, or is too old
+        to expose ``export_agents`` contributes nothing and is reported with
+        ``reachable: false`` / ``agent_count: 0`` -- never crashes the export.
+        The local source is always ``reachable: true``.
+
+        Parameters
+        ----------
+        local_name : str, optional
+            Machine label for this server's own agents. Defaults to the
+            resolved local name (``BOURDON_LOCAL_NAME`` or hostname).
+
+        Returns
+        -------
+        dict
+            ``{"schema", "agents": [...], "sources": [...]}`` where each source
+            is ``{"name", "kind", "reachable", "agent_count"}``.
+        """
+        from core.agents_export import (
+            AGENTS_SCHEMA,
+            export_local_agents,
+            resolve_local_name,
+        )
+
+        machine = local_name or resolve_local_name()
+        local_export = export_local_agents(self._agents_dir(), machine)
+        local_agents = list(local_export.get("agents") or [])
+
+        merged: dict[tuple[str, str], dict] = {}
+
+        def _ingest(agent: dict, source: str, source_kind: str) -> None:
+            tagged = dict(agent)
+            tagged["source"] = source
+            tagged["source_kind"] = source_kind
+            key = (source, str(tagged.get("id") or ""))
+            merged.setdefault(key, tagged)
+
+        for agent in local_agents:
+            _ingest(agent, machine, "local")
+
+        sources: list[dict] = [
+            {
+                "name": machine,
+                "kind": "local",
+                "reachable": True,
+                "agent_count": len(local_agents),
+            }
+        ]
+
+        if self.peers:
+            import asyncio
+
+            peer_results = await asyncio.gather(
+                *(peer.export_agents() for peer in self.peers),
+                return_exceptions=True,
+            )
+            for peer, payload in zip(self.peers, peer_results, strict=False):
+                if isinstance(payload, Exception):
+                    logger.warning(
+                        "peer %s export_agents raised: %s", peer.name, payload
+                    )
+                    sources.append(
+                        {
+                            "name": peer.name,
+                            "kind": "peer",
+                            "reachable": False,
+                            "agent_count": 0,
+                        }
+                    )
+                    continue
+                peer_agents = (
+                    payload.get("agents")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if not peer_agents:
+                    # None / empty / missing tool (un-upgraded peer) -> unreachable.
+                    sources.append(
+                        {
+                            "name": peer.name,
+                            "kind": "peer",
+                            "reachable": False,
+                            "agent_count": 0,
+                        }
+                    )
+                    continue
+                count = 0
+                for agent in peer_agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    _ingest(agent, peer.name, "peer")
+                    count += 1
+                sources.append(
+                    {
+                        "name": peer.name,
+                        "kind": "peer",
+                        "reachable": True,
+                        "agent_count": count,
+                    }
+                )
+
+        agents = list(merged.values())
+        agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
+
+        return {
+            "schema": AGENTS_SCHEMA,
+            "agents": agents,
+            "sources": sources,
+        }
+
     async def find_entity_federated(
         self,
         name: str,

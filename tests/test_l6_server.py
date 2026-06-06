@@ -207,3 +207,47 @@ async def test_get_deeper_context_for_prompt_returns_l2_text(monkeypatch):
 
     assert report["context"] == "Deeper context for Bourdon."
     assert report["context_chars"] == len("Deeper context for Bourdon.")
+
+
+# -- export_agents tool (LOCAL-ONLY, no peer fan-out) --------------------------
+
+
+class _ExplodingPeer:
+    """Peer whose every async method raises -- proves export_agents never calls it."""
+
+    name = "mac"
+
+    async def export_agents(self):  # pragma: no cover - must never be awaited
+        raise AssertionError("export_agents tool must NOT fan out to peers")
+
+
+def test_export_agents_tool_is_local_only(library, monkeypatch):
+    _require_fastmcp_or_skip()
+    import asyncio
+
+    monkeypatch.setenv("BOURDON_LOCAL_NAME", "pc")
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-01T12:00:00+00:00",
+            "capabilities": ["mcp"],
+            "recent_sessions": [],
+        },
+    )
+    store = L6Store(library["path"], peers=[_ExplodingPeer()])
+    server = server_module.create_l6_server(store)
+
+    async def _call():
+        tool = await server.get_tool("export_agents")
+        return tool.fn()
+
+    report = asyncio.run(_call())
+    assert report["schema"] == "bourdon.agents/v1"
+    assert report["machine"] == "pc"
+    # Only THIS machine's agents -- no peer fan-out, no "sources" key.
+    assert [a["id"] for a in report["agents"]] == ["claude-code"]
+    assert report["agents"][0]["source"] == "pc"
+    assert report["agents"][0]["source_kind"] == "local"
+    assert "sources" not in report
