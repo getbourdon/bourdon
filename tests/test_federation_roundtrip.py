@@ -5,12 +5,12 @@ Scope
 -----
 These tests assert the contract that ties Bourdon together:
 
-    each adapter's export_l5() output is queryable through L6Store with
+    each participant's export_l5() output is queryable through L6Store with
     correct attribution, visibility filtering, and cross-agent aggregation.
 
-Per-adapter unit suites verify only the adapter -> L5 leg. The L6Store
+Per-participant unit suites verify only the participant -> L5 leg. The L6Store
 unit suite verifies only the store -> query leg with synthetic manifests.
-Nothing else covers the seam where they meet. If an adapter silently
+Nothing else covers the seam where they meet. If a participant silently
 changes the shape of its L5 in a way the store does not expect, the unit
 tests stay green and the federation product silently breaks.
 
@@ -22,9 +22,9 @@ live outside the test suite.
 Coverage as of v0.4.1
 ---------------------
 Wired end-to-end:
-    copilot   (convention-file adapter, plants memory.md)
-    cascade   (convention-file adapter, plants memory.md)
-    cursor    (SQLite adapter, seeds state.vscdb directly)
+    copilot   (convention-file participant, plants memory.md)
+    cascade   (convention-file participant, plants memory.md)
+    cursor    (SQLite participant, seeds state.vscdb directly)
 
 Stubbed (TODO -- fixture plumbing only, the assertions below already cover them):
     claude-code  (needs Path.home() monkeypatch over a 3-source tree)
@@ -40,21 +40,21 @@ from pathlib import Path
 
 import pytest
 
-from adapters.base import L5Manifest
-from adapters.cascade import CascadeAdapter
-from adapters.claude_code import ClaudeCodeAdapter
-from adapters.codex import CodexAdapter
-from adapters.copilot import CopilotAdapter
-from adapters.cursor import CursorAdapter
+from participants.base import L5Manifest
+from participants.cascade import CascadeParticipant
+from participants.claude_code import ClaudeCodeParticipant
+from participants.codex import CodexParticipant
+from participants.copilot import CopilotParticipant
+from participants.cursor import CursorParticipant
 from core.l5_io import write_l5_dict
 from core.l6_store import L6Store
 
 # ---------------------------------------------------------------------------
-# Marker facts -- a distinct, easily-grepped entity per adapter.
+# Marker facts -- a distinct, easily-grepped entity per participant.
 #
-# The round-trip test plants each adapter with a marker entity whose name is
-# unique to that adapter (so we can prove the L5 reached L6 and is attributed
-# to the right agent), plus a shared entity ("Bourdon") that every adapter
+# The round-trip test plants each participant with a marker entity whose name is
+# unique to that participant (so we can prove the L5 reached L6 and is attributed
+# to the right agent), plus a shared entity ("Bourdon") that every participant
 # knows about (so we can prove cross-agent aggregation works).
 # ---------------------------------------------------------------------------
 
@@ -62,7 +62,7 @@ SHARED_ENTITY = "Bourdon"
 SHARED_SUMMARY_PREFIX = "Cross-agent memory federation, as seen by"
 
 # Federation queries default to access_level="public", but three of five
-# adapters (codex always, copilot + cursor by default policy) tag entities
+# participants (codex always, copilot + cursor by default policy) tag entities
 # as TEAM. A realistic single-user federation queries at "team" level so its
 # own agents can see each other's content. We use that here. See the
 # "team-default visibility" product finding in
@@ -80,13 +80,13 @@ UNIQUE_MARKERS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Per-adapter fixture planters.
+# Per-participant fixture planters.
 #
-# Each helper accepts `tmp_path` and returns a configured adapter whose
+# Each helper accepts `tmp_path` and returns a configured participant whose
 # `export_l5()` will produce a manifest containing:
 #   - one entity named UNIQUE_MARKERS[agent_id] (attribution proof)
 #   - one entity named SHARED_ENTITY            (federation proof)
-# Plus whatever incidental rows the adapter naturally produces from the
+# Plus whatever incidental rows the participant naturally produces from the
 # fixture (sessions, project entities, etc.) -- those are not asserted on,
 # only the marker shape is contract.
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ UNIQUE_MARKERS: dict[str, str] = {
 # of tmp_path. The federation fixture passes both args to every planter so
 # the signature is uniform.
 
-def _plant_copilot(tmp_path: Path, monkeypatch) -> CopilotAdapter:
+def _plant_copilot(tmp_path: Path, monkeypatch) -> CopilotParticipant:
     d = tmp_path / ".copilot-bourdon"
     d.mkdir()
     (d / "memory.md").write_text(
@@ -121,10 +121,10 @@ def _plant_copilot(tmp_path: Path, monkeypatch) -> CopilotAdapter:
         "Freeform body intentionally left short.\n",
         encoding="utf-8",
     )
-    return CopilotAdapter(copilot_dir=d)
+    return CopilotParticipant(copilot_dir=d)
 
 
-def _plant_cascade(tmp_path: Path, monkeypatch) -> CascadeAdapter:
+def _plant_cascade(tmp_path: Path, monkeypatch) -> CascadeParticipant:
     d = tmp_path / ".cascade-bourdon"
     d.mkdir()
     (d / "memory.md").write_text(
@@ -147,17 +147,17 @@ def _plant_cascade(tmp_path: Path, monkeypatch) -> CascadeAdapter:
         "Freeform body intentionally left short.\n",
         encoding="utf-8",
     )
-    return CascadeAdapter(cascade_dir=d)
+    return CascadeParticipant(cascade_dir=d)
 
 
-def _plant_cursor(tmp_path: Path, monkeypatch) -> CursorAdapter:
+def _plant_cursor(tmp_path: Path, monkeypatch) -> CursorParticipant:
     cursor_dir = tmp_path / "Cursor"
     (cursor_dir / "User" / "globalStorage").mkdir(parents=True)
     workspace = cursor_dir / "User" / "workspaceStorage" / "fedtest"
     workspace.mkdir(parents=True)
     db = workspace / "state.vscdb"
 
-    # Cursor's adapter infers project entities from composer workspacePaths.
+    # Cursor's participant infers project entities from composer workspacePaths.
     # We use the marker names as the project names so they appear in
     # manifest.known_entities verbatim.
     records = [
@@ -192,12 +192,12 @@ def _plant_cursor(tmp_path: Path, monkeypatch) -> CursorAdapter:
         conn.commit()
     finally:
         conn.close()
-    return CursorAdapter(cursor_dir=cursor_dir)
+    return CursorParticipant(cursor_dir=cursor_dir)
 
 
-def _plant_claude_code(tmp_path: Path, monkeypatch) -> ClaudeCodeAdapter:
+def _plant_claude_code(tmp_path: Path, monkeypatch) -> ClaudeCodeParticipant:
     """
-    Claude Code adapter reads from three sources rooted at $HOME:
+    Claude Code participant reads from three sources rooted at $HOME:
     ~/claude-brain (PROJECTS/<name>/OVERVIEW.md becomes entities),
     ~/.claude/projects/.../memory/*.md (auto-memory), and
     ~/claude-memory/memory.jsonl (knowledge graph).
@@ -226,12 +226,12 @@ def _plant_claude_code(tmp_path: Path, monkeypatch) -> ClaudeCodeAdapter:
             encoding="utf-8",
         )
 
-    return ClaudeCodeAdapter()
+    return ClaudeCodeParticipant()
 
 
-def _plant_codex(tmp_path: Path, monkeypatch) -> CodexAdapter:
+def _plant_codex(tmp_path: Path, monkeypatch) -> CodexParticipant:
     """
-    Codex adapter reads ~/.codex/session_index.jsonl; each entry's
+    Codex participant reads ~/.codex/session_index.jsonl; each entry's
     thread_name becomes a known-entity. Index-only is sufficient for
     entity extraction -- rollout files only affect session bodies.
     """
@@ -261,7 +261,7 @@ def _plant_codex(tmp_path: Path, monkeypatch) -> CodexAdapter:
                 + "\n"
             )
 
-    return CodexAdapter()
+    return CodexParticipant()
 
 
 PLANTERS: dict[str, Callable[[Path, pytest.MonkeyPatch], object]] = {
@@ -276,15 +276,15 @@ PLANTERS: dict[str, Callable[[Path, pytest.MonkeyPatch], object]] = {
 # ---------------------------------------------------------------------------
 # Shared fixture: a populated library + L6Store.
 #
-# Plants every wired adapter, exports each to <tmp>/agent-library/agents/,
-# loads the store. Stubbed adapters are silently skipped at planter level
+# Plants every wired participant, exports each to <tmp>/agent-library/agents/,
+# loads the store. Stubbed participants are silently skipped at planter level
 # via pytest.skip -- their fixtures will reappear once the planter lands.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def federation(tmp_path, monkeypatch):
-    """Return (L6Store, library_path, planted_agents) with all wired adapters loaded.
+    """Return (L6Store, library_path, planted_agents) with all wired participants loaded.
 
     Note on Path.home() handling: claude-code and codex planters monkey-patch
     Path.home() into their own slice of tmp_path. The patch is sequential
@@ -292,7 +292,7 @@ def federation(tmp_path, monkeypatch):
     That's fine because:
       (a) export_l5() runs *immediately* after each planter, before the next
           planter overwrites home,
-      (b) convention-file adapters (copilot, cascade) and cursor accept an
+      (b) convention-file participants (copilot, cascade) and cursor accept an
           explicit dir parameter and never read Path.home() themselves, and
       (c) tests query the L6Store -- which already has all manifests on disk
           -- so the post-fixture state of Path.home() is irrelevant.
@@ -306,11 +306,11 @@ def federation(tmp_path, monkeypatch):
         agent_tmp = tmp_path / agent_id
         agent_tmp.mkdir()
         try:
-            adapter = planter(agent_tmp, monkeypatch)
+            participant = planter(agent_tmp, monkeypatch)
         except pytest.skip.Exception:
-            # Stubbed planter -- skip this adapter, don't fail the whole test.
+            # Stubbed planter -- skip this participant, don't fail the whole test.
             continue
-        manifest: L5Manifest = adapter.export_l5()
+        manifest: L5Manifest = participant.export_l5()
         write_l5_dict(manifest.to_dict(), agents_dir / f"{agent_id}.l5.yaml")
         planted.append(agent_id)
 
@@ -324,13 +324,13 @@ def federation(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_all_planted_adapters_visible_in_store(federation):
-    """Sanity: every adapter that exported an L5 shows up in list_agents()."""
+def test_all_planted_participants_visible_in_store(federation):
+    """Sanity: every participant that exported an L5 shows up in list_agents()."""
     store, _library, planted = federation
     assert set(store.list_agents()) >= set(planted)
     # Federation test is only meaningful with >=2 agents.
     assert len(planted) >= 2, (
-        f"Only {len(planted)} adapters wired -- need at least two to test "
+        f"Only {len(planted)} participants wired -- need at least two to test "
         f"federation. Wire the stubbed planters in this file."
     )
 
@@ -375,9 +375,9 @@ def test_shared_entity_aggregates_across_agents(federation):
     )
     match = matches[0]
 
-    # Every planted adapter publishes SHARED_ENTITY (each planter is responsible
-    # for emitting it in whatever shape that adapter naturally produces).
-    # If any adapter's entity extraction silently stops surfacing the marker,
+    # Every planted participant publishes SHARED_ENTITY (each planter is responsible
+    # for emitting it in whatever shape that participant naturally produces).
+    # If any participant's entity extraction silently stops surfacing the marker,
     # this assertion catches it.
     expected_publishers = set(planted)
     assert set(match.agents) == expected_publishers, (
@@ -385,7 +385,7 @@ def test_shared_entity_aggregates_across_agents(federation):
         f"got {set(match.agents)}"
     )
 
-    # Each convention-file adapter should contribute a distinct summary.
+    # Each convention-file participant should contribute a distinct summary.
     for convention_agent in {"copilot", "cascade"} & expected_publishers:
         summary = match.summaries.get(convention_agent, "")
         assert SHARED_SUMMARY_PREFIX in summary, (
@@ -399,8 +399,8 @@ def test_recognition_manifest_collapses_shared_entity_to_one_row(federation):
     build_recognition_manifest() is the surface recognition-runtime
     consumes. After Finding #1's resolution (dedupe by name only with
     types as a list), a shared entity collapses to exactly one row even
-    when adapters disagree on its type (Codex emits 'topic', Cursor
-    infers 'project', convention-file adapters emit whatever the user
+    when participants disagree on its type (Codex emits 'topic', Cursor
+    infers 'project', convention-file participants emit whatever the user
     wrote in memory.md).
 
     The strong contract: one row per name, all source_agents merged,
@@ -415,7 +415,7 @@ def test_recognition_manifest_collapses_shared_entity_to_one_row(federation):
         if e.get("name", "").strip().lower() == SHARED_ENTITY.lower()
     ]
     assert len(shared_rows) == 1, (
-        f"shared entity should dedupe to exactly one row across adapters "
+        f"shared entity should dedupe to exactly one row across participants "
         f"(Finding #1 resolution); got {len(shared_rows)}: "
         f"{[(r['name'], r.get('types')) for r in shared_rows]}"
     )
@@ -424,7 +424,7 @@ def test_recognition_manifest_collapses_shared_entity_to_one_row(federation):
         f"row's source_agents should cover every planted publisher: "
         f"expected {set(planted)}, got {set(row.get('source_agents') or [])}"
     )
-    # `types` should list every distinct type any adapter emitted.
+    # `types` should list every distinct type any participant emitted.
     assert isinstance(row.get("types"), list)
     assert len(row["types"]) >= 1
     # `type` (singular) still present for backward-compat with

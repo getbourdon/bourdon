@@ -1,6 +1,6 @@
 """
 Bourdon inference backend protocol -- the contract every local-inference
-adapter must implement.
+participant must implement.
 
 This module is deliberately backend-neutral. It exists because the
 recognition-first runtime (``core/recognition_runtime.py``) needs to drive
@@ -11,9 +11,9 @@ Ollama and ``transformers`` cannot. Hard-coding llama.cpp into the runtime
 would make every other backend a second-class citizen forever, even after
 they catch up. This Protocol prevents that.
 
-Adapters live under ``adapters/`` and implement this contract. Callers
+Participants live under ``participants/`` and implement this contract. Callers
 (``recognition_runtime``, future ``interrupt_runtime``, user orchestrators)
-import only from here -- never from ``adapters/``. The capability surface
+import only from here -- never from ``participants/``. The capability surface
 is checked at registration time, so a backend that does not support a
 required primitive fails loudly with a structured error -- it never
 silently degrades.
@@ -22,7 +22,7 @@ Example registration::
 
     from core.inference_protocol import register_backend
 
-    backend = MyAdapter()  # implements InferenceBackend
+    backend = MyParticipant()  # implements InferenceBackend
     register_backend(backend, required_capabilities={"streaming", "cancel"})
 
 See ``spec/RELATED_WORK.md`` for how this contract relates to other
@@ -148,8 +148,8 @@ class BackendCapabilities:
 class InferenceBackend(Protocol):
     """Backend-neutral inference contract.
 
-    Implementors live under ``adapters/`` and provide the four methods
-    below. This is a structural Protocol -- adapters do not need to
+    Implementors live under ``participants/`` and provide the four methods
+    below. This is a structural Protocol -- participants do not need to
     inherit from anything; matching method signatures is sufficient.
 
     All async methods must be cancellable via standard asyncio
@@ -228,7 +228,7 @@ def register_backend(
 
         runtime = recognition_first(
             ...,
-            inference=register_backend(MyAdapter(), required_capabilities={"streaming"}),
+            inference=register_backend(MyParticipant(), required_capabilities={"streaming"}),
         )
 
     The default required set is ``{"streaming"}`` -- the minimum any

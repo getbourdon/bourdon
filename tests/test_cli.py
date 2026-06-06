@@ -1067,7 +1067,7 @@ def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
 
 
 def _build_fake_claude_code_home(fake_home: Path) -> None:
-    """Set up a minimal ~/claude-brain/ tree the Claude Code adapter can parse."""
+    """Set up a minimal ~/claude-brain/ tree the Claude Code participant can parse."""
     brain = fake_home / "claude-brain"
     projects = brain / "PROJECTS" / "ILTT"
     projects.mkdir(parents=True)

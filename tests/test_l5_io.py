@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import yaml
 
-from adapters.base import SPEC_VERSION, AgentInfo, Entity, L5Manifest, Visibility
+from participants.base import SPEC_VERSION, AgentInfo, Entity, L5Manifest, Visibility
 from core.l5_io import read_l5_dict, write_l5, write_l5_dict
 
 # -- write_l5_dict -------------------------------------------------------------

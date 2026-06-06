@@ -11,7 +11,7 @@ retrieve and how naturally it behaves in the first moments of interaction.
 ### Context
 - Objective: test whether the Codex-specific Bourdon integration produces
   recognition-first behavior, not just better retrieval.
-- Systems: Codex adapter, `bourdon codex eval --live`, live `~/.codex`
+- Systems: Codex participant, `bourdon codex eval --live`, live `~/.codex`
   ingestion, explicit `claude-brain` overlay ingest.
 - Constraint: the first response needs to feel like human recognition while
   deeper context hydrates in parallel.
@@ -132,7 +132,7 @@ retrieve and how naturally it behaves in the first moments of interaction.
   the product architecture, not just implementation polish.
 
 ### Next Session Bootstrap
-- Start with the recognition-first runtime path, not more adapter ingestion work.
+- Start with the recognition-first runtime path, not more participant ingestion work.
 - Use OMNIVour as the canonical test case for the first-response behavior.
 - Use the current working defaults:
   L0 target around 500 tokens, cap around 2000;
@@ -196,7 +196,7 @@ retrieve and how naturally it behaves in the first moments of interaction.
 ### Actions
 - Owner: Claude (today)
   Action: ship `agent.role_narrative` schema + dataclass + populations in
-  Claude Code and Codex adapters + tests.
+  Claude Code and Codex participants + tests.
   Status: complete (commit 798836f)
 - Owner: Claude (today)
   Action: populate role_narrative in Clyde native publisher.
@@ -253,7 +253,7 @@ retrieve and how naturally it behaves in the first moments of interaction.
 
 #### #2 -- Temporal validity windows (Zep Graphiti-inspired)
 - Commit `4a26533`. Entity gains optional `valid_from` / `valid_to`
-  ISO 8601 date fields. Claude Code adapter populates `valid_to` for
+  ISO 8601 date fields. Claude Code participant populates `valid_to` for
   archived/canceled entities, preferring an ISO date in the
   `## Status` section over the file's mtime fallback.
 - Federation queries can now answer "what was active in Q1 2026?"

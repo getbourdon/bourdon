@@ -1,4 +1,4 @@
-"""Tests for adapters.codex -- Codex CLI external adapter."""
+"""Tests for participants.codex -- Codex CLI external participant."""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from adapters import codex as codex_module
-from adapters.base import (
+from participants import codex as codex_module
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
-    BourdonAdapter,
+    ParticipantDiscoveryError,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
     Visibility,
 )
-from adapters.codex import (
-    CodexAdapter,
+from participants.codex import (
+    CodexParticipant,
     _collect_session_records,
     _extract_project_candidates,
     _find_rollout_file,
@@ -42,7 +42,7 @@ from adapters.codex import (
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    """Redirect Path.home() at a tmp dir so adapter resolvers don't see the
+    """Redirect Path.home() at a tmp dir so participant resolvers don't see the
     host machine's real ~/.codex/."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -305,11 +305,11 @@ def test_is_junk_entity_drops_empty_name():
 # -- Protocol + constants ------------------------------------------------------
 
 
-def test_adapter_satisfies_protocol(isolated_home):
-    assert isinstance(CodexAdapter(), BourdonAdapter)
+def test_participant_satisfies_protocol(isolated_home):
+    assert isinstance(CodexParticipant(), BourdonParticipant)
 
 
-def test_adapter_constants():
+def test_participant_constants():
     assert codex_module.AGENT_ID == "codex"
     assert codex_module.AGENT_TYPE == "code-assistant"
     # role_narrative differentiates Codex from sibling code-assistants
@@ -345,9 +345,9 @@ def test_resolve_codex_home_prefers_codex_home_env(isolated_home, monkeypatch):
 
 
 def test_discover_raises_when_no_codex_home(isolated_home):
-    adapter = CodexAdapter()
-    with pytest.raises(AdapterDiscoveryError):
-        adapter.discover()
+    participant = CodexParticipant()
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.discover()
 
 
 def test_discover_ok_with_index_and_sessions(isolated_home):
@@ -355,8 +355,8 @@ def test_discover_ok_with_index_and_sessions(isolated_home):
     isolated_home["add_index_entry"](
         codex_home, "id1", "Thread 1", "2026-04-15T12:00:00Z"
     )
-    adapter = CodexAdapter()
-    store = adapter.discover()
+    participant = CodexParticipant()
+    store = participant.discover()
     assert store.metadata["sources"]["codex_home"] is not None
     assert store.metadata["sources"]["session_index"] is not None
     assert store.metadata["sources"]["sessions_dir"] is not None
@@ -367,30 +367,30 @@ def test_health_ok_with_all_present(isolated_home):
     isolated_home["add_index_entry"](
         codex_home, "id1", "Thread", "2026-04-15T12:00:00Z"
     )
-    assert CodexAdapter().health_check().status == "ok"
+    assert CodexParticipant().health_check().status == "ok"
 
 
 def test_health_degraded_missing_session_index(isolated_home):
     isolated_home["create_codex_home"]()
     # No session_index.jsonl written
-    health = CodexAdapter().health_check()
+    health = CodexParticipant().health_check()
     assert health.status == "degraded"
     assert "session_index" in health.reason
     assert "state_db_records" not in health.reason
 
 
 def test_health_blocked_missing_codex_home(isolated_home):
-    health = CodexAdapter().health_check()
+    health = CodexParticipant().health_check()
     assert health.status == "blocked"
 
 
 def test_health_check_never_raises(isolated_home):
-    assert isinstance(CodexAdapter().health_check(), HealthStatus)
+    assert isinstance(CodexParticipant().health_check(), HealthStatus)
 
 
 def test_health_blocked_proposes_install(isolated_home):
     """No ~/.codex/: proposed_fix points the user at the install + seed steps."""
-    health = CodexAdapter().health_check()
+    health = CodexParticipant().health_check()
     assert health.status == "blocked"
     assert health.proposed_fix is not None
     assert "sync-native --from-library" in health.proposed_fix
@@ -399,7 +399,7 @@ def test_health_blocked_proposes_install(isolated_home):
 def test_health_degraded_proposes_sync_native(isolated_home):
     """Empty Codex history but ~/.codex/ exists: propose --from-library seed."""
     isolated_home["create_codex_home"]()
-    health = CodexAdapter().health_check()
+    health = CodexParticipant().health_check()
     assert health.status == "degraded"
     assert health.proposed_fix is not None
     assert "sync-native --from-library" in health.proposed_fix
@@ -731,7 +731,7 @@ def test_inspect_codex_fallback_recall_reports_session_rollout_coverage(isolated
                     "name": "apply_patch",
                     "arguments": (
                         "*** Begin Patch\n"
-                        "*** Update File: adapters/codex.py\n"
+                        "*** Update File: participants/codex.py\n"
                         "@@\n"
                         "-old\n"
                         "+new\n"
@@ -977,7 +977,7 @@ def test_export_l5_promotes_recovered_fallback_concepts_to_topic_entities(
         ],
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     topics = {
         entity.name: entity
         for entity in manifest.known_entities
@@ -1043,7 +1043,7 @@ def test_export_sessions_resolves_cwd_from_rollout(isolated_home):
     isolated_home["add_rollout"](
         codex_home, (2026, 4, 15), "sess1", "/workspace/project", "2026-04-15T12:00:00Z"
     )
-    sessions = CodexAdapter().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
+    sessions = CodexParticipant().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
     assert len(sessions) == 1
     assert sessions[0].date == "2026-04-15"
     assert sessions[0].cwd == "/workspace/project"
@@ -1233,7 +1233,7 @@ def test_export_sessions_since_filter(isolated_home):
     isolated_home["add_index_entry"](codex_home, "new", "New", "2026-04-15T00:00:00Z")
     isolated_home["add_index_entry"](codex_home, "old", "Old", "2026-04-01T00:00:00Z")
     cutoff = datetime(2026, 4, 10, tzinfo=timezone.utc)
-    sessions = CodexAdapter().export_sessions(since=cutoff)
+    sessions = CodexParticipant().export_sessions(since=cutoff)
     assert [s.date for s in sessions] == ["2026-04-15"]
 
 
@@ -1243,7 +1243,7 @@ def test_export_sessions_with_missing_rollout_still_emits_session(isolated_home)
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](codex_home, "orphan", "No rollout", "2026-04-15T00:00:00Z")
     # No add_rollout call
-    sessions = CodexAdapter().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
+    sessions = CodexParticipant().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
     assert len(sessions) == 1
     assert sessions[0].cwd is None
 
@@ -1301,7 +1301,7 @@ def test_export_sessions_collects_files_touched_from_structured_apply_patch_only
         ],
     )
 
-    sessions = CodexAdapter().export_sessions(
+    sessions = CodexParticipant().export_sessions(
         since=datetime(2026, 4, 1, tzinfo=timezone.utc)
     )
     assert len(sessions) == 1
@@ -1311,10 +1311,10 @@ def test_export_sessions_collects_files_touched_from_structured_apply_patch_only
 def test_export_sessions_empty_when_no_codex_home(isolated_home):
     """Missing ~/.codex/ should not crash -- just return empty."""
     # Don't call create_codex_home
-    with pytest.raises(AdapterDiscoveryError):
-        CodexAdapter().discover()
+    with pytest.raises(ParticipantDiscoveryError):
+        CodexParticipant().discover()
     # But export_sessions directly bypasses discover
-    sessions = CodexAdapter().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
+    sessions = CodexParticipant().export_sessions(since=datetime(2026, 4, 1, tzinfo=timezone.utc))
     assert sessions == []
 
 
@@ -1329,7 +1329,7 @@ def test_export_l5_produces_valid_manifest(isolated_home):
     isolated_home["add_index_entry"](
         codex_home, "s2", "Debug auth", "2026-04-14T00:00:00Z"
     )
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     assert isinstance(manifest, L5Manifest)
     assert manifest.agent.id == "codex"
     assert manifest.spec_version == SPEC_VERSION
@@ -1368,7 +1368,7 @@ def test_export_l5_uses_sqlite_thread_entities_for_current_recognition(
     for summary_file in (memories / "rollout_summaries").glob("*.md"):
         summary_file.unlink()
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     topics = {
         entity.name: entity
         for entity in manifest.known_entities
@@ -1425,7 +1425,7 @@ def test_export_l5_bounds_memory_session_actions(isolated_home):
         rollout_path=str(rollout),
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     session = manifest.recent_sessions[0]
     topic_names = {entity.name for entity in manifest.known_entities}
 
@@ -1446,7 +1446,7 @@ def test_export_l5_bounds_long_thread_titles(isolated_home):
         "2026-04-15T00:00:00Z",
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     session = manifest.recent_sessions[0]
     topics = [entity for entity in manifest.known_entities if entity.type == "topic"]
 
@@ -1460,7 +1460,7 @@ def test_export_l5_dedupes_thread_names_case_insensitive(isolated_home):
     codex_home = isolated_home["create_codex_home"]()
     isolated_home["add_index_entry"](codex_home, "a", "Set up CI", "2026-04-15T00:00:00Z")
     isolated_home["add_index_entry"](codex_home, "b", "set up ci", "2026-04-14T00:00:00Z")
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     assert len(manifest.known_entities) == 1
     # Keeps the most-recent last_touched
     assert manifest.known_entities[0].last_touched == "2026-04-15"
@@ -1473,15 +1473,15 @@ def test_export_l5_schema_round_trip(isolated_home):
     isolated_home["add_index_entry"](
         codex_home, "s1", "A thread", "2026-04-15T00:00:00Z"
     )
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     schema_path = Path(__file__).parent.parent / "spec" / "L5_schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     jsonschema.validate(instance=manifest.to_dict(), schema=schema)
 
 
 def test_export_l5_raises_when_nothing_discovered(isolated_home):
-    with pytest.raises(AdapterDiscoveryError):
-        CodexAdapter().export_l5()
+    with pytest.raises(ParticipantDiscoveryError):
+        CodexParticipant().export_l5()
 
 
 def test_export_l5_extracts_projects_topics_preferences_and_team_visibility(
@@ -1580,7 +1580,7 @@ Preference signals:
         "# Coolculator notes\n\nTrack the handoff carefully.\n",
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
 
     projects = [e for e in manifest.known_entities if e.type == "project"]
     topics = [e for e in manifest.known_entities if e.type == "topic"]
@@ -1621,7 +1621,7 @@ def test_export_l5_canonicalizes_preference_entities(isolated_home):
         ),
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
     preferences = {
         entity.name: entity
         for entity in manifest.known_entities
@@ -1682,7 +1682,7 @@ keywords: Coolculator, Fastify, Mac handoff
 """,
     )
 
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
 
     projects = [entity.name for entity in manifest.known_entities if entity.type == "project"]
     assert "Coolculator" in projects
@@ -1694,7 +1694,7 @@ keywords: Coolculator, Fastify, Mac handoff
 
 
 def test_codex_l5_can_round_trip_through_l6_store(isolated_home, tmp_path):
-    """Adapter output writes cleanly to disk and the L6 store picks it up."""
+    """Participant output writes cleanly to disk and the L6 store picks it up."""
     from core.l5_io import write_l5
     from core.l6_store import L6Store
 
@@ -1702,7 +1702,7 @@ def test_codex_l5_can_round_trip_through_l6_store(isolated_home, tmp_path):
     isolated_home["add_index_entry"](
         codex_home, "s1", "Federation test", "2026-04-15T00:00:00Z"
     )
-    manifest = CodexAdapter().export_l5()
+    manifest = CodexParticipant().export_l5()
 
     library = tmp_path / "agent-library"
     target = library / "agents" / f"{manifest.agent.id}.l5.yaml"

@@ -17,23 +17,23 @@ from typing import Any
 
 import yaml
 
-from adapters.base import AdapterDiscoveryError
-from adapters.cascade import (
-    CascadeAdapter,
+from participants.base import ParticipantDiscoveryError
+from participants.cascade import (
+    CascadeParticipant,
     _inspect_cascade_memory,
     default_cascade_memory_path,
 )
-from adapters.cascade import (
+from participants.cascade import (
     init_memory_file as cascade_init_memory_file,
 )
-from adapters.claude_code import ClaudeCodeAdapter
-from adapters.claude_code_automations import (
-    ClaudeCodeAutomationsAdapter,
+from participants.claude_code import ClaudeCodeParticipant
+from participants.claude_code_automations import (
+    ClaudeCodeAutomationsParticipant,
     default_claude_code_automations_dir,
     merge_automation_tree,
 )
-from adapters.codex import (
-    CodexAdapter,
+from participants.codex import (
+    CodexParticipant,
     _build_codex_native_memory_payload,
     _default_codex_memory_md_path,
     _default_codex_native_memory_path,
@@ -42,14 +42,14 @@ from adapters.codex import (
     _merge_bourdon_memory_md_section,
     _safe_native_memory_text,
 )
-from adapters.codex_automations import CodexAutomationsAdapter
-from adapters.copilot import (
-    CopilotAdapter,
+from participants.codex_automations import CodexAutomationsParticipant
+from participants.copilot import (
+    CopilotParticipant,
     _inspect_copilot_memory,
     default_copilot_memory_path,
     init_memory_file,
 )
-from adapters.cursor import CursorAdapter
+from participants.cursor import CursorParticipant
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -125,25 +125,25 @@ def _write_text_atomic(text: str, target: Path) -> None:
     tmp_path.replace(target)
 
 
-def _build_adapter(args: argparse.Namespace) -> CodexAdapter:
+def _build_participant(args: argparse.Namespace) -> CodexParticipant:
     codex_home = Path(args.codex_home) if getattr(args, "codex_home", None) else None
     codex_brain = (
         Path(args.codex_brain) if getattr(args, "codex_brain", None) else None
     )
-    return CodexAdapter(codex_home=codex_home, codex_brain=codex_brain)
+    return CodexParticipant(codex_home=codex_home, codex_brain=codex_brain)
 
 
 def _manifest_for_access(
-    adapter: CodexAdapter, since: datetime | None, access_level: str
+    participant: CodexParticipant, since: datetime | None, access_level: str
 ) -> dict[str, Any]:
-    manifest = adapter.export_l5(since=since)
+    manifest = participant.export_l5(since=since)
     return filter_manifest_for_access(manifest, access_level=access_level)
 
 
 def _handle_codex_export(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     data = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -194,8 +194,8 @@ def _handle_deeper_context(args: argparse.Namespace) -> int:
 
 def _handle_cursor_export(args: argparse.Namespace) -> int:
     cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_cursor_l5_path()
     write_l5_dict(data, out_path)
@@ -206,8 +206,8 @@ def _handle_cursor_export(args: argparse.Namespace) -> int:
 
 def _handle_copilot_export(args: argparse.Namespace) -> int:
     copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
-    adapter = CopilotAdapter(copilot_dir=copilot_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CopilotParticipant(copilot_dir=copilot_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_copilot_l5_path()
     write_l5_dict(data, out_path)
@@ -222,8 +222,8 @@ def _handle_codex_automations_export(args: argparse.Namespace) -> int:
         if getattr(args, "automations_dir", None)
         else None
     )
-    adapter = CodexAutomationsAdapter(automations_dir=automations_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CodexAutomationsParticipant(automations_dir=automations_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_codex_automations_l5_path()
     write_l5_dict(data, out_path)
@@ -238,15 +238,15 @@ def _handle_codex_automations_doctor(args: argparse.Namespace) -> int:
         if getattr(args, "automations_dir", None)
         else None
     )
-    adapter = CodexAutomationsAdapter(automations_dir=automations_dir)
-    health = adapter.health_check()
+    participant = CodexAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
     report = {
         "health": {
             "status": health.status,
             "reason": health.reason,
             "details": health.details,
         },
-        "automations_dir": adapter.native_path,
+        "automations_dir": participant.native_path,
     }
     if health.proposed_fix:
         report["health"]["proposed_fix"] = health.proposed_fix
@@ -257,8 +257,8 @@ def _handle_codex_automations_doctor(args: argparse.Namespace) -> int:
 
 def _handle_copilot_doctor(args: argparse.Namespace) -> int:
     copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
-    adapter = CopilotAdapter(copilot_dir=copilot_dir)
-    health = adapter.health_check()
+    participant = CopilotParticipant(copilot_dir=copilot_dir)
+    health = participant.health_check()
     mem_report = _inspect_copilot_memory(copilot_dir)
     report = {
         "health": {
@@ -292,8 +292,8 @@ def _handle_copilot_init(args: argparse.Namespace) -> int:
 
 def _handle_cascade_export(args: argparse.Namespace) -> int:
     cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
-    adapter = CascadeAdapter(cascade_dir=cascade_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CascadeParticipant(cascade_dir=cascade_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_cascade_l5_path()
     write_l5_dict(data, out_path)
@@ -304,9 +304,9 @@ def _handle_cascade_export(args: argparse.Namespace) -> int:
 
 def _handle_cascade_doctor(args: argparse.Namespace) -> int:
     cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
-    adapter = CascadeAdapter(cascade_dir=cascade_dir)
-    health = adapter.health_check()
-    mem_report = _inspect_cascade_memory(cascade_dir or adapter._dir)
+    participant = CascadeParticipant(cascade_dir=cascade_dir)
+    health = participant.health_check()
+    mem_report = _inspect_cascade_memory(cascade_dir or participant._dir)
     report = {
         "health": {
             "status": health.status,
@@ -336,24 +336,24 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 # -- Top-level doctor / export-all --------------------------------------------
 
-_ADAPTER_REGISTRY: list[tuple[str, type]] = [
-    ("claude-code", ClaudeCodeAdapter),
-    ("claude-code-automations", ClaudeCodeAutomationsAdapter),
-    ("codex", CodexAdapter),
-    ("codex-automations", CodexAutomationsAdapter),
-    ("cursor", CursorAdapter),
-    ("copilot", CopilotAdapter),
-    ("cascade", CascadeAdapter),
+_PARTICIPANT_REGISTRY: list[tuple[str, type]] = [
+    ("claude-code", ClaudeCodeParticipant),
+    ("claude-code-automations", ClaudeCodeAutomationsParticipant),
+    ("codex", CodexParticipant),
+    ("codex-automations", CodexAutomationsParticipant),
+    ("cursor", CursorParticipant),
+    ("copilot", CopilotParticipant),
+    ("cascade", CascadeParticipant),
 ]
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    """Run health checks across all known adapters."""
+    """Run health checks across all known participants."""
     results: list[dict[str, Any]] = []
-    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+    for agent_id, participant_cls in _PARTICIPANT_REGISTRY:
         try:
-            adapter = adapter_cls()
-            health = adapter.health_check()
+            participant = participant_cls()
+            health = participant.health_check()
             row: dict[str, Any] = {
                 "agent": agent_id,
                 "status": health.status,
@@ -370,13 +370,13 @@ def _handle_doctor(args: argparse.Namespace) -> int:
                 "reason": str(exc),
                 "details": {},
                 "proposed_fix": (
-                    "Adapter raised during health_check. Run "
+                    "Participant raised during health_check. Run "
                     "`bourdon doctor --report-out doctor.yaml` and file an issue with "
                     "the traceback."
                 ),
             })
 
-    report = {"adapters": results}
+    report = {"participants": results}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
     return 0
@@ -456,15 +456,15 @@ def _handle_serve(args: argparse.Namespace) -> int:
 
 
 def _handle_export_all(args: argparse.Namespace) -> int:
-    """Export L5 manifests for all healthy adapters."""
+    """Export L5 manifests for all healthy participants."""
     access_level = args.access_level
     since = _parse_since(getattr(args, "since", None))
     results: list[dict[str, Any]] = []
 
-    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+    for agent_id, participant_cls in _PARTICIPANT_REGISTRY:
         try:
-            adapter = adapter_cls()
-            manifest = adapter.export_l5(since=since)
+            participant = participant_cls()
+            manifest = participant.export_l5(since=since)
             data = filter_manifest_for_access(manifest, access_level=access_level)
             out_path = (
                 Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
@@ -577,8 +577,8 @@ def _handle_sync_pull(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_build_context(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
-    manifest = _manifest_for_access(adapter, since=_parse_since(args.since), access_level="team")
+    participant = _build_participant(args)
+    manifest = _manifest_for_access(participant, since=_parse_since(args.since), access_level="team")
     report = write_codex_context_artifacts(manifest, Path(args.out_dir), access_level="team")
     _print_yaml(report)
     return 0
@@ -631,9 +631,9 @@ def _inspect_l5_quality(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_codex_doctor(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     try:
-        manifest = adapter.export_l5().to_dict()
+        manifest = participant.export_l5().to_dict()
         l5_quality = _inspect_l5_quality(manifest)
     except Exception as exc:  # noqa: BLE001
         l5_quality = {
@@ -641,11 +641,11 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
             "reason": str(exc),
         }
     report = {
-        "source_coverage": _source_coverage(adapter),
-        "codex_state_db": _inspect_codex_state_db(adapter._codex_home),
+        "source_coverage": _source_coverage(participant),
+        "codex_state_db": _inspect_codex_state_db(participant._codex_home),
         "fallback_recall": _inspect_codex_fallback_recall(
-            adapter._codex_home,
-            adapter._codex_brain,
+            participant._codex_home,
+            participant._codex_brain,
         ),
         "l5_quality": l5_quality,
     }
@@ -655,13 +655,13 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_sync_native(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     library_path = (
         Path(args.library_path) if getattr(args, "library_path", None) else None
     )
     payload = _build_codex_native_memory_payload(
-        adapter._codex_home,
-        adapter._codex_brain,
+        participant._codex_home,
+        participant._codex_brain,
         max_sessions=args.max_sessions,
         from_library=bool(getattr(args, "from_library", False)),
         include_local=bool(getattr(args, "include_local", False)),
@@ -673,9 +673,9 @@ def _handle_codex_sync_native(args: argparse.Namespace) -> int:
         Path(args.out)
         if getattr(args, "out", None)
         else (
-            _default_codex_memory_md_path(adapter._codex_home)
+            _default_codex_memory_md_path(participant._codex_home)
             if args.memory_md
-            else _default_codex_native_memory_path(adapter._codex_home)
+            else _default_codex_native_memory_path(participant._codex_home)
         )
     )
     mode = "write" if args.write else "dry-run"
@@ -726,9 +726,9 @@ def _build_recognition_prompt_context(result: Any) -> str:
 
 
 def _handle_codex_recognize(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -767,15 +767,15 @@ def _handle_codex_recognize(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     access_level = args.access_level
     since = _parse_since(args.since)
     mode = "write" if args.write else "dry-run"
     strategy = getattr(args, "strategy", "legacy")
 
     native_payload = _build_codex_native_memory_payload(
-        adapter._codex_home,
-        adapter._codex_brain,
+        participant._codex_home,
+        participant._codex_brain,
         max_sessions=args.max_sessions,
     )
     native_target_kind = "memory_md" if args.memory_md else "bourdon_file"
@@ -783,9 +783,9 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
         Path(args.native_out)
         if getattr(args, "native_out", None)
         else (
-            _default_codex_memory_md_path(adapter._codex_home)
+            _default_codex_memory_md_path(participant._codex_home)
             if args.memory_md
-            else _default_codex_native_memory_path(adapter._codex_home)
+            else _default_codex_native_memory_path(participant._codex_home)
         )
     )
     native_text = str(native_payload["text"])
@@ -798,7 +798,7 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
         native_text = _merge_bourdon_memory_md_section(existing_text, native_text)
 
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=since,
         access_level=access_level,
     )
@@ -844,7 +844,7 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
             compiled = compile_codex_turn(
                 args.prompt,
                 cwd=getattr(args, "cwd", None),
-                codex_home=adapter._codex_home,
+                codex_home=participant._codex_home,
                 library_path=getattr(args, "library_path", None),
                 access_level=access_level,
                 max_items=getattr(args, "max_items", 6),
@@ -913,19 +913,19 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fixture_adapter() -> CodexAdapter:
+def _fixture_participant() -> CodexParticipant:
     tmpdir = tempfile.TemporaryDirectory()
     sources = create_sample_codex_sources(Path(tmpdir.name) / "home")
-    adapter = CodexAdapter(
+    participant = CodexParticipant(
         codex_home=sources["codex_home"],
         codex_brain=sources["codex_brain"],
     )
-    adapter._fixture_tmpdir = tmpdir  # type: ignore[attr-defined]
-    return adapter
+    participant._fixture_tmpdir = tmpdir  # type: ignore[attr-defined]
+    return participant
 
 
-def _source_coverage(adapter: CodexAdapter) -> dict[str, Any]:
-    health = adapter.health_check()
+def _source_coverage(participant: CodexParticipant) -> dict[str, Any]:
+    health = participant.health_check()
     details = health.details or {}
     return {
         "status": health.status,
@@ -1092,9 +1092,9 @@ def _turn_compiler_eval(
 
 
 def _handle_codex_eval(args: argparse.Namespace) -> int:
-    adapter = _fixture_adapter() if args.fixtures else _build_adapter(args)
+    participant = _fixture_participant() if args.fixtures else _build_participant(args)
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -1123,7 +1123,7 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
     report = {
         "mode": "fixtures" if args.fixtures else "live",
         "access_level": args.access_level,
-        "source_coverage": _source_coverage(adapter),
+        "source_coverage": _source_coverage(participant),
         "session_count": len(sessions),
         "entity_counts": {
             "total": len(entities),
@@ -1154,7 +1154,7 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
                 compiler_library = Path(args.library_path)
             report["turn_compiler"] = _turn_compiler_eval(
                 prompts=CANONICAL_RECOGNITION_PROMPTS,
-                codex_home=adapter._codex_home,
+                codex_home=participant._codex_home,
                 library_path=compiler_library,
                 cwd=getattr(args, "cwd", None),
                 access_level=args.access_level,
@@ -1186,18 +1186,18 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
     to stderr.
     """
     try:
-        adapter = ClaudeCodeAdapter()
+        participant = ClaudeCodeParticipant()
     except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
         if args.verbose:
             print(
-                f"bourdon claude-code export: adapter init failed: {exc}",
+                f"bourdon claude-code export: participant init failed: {exc}",
                 file=sys.stderr,
             )
         return 0
 
     try:
-        manifest = adapter.export_l5(since=_parse_since(args.since))
-    except AdapterDiscoveryError as exc:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
         if args.verbose:
             print(
                 "bourdon claude-code export: no Claude Code memory sources "
@@ -1254,18 +1254,18 @@ def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
         else None
     )
     try:
-        adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
+        participant = ClaudeCodeAutomationsParticipant(automations_dir=automations_dir)
     except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
         if getattr(args, "verbose", False):
             print(
-                f"bourdon claude-code-automations export: adapter init failed: {exc}",
+                f"bourdon claude-code-automations export: participant init failed: {exc}",
                 file=sys.stderr,
             )
         return 0
 
     try:
-        manifest = adapter.export_l5(since=_parse_since(args.since))
-    except AdapterDiscoveryError as exc:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
         if getattr(args, "verbose", False):
             print(
                 "bourdon claude-code-automations export: no automations "
@@ -1579,15 +1579,15 @@ def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
         if getattr(args, "automations_dir", None)
         else None
     )
-    adapter = ClaudeCodeAutomationsAdapter(automations_dir=automations_dir)
-    health = adapter.health_check()
+    participant = ClaudeCodeAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
     report = {
         "health": {
             "status": health.status,
             "reason": health.reason,
             "details": health.details,
         },
-        "automations_dir": adapter.native_path,
+        "automations_dir": participant.native_path,
     }
     if health.proposed_fix:
         report["health"]["proposed_fix"] = health.proposed_fix
@@ -1786,14 +1786,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- top-level doctor / export-all --------------------------------------
     doctor_cmd = subparsers.add_parser(
         "doctor",
-        help="Run health checks across all installed adapters",
+        help="Run health checks across all installed participants",
     )
     doctor_cmd.add_argument("--report-out")
     doctor_cmd.set_defaults(func=_handle_doctor)
 
     export_all_cmd = subparsers.add_parser(
         "export-all",
-        help="Export L5 manifests for all healthy adapters",
+        help="Export L5 manifests for all healthy participants",
     )
     export_all_cmd.add_argument("--since")
     export_all_cmd.add_argument(
@@ -1814,7 +1814,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "dogfood",
         help=(
             "End-to-end federation smoke test: plant marker in convention-file "
-            "adapters, export all, query L6, verify round-trip"
+            "participants, export all, query L6, verify round-trip"
         ),
     )
     dogfood_cmd.add_argument(

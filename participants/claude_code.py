@@ -1,5 +1,5 @@
 """
-Claude Code adapter -- reads claude-brain + auto-memory + MCP knowledge graph.
+Claude Code participant -- reads claude-brain + auto-memory + MCP knowledge graph.
 
 v0.0.3:
 - discover() -- locates the three memory sources
@@ -31,11 +31,11 @@ from typing import TYPE_CHECKING, Iterable, Optional
 
 import yaml
 
-from adapters.base import (
-    AdapterDiscoveryError,
+from participants.base import (
+    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
-    BourdonAdapter,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
@@ -182,7 +182,7 @@ def _parse_frontmatter(
     a closing ``\\n---\\n``, returns (frontmatter_dict, body). Otherwise returns
     ({}, text) with no error.
 
-    On YAML parse failure logs at WARNING with adapter id, source path (if
+    On YAML parse failure logs at WARNING with participant id, source path (if
     provided), and a truncated exception detail so the offending file is
     discoverable. See issue #79.
     """
@@ -199,7 +199,7 @@ def _parse_frontmatter(
         where = f" in {source}" if source is not None else ""
         detail = str(exc).replace("\n", " ")[:200]
         logger.warning(
-            "ClaudeCodeAdapter: malformed YAML frontmatter%s; "
+            "ClaudeCodeParticipant: malformed YAML frontmatter%s; "
             "treating as no-frontmatter (%s)",
             where,
             detail,
@@ -580,14 +580,14 @@ def _dedupe_entities(source_lists: Iterable[list[Entity]]) -> list[Entity]:
     return sorted(by_key.values(), key=lambda e: e.name.lower())
 
 
-# -- Adapter class -------------------------------------------------------------
+# -- Participant class -------------------------------------------------------------
 
 
-class ClaudeCodeAdapter:
+class ClaudeCodeParticipant:
     """
-    External adapter for Anthropic's Claude Code CLI.
+    External participant for Anthropic's Claude Code CLI.
 
-    Reads three memory sources (all optional; adapter degrades gracefully):
+    Reads three memory sources (all optional; participant degrades gracefully):
         1. claude-brain/                   -- git-synced markdown records
         2. ~/.claude/projects/*/memory/    -- per-machine auto-memory
         3. ~/claude-memory/memory.jsonl    -- MCP knowledge graph JSONL
@@ -612,7 +612,7 @@ class ClaudeCodeAdapter:
             "knowledge_graph": str(self._knowledge_graph_path) if self._knowledge_graph_path else None,
         }
         if not any(sources.values()):
-            raise AdapterDiscoveryError(
+            raise ParticipantDiscoveryError(
                 "No Claude Code memory sources found. "
                 "Expected one of: ~/claude-brain/, ~/.claude/projects/*/memory/, "
                 "~/claude-memory/memory.jsonl."
@@ -732,4 +732,4 @@ class ClaudeCodeAdapter:
 # at lint time only. Does not instantiate at import time, so the CLI stays
 # importable even when HOME points at an unreadable directory.
 if TYPE_CHECKING:
-    _: BourdonAdapter = ClaudeCodeAdapter()
+    _: BourdonParticipant = ClaudeCodeParticipant()

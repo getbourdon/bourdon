@@ -1,11 +1,11 @@
 """
-Bourdon adapter for Cascade (Windsurf).
+Bourdon participant for Cascade (Windsurf).
 
 Cascade is an agentic AI coding assistant embedded in the Windsurf IDE. It has
 persistent memory, multi-step planning, tool use (file editing, terminal, search),
 and workspace-level context awareness.
 
-This adapter uses a **convention-based** approach: Cascade maintains a structured
+This participant uses a **convention-based** approach: Cascade maintains a structured
 memory file at ``~/.cascade-bourdon/memory.md`` with YAML front-matter containing
 entities and sessions. This file can be updated by Cascade at session end, giving
 it persistent cross-session entity awareness via the L6 federation library.
@@ -15,7 +15,7 @@ Architecture choice
 Cascade's internal state is not directly accessible on the filesystem in a
 standardized format (similar to Copilot). The convention-file approach means
 Cascade owns its memory projection explicitly -- it writes what it knows, and
-the adapter normalizes that into L5.
+the participant normalizes that into L5.
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ from typing import Any, Optional
 
 import yaml
 
-from adapters.base import (
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
+    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
-    BourdonAdapter,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
@@ -42,7 +42,7 @@ from adapters.base import (
     VisibilityPolicy,
     filter_for_federation,
 )
-from adapters.codex import (
+from participants.codex import (
     _NATIVE_MEMORY_SENSITIVE_PATTERNS,
     _safe_native_memory_text,
 )
@@ -93,7 +93,7 @@ def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, An
     Extract YAML front-matter from a ``---`` fenced block.
 
     Returns an empty dict if the text has no valid front-matter. On YAML
-    parse failure logs at WARNING with adapter id, source path (if provided),
+    parse failure logs at WARNING with participant id, source path (if provided),
     and a truncated exception detail so the offending file is discoverable.
     See issue #79.
     """
@@ -111,7 +111,7 @@ def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, An
         where = f" in {source}" if source is not None else ""
         detail = str(exc).replace("\n", " ")[:200]
         logger.warning(
-            "CascadeAdapter: malformed YAML frontmatter%s; "
+            "CascadeParticipant: malformed YAML frontmatter%s; "
             "treating as no-frontmatter (%s)",
             where,
             detail,
@@ -273,12 +273,12 @@ def init_memory_file(
     return memory_path
 
 
-# -- Adapter -------------------------------------------------------------------
+# -- Participant -------------------------------------------------------------------
 
 
-class CascadeAdapter(BourdonAdapter):
+class CascadeParticipant(BourdonParticipant):
     """
-    Convention-based Bourdon adapter for Cascade (Windsurf).
+    Convention-based Bourdon participant for Cascade (Windsurf).
 
     Reads structured memory from ``~/.cascade-bourdon/memory.md`` and
     normalizes it into an L5 manifest for federation.
@@ -314,16 +314,16 @@ class CascadeAdapter(BourdonAdapter):
             return {}
         return _parse_frontmatter(text, source=path)
 
-    # -- BourdonAdapter protocol -----------------------------------------------
+    # -- BourdonParticipant protocol -----------------------------------------------
 
     def discover(self) -> AgentStore:
         """
         Verify the convention directory exists and report its state.
 
-        Raises AdapterDiscoveryError if the directory is missing.
+        Raises ParticipantDiscoveryError if the directory is missing.
         """
         if not self._dir.is_dir():
-            raise AdapterDiscoveryError(
+            raise ParticipantDiscoveryError(
                 f"Cascade-Bourdon directory not found: {self._dir}"
             )
         memory_present = self._memory_path().is_file()

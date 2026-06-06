@@ -2,12 +2,12 @@
 
 **Date:** 2026-05-11  
 **Agent:** Cascade (Windsurf)  
-**Adapter version:** v0.5.0  
+**Participant version:** v0.5.0  
 **Branch:** `cascade/redaction-reuse-and-security`
 
 ## What this proves
 
-Cascade built its own Bourdon adapter (`adapters/cascade.py`), then installed and used that adapter on itself to federate its own memory into the L6 cross-agent store. This is the first case of an agent **authoring** its adapter and then immediately **using** it in the same project lifecycle.
+Cascade built its own Bourdon participant (`participants/cascade.py`), then installed and used that participant on itself to federate its own memory into the L6 cross-agent store. This is the first case of an agent **authoring** its participant and then immediately **using** it in the same project lifecycle.
 
 ## Steps executed
 
@@ -29,8 +29,8 @@ $ python -c "from importlib.metadata import entry_points; ..."
 
 Wrote real entities and sessions from Cascade's actual work:
 
-- **7 entities:** Bourdon (project), CascadeAdapter (module), L5Manifest (concept), L6Store (module), Convention-file pattern (concept), Credential redaction (concept), Ryan Radman (person, private-tagged)
-- **3 sessions:** adapter creation (May 10), redaction fix (May 11 AM), self-installation (May 11 PM)
+- **7 entities:** Bourdon (project), CascadeParticipant (module), L5Manifest (concept), L6Store (module), Convention-file pattern (concept), Credential redaction (concept), Ryan Radman (person, private-tagged)
+- **3 sessions:** participant creation (May 10), redaction fix (May 11 AM), self-installation (May 11 PM)
 
 ### 4. Run health check
 
@@ -63,8 +63,8 @@ Key validation points:
 from core.l6_store import L6Store
 store = L6Store(Path.home() / 'agent-library')
 
-store.find_entity('CascadeAdapter', access_level='team')
-# → EntityMatch(name='CascadeAdapter', agents=['cascade'], types=['module'])
+store.find_entity('CascadeParticipant', access_level='team')
+# → EntityMatch(name='CascadeParticipant', agents=['cascade'], types=['module'])
 
 store.find_entity('Bourdon', access_level='team')
 # → EntityMatch(name='Bourdon', agents=['cascade', 'codex'])
@@ -72,11 +72,11 @@ store.find_entity('Bourdon', access_level='team')
 
 **Cross-agent aggregation confirmed:** The "Bourdon" entity is known by both Cascade and Codex. L6 correctly merges entity knowledge across agents.
 
-### 7. Unified doctor (all adapters)
+### 7. Unified doctor (all participants)
 
 ```
 $ bourdon doctor
-adapters:
+participants:
 - agent: claude-code  → status: degraded (2/3 sources)
 - agent: codex        → status: ok
 - agent: cursor       → status: ok
@@ -99,10 +99,10 @@ Five agents reporting. Four healthy, one degraded (Claude Code missing knowledge
 
 ## What this means for the project
 
-1. **The adapter works end-to-end.** Not just in synthetic test fixtures — on real memory content, with real federation queries returning real results.
+1. **The participant works end-to-end.** Not just in synthetic test fixtures — on real memory content, with real federation queries returning real results.
 2. **The convention-file pattern is validated.** An agent with no accessible on-disk state can still participate fully in L6 federation by maintaining a structured memory file.
 3. **Cross-agent entity overlap works.** "Bourdon" is independently recognized by both Cascade and Codex, and L6 correctly aggregates them into a single EntityMatch with both agents listed.
-4. **The unified `bourdon doctor` command works.** All five adapters report their health from a single invocation.
+4. **The unified `bourdon doctor` command works.** All five participants report their health from a single invocation.
 
 ## Files involved
 
@@ -110,6 +110,6 @@ Five agents reporting. Four healthy, one degraded (Claude Code missing knowledge
 |------|------|
 | `~/.cascade-bourdon/memory.md` | Convention memory file (Cascade maintains this) |
 | `~/agent-library/agents/cascade.l5.yaml` | Exported L5 manifest (federation input) |
-| `adapters/cascade.py` | Adapter implementation |
+| `participants/cascade.py` | Participant implementation |
 | `cli/main.py` | CLI handler (`bourdon cascade {export,doctor,init}`) |
-| `tests/test_cascade_adapter.py` | 51 tests, all green |
+| `tests/test_cascade_participant.py` | 51 tests, all green |

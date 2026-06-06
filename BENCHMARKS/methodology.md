@@ -67,7 +67,7 @@ its latency, and is recorded as such — we want the misses on the public matrix
 
 A cell is one (agent, model, reasoning) combination on one (machine, account_state).
 
-1. Confirm `~/agent-library/` is populated by the host's actual adapters
+1. Confirm `~/agent-library/` is populated by the host's actual participants
    (`bourdon doctor`). No synthetic L5 manifests.
 2. Confirm `bourdon --version` matches the value being recorded.
 3. Run the cell **3 times**, fresh conversation each time. The matrix row

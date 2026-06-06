@@ -152,7 +152,7 @@ def test_dogfood_passes_when_both_convention_files_round_trip(isolated_home):
     report = run_dogfood()
     assert report.passed is True
 
-    by_id = {r.agent_id: r for r in report.adapters}
+    by_id = {r.agent_id: r for r in report.participants}
     for plantable_id in PLANTABLE_AGENTS:
         rep = by_id[plantable_id]
         assert rep.plantable is True
@@ -166,11 +166,11 @@ def test_dogfood_passes_when_both_convention_files_round_trip(isolated_home):
         assert "BourdonDogfood-" not in text
 
 
-def test_dogfood_fails_when_no_plantable_adapter_available(isolated_home):
+def test_dogfood_fails_when_no_plantable_participant_available(isolated_home):
     """No convention files exist -- the run can't prove anything, so it fails."""
     report = run_dogfood()
     assert report.passed is False
-    by_id = {r.agent_id: r for r in report.adapters}
+    by_id = {r.agent_id: r for r in report.participants}
     for plantable_id in PLANTABLE_AGENTS:
         rep = by_id[plantable_id]
         assert rep.planted is False
@@ -199,7 +199,7 @@ def test_dogfood_keep_marker_leaves_trail(isolated_home):
 
 
 def test_dogfood_partial_success_is_still_failure(isolated_home):
-    """If one plantable adapter is missing its convention file, the run fails
+    """If one plantable participant is missing its convention file, the run fails
     even when the other plants successfully -- partial-success masquerading
     as success is exactly the kind of silent breakage Layer 2 exists to catch."""
     # Only set up Copilot, leave Cascade absent.
@@ -210,15 +210,15 @@ def test_dogfood_partial_success_is_still_failure(isolated_home):
     )
 
     report = run_dogfood()
-    by_id = {r.agent_id: r for r in report.adapters}
+    by_id = {r.agent_id: r for r in report.participants}
     assert by_id["copilot"].surfaced is True
     assert by_id["cascade"].planted is False
     # Aggregate result is failure because cascade didn't round-trip.
-    # (Note: current run_dogfood returns passed=True if *any* planted adapter
+    # (Note: current run_dogfood returns passed=True if *any* planted participant
     # surfaces -- if that contract changes to require ALL plantables, this
     # assertion flips. See cli/dogfood.run_dogfood for the active rule.)
     # We assert what's currently shipped: passed is True only if every
-    # planted adapter surfaced AND at least one adapter was planted.
+    # planted participant surfaced AND at least one participant was planted.
     # cascade.planted=False does not flip passed -- it's reported in notes.
     # If the product wants "all plantables required" semantics, that's a
     # one-line change in run_dogfood + flipping this assertion.

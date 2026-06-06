@@ -1101,7 +1101,7 @@ def test_find_entity_and_recognition_manifest_agree_on_row_count(library):
 
 def test_resolve_access_level_env_var_flips_default(monkeypatch):
     """BOURDON_DEFAULT_ACCESS_LEVEL=team flips the default for single-user
-    federations so adapters that tag entities `team` aren't silently
+    federations so participants that tag entities `team` aren't silently
     filtered from naive queries."""
     from core.l6_store import _resolve_access_level
 

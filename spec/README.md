@@ -14,7 +14,7 @@ Design documents for the Bourdon memory protocol.
 
 - **`SPEC_v0.1.md`** — Formal L5 manifest schema + L6 MCP protocol specification (normative, versioned)
 - **`L5_schema.json`** — JSON Schema for L5 manifest validation
-- **`ADAPTER_CONTRACT.md`** — Adapter interface specification (Python protocol + semantics)
+- **`PARTICIPANT_CONTRACT.md`** — Participant interface specification (Python protocol + semantics)
 - **`PERMISSION_MODEL.md`** — Visibility levels, tag-driven defaults, PII handling guidance
 
 ## Spec Versioning

@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from adapters.codex import (
+from participants.codex import (
     _inspect_codex_state_db,
     _resolve_codex_home,
     _safe_native_memory_text,

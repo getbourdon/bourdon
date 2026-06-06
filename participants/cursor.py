@@ -1,29 +1,29 @@
 """
-Bourdon external adapter for Cursor (the AI-first IDE).
+Bourdon external participant for Cursor (the AI-first IDE).
 
 Cursor stores its workspace state in SQLite databases at platform-specific
 paths (`~/.config/Cursor/`, `~/Library/Application Support/Cursor/`,
-`%APPDATA%/Cursor/`). This adapter discovers those stores, copies them
+`%APPDATA%/Cursor/`). This participant discovers those stores, copies them
 read-only to a tmp file, parses the ``ItemTable`` key-value rows, and
 emits a normalized Bourdon L5 manifest.
 
-The SQLite extraction logic is in ``adapters/_cursor_sqlite.py``. This
-module wraps it in the ``BourdonAdapter`` Protocol from
-``adapters/base.py`` and applies the project's standard visibility policy.
+The SQLite extraction logic is in ``participants/_cursor_sqlite.py``. This
+module wraps it in the ``BourdonParticipant`` Protocol from
+``participants/base.py`` and applies the project's standard visibility policy.
 
-Origin: this adapter graduates from the v0 implementation in
+Origin: this participant graduates from the v0 implementation in
 ``ryandavispro1-cmyk/cursor-spot`` (``cursor_bourdon`` package). The
 SQLite extraction is preserved verbatim; the L5 emission is rewritten
-on top of Bourdon's normative schema (``adapters/base.L5Manifest``,
+on top of Bourdon's normative schema (``participants/base.L5Manifest``,
 ``Entity``, ``Session``) for federation consistency.
 
 Usage::
 
-    from adapters.cursor import CursorAdapter
+    from participants.cursor import CursorParticipant
 
-    adapter = CursorAdapter()
-    store = adapter.discover()
-    manifest = adapter.export_l5()
+    participant = CursorParticipant()
+    store = participant.discover()
+    manifest = participant.export_l5()
 """
 
 from __future__ import annotations
@@ -32,13 +32,13 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from adapters._cursor_sqlite import (
+from participants._cursor_sqlite import (
     CursorSQLiteMemories,
     default_cursor_dir,
     extract_cursor_memories,
 )
-from adapters.base import (
-    AdapterDiscoveryError,
+from participants.base import (
+    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
     Entity,
@@ -69,12 +69,12 @@ DEFAULT_POLICY = VisibilityPolicy(
 _SPEC_VERSION = "0.1"
 
 
-class CursorAdapter:
-    """External adapter for Cursor's SQLite workspace state.
+class CursorParticipant:
+    """External participant for Cursor's SQLite workspace state.
 
-    Implements the :class:`~adapters.base.BourdonAdapter` Protocol
+    Implements the :class:`~participants.base.BourdonParticipant` Protocol
     structurally. Defensive throughout: missing data dir → raise
-    ``AdapterDiscoveryError`` from ``discover()``; everything else
+    ``ParticipantDiscoveryError`` from ``discover()``; everything else
     degrades to empty results rather than raising, matching the
     contract spec.
     """
@@ -96,15 +96,15 @@ class CursorAdapter:
     def discover(self) -> AgentStore:
         """Locate the Cursor data directory and return metadata.
 
-        Raises ``AdapterDiscoveryError`` if no Cursor data directory is
+        Raises ``ParticipantDiscoveryError`` if no Cursor data directory is
         present at the default platform path or the explicitly-passed
         ``cursor_dir``.
         """
         path = self._cursor_dir or default_cursor_dir()
         if path is None or not path.is_dir():
-            raise AdapterDiscoveryError(
+            raise ParticipantDiscoveryError(
                 f"Cursor data directory not found at {path!r}. "
-                "Pass an explicit ``cursor_dir`` to CursorAdapter() if Cursor "
+                "Pass an explicit ``cursor_dir`` to CursorParticipant() if Cursor "
                 "stores its state somewhere non-standard."
             )
         return AgentStore(
@@ -187,7 +187,7 @@ class CursorAdapter:
         try:
             memories = self._extract()
         except Exception as exc:  # noqa: BLE001 -- health check must not raise
-            logger.warning("CursorAdapter health_check extraction failed: %s", exc)
+            logger.warning("CursorParticipant health_check extraction failed: %s", exc)
             return HealthStatus(
                 status="degraded",
                 reason="Cursor data directory present but extraction failed.",

@@ -1,5 +1,5 @@
 """
-Bourdon llama.cpp inference backend -- adapter for ``llama-server``.
+Bourdon llama.cpp inference backend -- participant for ``llama-server``.
 
 Implements the ``InferenceBackend`` Protocol from
 ``core/inference_protocol.py`` against llama.cpp's ``llama-server`` HTTP
@@ -17,7 +17,7 @@ Optional install:
 
 Usage:
 
-    from adapters.llama_cpp_backend import LlamaCppBackend
+    from participants.llama_cpp_backend import LlamaCppBackend
     from core.inference_protocol import register_backend
 
     backend = register_backend(
@@ -36,7 +36,7 @@ the ``examples/server`` README of upstream ``llama.cpp`` (the
 ``data: {json}\\n\\n`` envelope, with each event carrying ``content``,
 ``stop``, and ``id_slot`` fields). Endpoints used: ``POST /completion``,
 ``GET /slots``. Older builds without ``/slots`` (pre-flag) report no
-slots; the adapter degrades to a synthetic single-slot view in that
+slots; the participant degrades to a synthetic single-slot view in that
 case rather than failing.
 """
 
@@ -91,7 +91,7 @@ class LlamaCppBackend:
     client
         Optional pre-constructed ``httpx.AsyncClient``. Useful for tests
         (inject a ``MockTransport``) or for sharing a client across
-        multiple adapters. When provided, ``base_url`` and
+        multiple participants. When provided, ``base_url`` and
         ``request_timeout`` are ignored.
     """
 
@@ -265,7 +265,7 @@ class LlamaCppBackend:
     # -- Lifecycle -------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client when the adapter owns it.
+        """Close the underlying HTTP client when the participant owns it.
 
         Safe to call multiple times. No-op when the client was injected
         externally (the caller owns lifecycle in that case).
@@ -284,7 +284,7 @@ class LlamaCppBackend:
         prefix_hash: Optional[str] = None
         if isinstance(prompt, str) and prompt:
             # llama-server does not expose a content-hash; truncate as a stable
-            # routing key. Adapters with real hashes can override this.
+            # routing key. Participants with real hashes can override this.
             prefix_hash = prompt[:64]
         return Slot(
             id=int(raw.get("id", 0)),

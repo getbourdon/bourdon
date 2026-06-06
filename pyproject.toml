@@ -61,7 +61,7 @@ ultrarag = [
 server = [
     "fastmcp>=2.0",
 ]
-# llama.cpp inference backend (adapters/llama_cpp_backend.py).
+# llama.cpp inference backend (participants/llama_cpp_backend.py).
 # Optional because not every Bourdon user runs local inference; the
 # Protocol surface in core/inference_protocol.py has no httpx dependency.
 llama-cpp = [
@@ -84,18 +84,18 @@ federation = [
     "uvicorn>=0.30",
 ]
 
-# Entry points for adapter plugins.
-# Third-party adapters register here via their own pyproject.toml.
-[project.entry-points."bourdon.adapters"]
-claude-code = "adapters.claude_code:ClaudeCodeAdapter"
-claude-code-automations = "adapters.claude_code_automations:ClaudeCodeAutomationsAdapter"
-codex = "adapters.codex:CodexAdapter"
-codex-automations = "adapters.codex_automations:CodexAutomationsAdapter"
-cursor = "adapters.cursor:CursorAdapter"
-copilot = "adapters.copilot:CopilotAdapter"
-cascade = "adapters.cascade:CascadeAdapter"
-# clyde = "adapters.clyde:ClydeAdapter"     # native publisher lives in ~/.clyde/, not here
-# clair = "adapters.clair:ClairAdapter"     # same pattern -- native publisher
+# Entry points for participant plugins.
+# Third-party participants register here via their own pyproject.toml.
+[project.entry-points."bourdon.participants"]
+claude-code = "participants.claude_code:ClaudeCodeParticipant"
+claude-code-automations = "participants.claude_code_automations:ClaudeCodeAutomationsParticipant"
+codex = "participants.codex:CodexParticipant"
+codex-automations = "participants.codex_automations:CodexAutomationsParticipant"
+cursor = "participants.cursor:CursorParticipant"
+copilot = "participants.copilot:CopilotParticipant"
+cascade = "participants.cascade:CascadeParticipant"
+# clyde = "participants.clyde:ClydeParticipant"     # native publisher lives in ~/.clyde/, not here
+# clair = "participants.clair:ClairParticipant"     # same pattern -- native publisher
 
 [project.scripts]
 bourdon = "cli.main:main"
@@ -111,7 +111,7 @@ package-dir = { "" = "." }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "adapters*", "cli*"]
+include = ["core*", "participants*", "cli*"]
 exclude = ["tests*", "docs*", "spec*"]
 
 [tool.ruff]

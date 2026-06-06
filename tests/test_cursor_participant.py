@@ -1,4 +1,4 @@
-"""Tests for adapters.cursor."""
+"""Tests for participants.cursor."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from adapters.base import AdapterDiscoveryError, L5Manifest
-from adapters.cursor import AGENT_ID, AGENT_TYPE, CursorAdapter
+from participants.base import ParticipantDiscoveryError, L5Manifest
+from participants.cursor import AGENT_ID, AGENT_TYPE, CursorParticipant
 
 # ---- Helpers ----------------------------------------------------------------
 
@@ -43,15 +43,15 @@ def _make_cursor_dir(tmp_path: Path) -> Path:
 
 
 def test_discover_raises_when_dir_missing(tmp_path):
-    adapter = CursorAdapter(cursor_dir=tmp_path / "does-not-exist")
-    with pytest.raises(AdapterDiscoveryError):
-        adapter.discover()
+    participant = CursorParticipant(cursor_dir=tmp_path / "does-not-exist")
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.discover()
 
 
 def test_discover_returns_agent_store_when_dir_exists(tmp_path):
     cursor_dir = _make_cursor_dir(tmp_path)
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    store = adapter.discover()
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    store = participant.discover()
     assert store.path == str(cursor_dir)
     assert "platform_default" in store.metadata
 
@@ -61,8 +61,8 @@ def test_discover_returns_agent_store_when_dir_exists(tmp_path):
 
 def test_export_l5_empty_when_no_dbs(tmp_path):
     cursor_dir = _make_cursor_dir(tmp_path)
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    manifest = adapter.export_l5()
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()
     assert isinstance(manifest, L5Manifest)
     assert manifest.agent.id == AGENT_ID
     assert manifest.agent.type == AGENT_TYPE
@@ -88,8 +88,8 @@ def test_export_l5_extracts_session_and_project_entity(tmp_path):
         ],
     )
 
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    manifest = adapter.export_l5()
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()
 
     # At least one session extracted
     assert len(manifest.recent_sessions) >= 1
@@ -128,9 +128,9 @@ def test_export_l5_filters_by_since(tmp_path):
         ],
     )
 
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
+    participant = CursorParticipant(cursor_dir=cursor_dir)
     cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    manifest = adapter.export_l5(since=cutoff)
+    manifest = participant.export_l5(since=cutoff)
     dates = [s.date for s in manifest.recent_sessions]
     assert all(d >= "2026-01-01" for d in dates if d), dates
     assert len(manifest.recent_sessions) == 1
@@ -157,8 +157,8 @@ def test_export_sessions_respects_limit(tmp_path):
     ]
     _seed_state_db(db, records)
 
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    sessions = adapter.export_sessions(
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    sessions = participant.export_sessions(
         since=datetime(2020, 1, 1, tzinfo=timezone.utc), limit=3
     )
     assert len(sessions) == 3
@@ -168,8 +168,8 @@ def test_export_sessions_respects_limit(tmp_path):
 
 
 def test_health_check_blocked_when_no_dir(tmp_path):
-    adapter = CursorAdapter(cursor_dir=tmp_path / "missing")
-    health = adapter.health_check()
+    participant = CursorParticipant(cursor_dir=tmp_path / "missing")
+    health = participant.health_check()
     assert health.status == "blocked"
     assert health.proposed_fix is not None
     assert "Cursor" in health.proposed_fix
@@ -177,8 +177,8 @@ def test_health_check_blocked_when_no_dir(tmp_path):
 
 def test_health_check_degraded_when_no_dbs(tmp_path):
     cursor_dir = _make_cursor_dir(tmp_path)
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    health = adapter.health_check()
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
     assert health.status == "degraded"
     assert "No Cursor SQLite stores" in (health.reason or "")
     assert health.proposed_fix is not None
@@ -189,8 +189,8 @@ def test_health_check_ok_when_dbs_present(tmp_path):
     cursor_dir = _make_cursor_dir(tmp_path)
     db = cursor_dir / "state.vscdb"
     _seed_state_db(db, [])  # empty db is fine; just needs ItemTable
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    health = adapter.health_check()
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
     assert health.status == "ok"
     assert health.details["databases_scanned"] >= 1
     assert health.proposed_fix is None
@@ -200,21 +200,21 @@ def test_health_check_does_not_raise_on_corrupt_db(tmp_path):
     cursor_dir = _make_cursor_dir(tmp_path)
     db = cursor_dir / "state.vscdb"
     db.write_bytes(b"not a real sqlite database")
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
+    participant = CursorParticipant(cursor_dir=cursor_dir)
     # Must not raise; status may be ok/degraded depending on whether the
     # corrupt file is iterable. The contract is "never raises".
-    health = adapter.health_check()
+    health = participant.health_check()
     assert health.status in {"ok", "degraded", "blocked"}
 
 
 # ---- Protocol conformance ---------------------------------------------------
 
 
-def test_cursor_adapter_class_attrs():
-    assert CursorAdapter.agent_id == "cursor"
-    assert CursorAdapter.agent_type == "code-assistant"
+def test_cursor_participant_class_attrs():
+    assert CursorParticipant.agent_id == "cursor"
+    assert CursorParticipant.agent_type == "code-assistant"
 
 
 def test_native_path_resolves(tmp_path):
-    adapter = CursorAdapter(cursor_dir=tmp_path / "Cursor")
-    assert adapter.native_path == str(tmp_path / "Cursor")
+    participant = CursorParticipant(cursor_dir=tmp_path / "Cursor")
+    assert participant.native_path == str(tmp_path / "Cursor")

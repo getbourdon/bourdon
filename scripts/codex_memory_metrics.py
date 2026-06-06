@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from adapters.codex import (
+from participants.codex import (
     _default_codex_memory_md_path,
     _default_codex_native_memory_path,
     _inspect_codex_fallback_recall,

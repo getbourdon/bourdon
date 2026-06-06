@@ -1,4 +1,4 @@
-"""Tests for adapters.claude_code -- the Claude Code external adapter (v0.0.3)."""
+"""Tests for participants.claude_code -- the Claude Code external participant (v0.0.3)."""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from adapters import claude_code as cc_module
-from adapters.base import (
+from participants import claude_code as cc_module
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
-    BourdonAdapter,
+    ParticipantDiscoveryError,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
     Visibility,
 )
-from adapters.claude_code import (
-    ClaudeCodeAdapter,
+from participants.claude_code import (
+    ClaudeCodeParticipant,
     _contains_credential_pattern,
     _dedupe_entities,
     _extract_h1_title,
@@ -38,7 +38,7 @@ from adapters.claude_code import (
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     """
-    Redirect the adapter's path-resolution helpers at a tmp directory tree.
+    Redirect the participant's path-resolution helpers at a tmp directory tree.
     Returns a helpers dict that tests use to create the three source stores
     with realistic content.
     """
@@ -96,12 +96,12 @@ def isolated_home(tmp_path, monkeypatch):
     }
 
 
-# -- Adapter shape + discovery (preserved from v0.0.2) -------------------------
+# -- Participant shape + discovery (preserved from v0.0.2) -------------------------
 
 
-def test_adapter_satisfies_protocol(isolated_home):
-    adapter = ClaudeCodeAdapter()
-    assert isinstance(adapter, BourdonAdapter)
+def test_participant_satisfies_protocol(isolated_home):
+    participant = ClaudeCodeParticipant()
+    assert isinstance(participant, BourdonParticipant)
 
 
 def test_resolve_auto_memory_path_returns_none_on_permission_error(tmp_path, monkeypatch):
@@ -137,7 +137,7 @@ def test_resolve_auto_memory_path_returns_none_on_oserror(tmp_path, monkeypatch)
     assert _resolve_auto_memory_path() is None
 
 
-def test_adapter_exposes_expected_constants():
+def test_participant_exposes_expected_constants():
     assert cc_module.AGENT_ID == "claude-code"
     assert cc_module.AGENT_TYPE == "code-assistant"
     assert "credential" in cc_module.DEFAULT_POLICY.private_tags
@@ -150,20 +150,20 @@ def test_adapter_exposes_expected_constants():
 
 def test_export_l5_populates_role_narrative(isolated_home):
     isolated_home["create_brain"]()
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     assert manifest.agent.role_narrative == cc_module.ROLE_NARRATIVE
 
 
 def test_discover_raises_when_no_sources(isolated_home):
-    adapter = ClaudeCodeAdapter()
-    with pytest.raises(AdapterDiscoveryError):
-        adapter.discover()
+    participant = ClaudeCodeParticipant()
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.discover()
 
 
 def test_discover_succeeds_with_just_claude_brain(isolated_home):
     isolated_home["create_brain"]()
-    adapter = ClaudeCodeAdapter()
-    store = adapter.discover()
+    participant = ClaudeCodeParticipant()
+    store = participant.discover()
     assert store.metadata["sources"]["claude_brain"] is not None
     assert store.metadata["sources"]["auto_memory"] is None
     assert store.metadata["sources"]["knowledge_graph"] is None
@@ -174,8 +174,8 @@ def test_discover_succeeds_with_all_three_sources(isolated_home):
     isolated_home["create_auto_memory"]()
     kg = isolated_home["create_knowledge_graph"]()
     kg.write_text("", encoding="utf-8")
-    adapter = ClaudeCodeAdapter()
-    store = adapter.discover()
+    participant = ClaudeCodeParticipant()
+    store = participant.discover()
     assert all(v is not None for v in store.metadata["sources"].values())
 
 
@@ -187,8 +187,8 @@ def test_discover_env_override_takes_precedence(tmp_path, monkeypatch):
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
 
-    adapter = ClaudeCodeAdapter()
-    store = adapter.discover()
+    participant = ClaudeCodeParticipant()
+    store = participant.discover()
     assert store.metadata["sources"]["claude_brain"] == str(override_dir)
 
 
@@ -200,32 +200,32 @@ def test_health_check_ok_with_all_sources(isolated_home):
     isolated_home["create_auto_memory"]()
     kg = isolated_home["create_knowledge_graph"]()
     kg.write_text("", encoding="utf-8")
-    adapter = ClaudeCodeAdapter()
-    assert adapter.health_check().status == "ok"
+    participant = ClaudeCodeParticipant()
+    assert participant.health_check().status == "ok"
 
 
 def test_health_check_degraded_with_partial_sources(isolated_home):
     isolated_home["create_brain"]()
-    adapter = ClaudeCodeAdapter()
-    health = adapter.health_check()
+    participant = ClaudeCodeParticipant()
+    health = participant.health_check()
     assert health.status == "degraded"
     assert "1/3" in health.reason
 
 
 def test_health_check_blocked_with_no_sources(isolated_home):
-    adapter = ClaudeCodeAdapter()
-    assert adapter.health_check().status == "blocked"
+    participant = ClaudeCodeParticipant()
+    assert participant.health_check().status == "blocked"
 
 
 def test_health_check_never_raises(isolated_home):
-    adapter = ClaudeCodeAdapter()
-    result = adapter.health_check()
+    participant = ClaudeCodeParticipant()
+    result = participant.health_check()
     assert isinstance(result, HealthStatus)
 
 
 def test_health_check_blocked_proposes_setup(isolated_home):
     """A blocked status carries an actionable fix via the wizard."""
-    health = ClaudeCodeAdapter().health_check()
+    health = ClaudeCodeParticipant().health_check()
     assert health.status == "blocked"
     assert health.proposed_fix is not None
     assert "bourdon setup" in health.proposed_fix
@@ -234,19 +234,19 @@ def test_health_check_blocked_proposes_setup(isolated_home):
 def test_health_check_degraded_proposes_setup(isolated_home):
     """A degraded status (only some sources missing) also carries a fix."""
     isolated_home["create_brain"]()  # brain exists; auto-memory + KG don't
-    health = ClaudeCodeAdapter().health_check()
+    health = ClaudeCodeParticipant().health_check()
     assert health.status == "degraded"
     assert health.proposed_fix is not None
     assert "bourdon setup" in health.proposed_fix
 
 
 def test_health_check_ok_has_no_proposed_fix(isolated_home):
-    """A healthy adapter doesn't suggest anything."""
+    """A healthy participant doesn't suggest anything."""
     isolated_home["create_brain"]()
     isolated_home["create_auto_memory"]()
     kg_path = isolated_home["create_knowledge_graph"]()
     isolated_home["add_graph_entity"](kg_path, {"type": "entity", "name": "X", "entityType": "y", "observations": []})
-    health = ClaudeCodeAdapter().health_check()
+    health = ClaudeCodeParticipant().health_check()
     assert health.status == "ok"
     assert health.proposed_fix is None
 
@@ -276,7 +276,7 @@ def test_parse_frontmatter_malformed_returns_empty_gracefully():
 
 
 def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog):
-    """Issue #79: malformed YAML should log adapter id, source path, and parse-error detail."""
+    """Issue #79: malformed YAML should log participant id, source path, and parse-error detail."""
     bad = tmp_path / "PROJECTS" / "NeuroLayer" / "OVERVIEW.md"
     bad.parent.mkdir(parents=True)
     bad.write_text("---\n{{not yaml{{\n---\n# body\n", encoding="utf-8")
@@ -285,7 +285,7 @@ def test_parse_frontmatter_malformed_logs_source_and_exception(tmp_path, caplog)
     msgs = [r.getMessage() for r in caplog.records if "frontmatter" in r.getMessage()]
     assert msgs, "expected a frontmatter warning"
     line = msgs[0]
-    assert "ClaudeCodeAdapter" in line
+    assert "ClaudeCodeParticipant" in line
     assert str(bad) in line
     assert "treating as no-frontmatter" in line
 
@@ -570,7 +570,7 @@ def _build_rich_fixture(helpers):
 
 def test_export_l5_populates_entities_from_all_sources(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     names = {e.name.lower() for e in manifest.known_entities}
     # ILTT should appear (from all 3 sources, deduped to one entry)
     assert "iltt" in names
@@ -578,28 +578,28 @@ def test_export_l5_populates_entities_from_all_sources(isolated_home):
 
 def test_export_l5_dedupes_iltt_across_three_sources(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     iltt_matches = [e for e in manifest.known_entities if e.name.lower() == "iltt"]
     assert len(iltt_matches) == 1, f"Expected one ILTT entity, got {len(iltt_matches)}"
 
 
 def test_export_l5_filters_person_entity(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     names = {e.name.lower() for e in manifest.known_entities}
     assert "ry guy" not in names, "person-typed entity leaked into federated L5"
 
 
 def test_export_l5_filters_credential_mention_entity(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     names = {e.name.lower() for e in manifest.known_entities}
     assert "secretentity" not in names, "entity with sk_live_* credential leaked"
 
 
 def test_export_l5_includes_recent_sessions(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     assert len(manifest.recent_sessions) == 2
     dates = {s.date for s in manifest.recent_sessions}
     assert "2026-04-15" in dates
@@ -608,7 +608,7 @@ def test_export_l5_includes_recent_sessions(isolated_home):
 
 def test_export_l5_sessions_sorted_newest_first(isolated_home):
     _build_rich_fixture(isolated_home)
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     dates = [s.date for s in manifest.recent_sessions]
     assert dates == sorted(dates, reverse=True)
 
@@ -616,7 +616,7 @@ def test_export_l5_sessions_sorted_newest_first(isolated_home):
 def test_export_l5_missing_sources_degrade_gracefully(isolated_home):
     # Only claude-brain, no auto-memory, no knowledge graph
     isolated_home["create_brain"]()
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     # Manifest still builds; sessions empty (no LOG entries); entities empty (no PROJECTS entries)
     assert isinstance(manifest, L5Manifest)
     assert manifest.known_entities == []
@@ -624,14 +624,14 @@ def test_export_l5_missing_sources_degrade_gracefully(isolated_home):
 
 
 def test_export_l5_raises_when_nothing_discovered(isolated_home):
-    adapter = ClaudeCodeAdapter()
-    with pytest.raises(AdapterDiscoveryError):
-        adapter.export_l5()
+    participant = ClaudeCodeParticipant()
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.export_l5()
 
 
 def test_export_l5_agent_info_has_host_and_spec(isolated_home):
     isolated_home["create_brain"]()
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     assert manifest.agent.id == "claude-code"
     assert manifest.agent.type == "code-assistant"
     assert manifest.spec_version == SPEC_VERSION
@@ -639,7 +639,7 @@ def test_export_l5_agent_info_has_host_and_spec(isolated_home):
 
 def test_export_l5_last_updated_is_iso_timestamp(isolated_home):
     isolated_home["create_brain"]()
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     # Parse the timestamp to verify it's a valid ISO 8601 string
     parsed = datetime.fromisoformat(manifest.last_updated)
     assert parsed.tzinfo is not None  # tz-aware
@@ -648,7 +648,7 @@ def test_export_l5_last_updated_is_iso_timestamp(isolated_home):
 def test_export_sessions_respects_since_filter(isolated_home):
     _build_rich_fixture(isolated_home)
     cutoff = datetime(2026, 4, 14, tzinfo=timezone.utc)
-    sessions = ClaudeCodeAdapter().export_sessions(since=cutoff)
+    sessions = ClaudeCodeParticipant().export_sessions(since=cutoff)
     # Only 2026-04-15 should be >= cutoff
     assert all(s.date >= "2026-04-14" for s in sessions)
     assert len(sessions) == 1
@@ -663,7 +663,7 @@ def test_malformed_jsonl_skipped_not_crashed(isolated_home):
         '{"type":"entity","name":"AlsoValid","observations":[]}\n',
         encoding="utf-8",
     )
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     names = {e.name for e in manifest.known_entities}
     # Both valid records should appear; malformed line skipped without crashing
     assert "Valid" in names
@@ -680,7 +680,7 @@ def test_exported_manifest_validates_against_json_schema(isolated_home):
     schema_path = Path(__file__).parent.parent / "spec" / "L5_schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
-    manifest = ClaudeCodeAdapter().export_l5()
+    manifest = ClaudeCodeParticipant().export_l5()
     serialized = manifest.to_dict()
 
     # Raises jsonschema.ValidationError on failure

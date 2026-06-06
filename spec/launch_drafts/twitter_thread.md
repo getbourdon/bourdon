@@ -78,7 +78,7 @@ context, not for engagement-bait.
 > Pre-alpha v0.0.7, MIT, public:
 >
 >   • 250/250 tests passing
->   • Adapters: Claude Code, Codex
+>   • Participants: Claude Code, Codex
 >   • Native publisher for a local AI swarm
 >   • Recognition runtime as Python module (24µs avg)
 >   • SessionEnd hook = auto-federation
@@ -93,7 +93,7 @@ context, not for engagement-bait.
 >
 > Code: https://github.com/getbourdon/bourdon
 >
-> Most-wanted: adapters for Cursor + Cline, integration of the
+> Most-wanted: participants for Cursor + Cline, integration of the
 > recognition runtime into a real agent's response loop, and honest
 > falsification attempts.
 >

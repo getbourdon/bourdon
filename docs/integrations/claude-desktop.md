@@ -2,7 +2,7 @@
 
 Claude Desktop is Anthropic's MCP host with the simplest setup story: a single JSON config file, no plugin marketplace, no per-workspace surface. That makes it the lowest-friction reader for cross-agent federation. **If you only wire one MCP host, wire this one** — it's the demo described in [`docs/PROOF.md`](../PROOF.md).
 
-Claude Desktop is a **reader**. It doesn't write its own L5 manifests yet (no Claude Desktop adapter ships in Bourdon as of v0.4.1). You federate other agents' content *into* Claude Desktop.
+Claude Desktop is a **reader**. It doesn't write its own L5 manifests yet (no Claude Desktop participant ships in Bourdon as of v0.4.1). You federate other agents' content *into* Claude Desktop.
 
 ## What this gives you
 
@@ -83,7 +83,7 @@ If your `agent-library/` lives somewhere other than `~/agent-library/` (rare, bu
 
 ## Visibility (the access-level question)
 
-Three of five adapters tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
+Three of five participants tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
 
 The friendly fix shipped in v0.6.0: set an environment variable that flips the L6 default per install.
 
@@ -125,7 +125,7 @@ bourdon serve --quiet
 
 # 2. Verify the round-trip works on real data (without Claude Desktop in the loop).
 bourdon dogfood
-# Expect: PASS for any plantable adapter you have set up.
+# Expect: PASS for any plantable participant you have set up.
 
 # 3. In Claude Desktop, ask:
 "Call the Bourdon MCP tool `list_recent_work` with `access_level='team'` and show me the raw result."
@@ -140,6 +140,6 @@ bourdon dogfood
 
 ## Known limitations
 
-- **No write side yet.** Claude Desktop doesn't have a Bourdon adapter; it can't *contribute* to the federation, only read from it. If you want what happens in Claude Desktop sessions to be part of the federation, you'd need to either (a) wait for a future Claude Desktop adapter or (b) manually summarize and feed back into another agent's store.
+- **No write side yet.** Claude Desktop doesn't have a Bourdon participant; it can't *contribute* to the federation, only read from it. If you want what happens in Claude Desktop sessions to be part of the federation, you'd need to either (a) wait for a future Claude Desktop participant or (b) manually summarize and feed back into another agent's store.
 - **No automatic refresh.** The L6 server reads `~/agent-library/` on startup. New manifests written *while* Claude Desktop has the MCP server running won't show up until you restart Claude Desktop. (Future: file-watching in `L6Store`, tracked but not scheduled.)
 - **Subprocess lifecycle quirks.** If Claude Desktop's MCP subprocess management gets confused, the Bourdon server can end up in a half-attached state. `pkill -f "core.l6_server"` clears it; restarting Claude Desktop respawns cleanly.

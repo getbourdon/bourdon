@@ -1,4 +1,4 @@
-"""Codex adapter -- normalize Codex memories + sessions into L5 manifests."""
+"""Codex participant -- normalize Codex memories + sessions into L5 manifests."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from adapters.base import (
+from participants.base import (
     SPEC_VERSION,
-    AdapterDiscoveryError,
+    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
-    BourdonAdapter,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
@@ -376,7 +376,7 @@ def _merge_entity(into: Entity, other: Entity) -> None:
 
 # -- Junk-entity filter (issue #78) --------------------------------------------
 #
-# The codex adapter synthesizes entities from session titles and cwd-derived
+# The codex participant synthesizes entities from session titles and cwd-derived
 # project keys. When a real signal is present, these become useful federation
 # anchors. When it isn't, they become low-value noise: thread titles like
 # "Project 2" or "memories", placeholder summaries from default templates,
@@ -2226,11 +2226,11 @@ def _record_to_session(
     )
 
 
-# -- Adapter class -------------------------------------------------------------
+# -- Participant class -------------------------------------------------------------
 
 
-class CodexAdapter:
-    """External adapter for local Codex memories, sessions, and overlays."""
+class CodexParticipant:
+    """External participant for local Codex memories, sessions, and overlays."""
 
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
@@ -2281,7 +2281,7 @@ class CodexAdapter:
             if memories_dir and (memories_dir / "raw_memories.md").is_file():
                 sources["raw_memories"] = str(memories_dir / "raw_memories.md")
         if not any(sources.values()):
-            raise AdapterDiscoveryError(
+            raise ParticipantDiscoveryError(
                 "No Codex memory sources found. Expected ~/.codex/ and/or ~/codex-brain/."
             )
         return AgentStore(
@@ -2604,4 +2604,4 @@ class CodexAdapter:
         )
 
 
-_: BourdonAdapter = CodexAdapter()
+_: BourdonParticipant = CodexParticipant()

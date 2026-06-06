@@ -77,7 +77,7 @@ item in the "Pre-launch" section is green.
       thread + 2-paragraph framing of the discussion.
 - [ ] **Anthropic Discord post** — share in #showcase or equivalent
       channel. Tag relevant maintainers if appropriate.
-- [ ] **OpenAI dev forum post** — same idea, the Codex adapter angle
+- [ ] **OpenAI dev forum post** — same idea, the Codex participant angle
       gives this a natural home.
 
 ## Week 1 follow-ups
@@ -86,8 +86,8 @@ item in the "Pre-launch" section is green.
       that came in. Reuse the answers given on HN/Twitter.
 - [ ] **Blog post or follow-up note** — a 1500-word writeup of the launch
       reception, what surfaced, what surprised. Hosted on bourdon.ai.
-- [ ] **Adapter PRs** — if anyone offered to build a Cursor or Cline
-      adapter, follow up with them within a week. Adapters are the
+- [ ] **Participant PRs** — if anyone offered to build a Cursor or Cline
+      participant, follow up with them within a week. Participants are the
       highest-leverage way to grow the federation footprint.
 
 ## Don't post unless

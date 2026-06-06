@@ -7,7 +7,7 @@ On POSIX and on Windows/NTFS, ``Path.replace`` is atomic within the same
 filesystem, so this pattern is safe for the common case of writing into
 ``~/agent-library/agents/`` on local disk.
 
-Minimal surface -- most of the heavy lifting lives in callers (adapters
+Minimal surface -- most of the heavy lifting lives in callers (participants
 build L5Manifest objects; the L6 server reads them back through L6Store).
 This module is only the boundary between in-memory and on-disk form.
 """
@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from adapters.base import L5Manifest
+from participants.base import L5Manifest
 
 logger = logging.getLogger(__name__)
 

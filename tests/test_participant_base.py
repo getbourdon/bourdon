@@ -1,14 +1,14 @@
-"""Tests for adapters.base -- Protocol, dataclasses, visibility resolution."""
+"""Tests for participants.base -- Protocol, dataclasses, visibility resolution."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from adapters.base import (
+from participants.base import (
     SPEC_VERSION,
     AgentInfo,
     AgentStore,
-    BourdonAdapter,
+    BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
@@ -237,7 +237,7 @@ def test_l5_to_dict_includes_populated_entities():
 # -- Protocol conformance ------------------------------------------------------
 
 
-class _MinimalAdapter:
+class _MinimalParticipant:
     agent_id = "minimal"
     agent_type = "code-assistant"
     native_path = "/tmp/nothing"
@@ -259,12 +259,12 @@ class _MinimalAdapter:
         return HealthStatus(status="ok")
 
 
-def test_minimal_adapter_satisfies_protocol():
-    assert isinstance(_MinimalAdapter(), BourdonAdapter)
+def test_minimal_participant_satisfies_protocol():
+    assert isinstance(_MinimalParticipant(), BourdonParticipant)
 
 
-def test_broken_adapter_fails_protocol():
-    class NotAnAdapter:
+def test_broken_participant_fails_protocol():
+    class NotAnParticipant:
         pass
 
-    assert not isinstance(NotAnAdapter(), BourdonAdapter)
+    assert not isinstance(NotAnParticipant(), BourdonParticipant)

@@ -164,7 +164,7 @@ def _write_filtered_manifest(src: Path, dest: Path, access_level: str) -> None:
 
     On parse failure logs at WARNING and copies the file unchanged so a
     broken manifest doesn't block the rest of the sync (parallels the
-    no-frontmatter-on-parse-error behavior in the adapters per #79).
+    no-frontmatter-on-parse-error behavior in the participants per #79).
     """
     try:
         text = src.read_text(encoding="utf-8")
