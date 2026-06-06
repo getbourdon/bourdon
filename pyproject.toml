@@ -92,6 +92,7 @@ claude-code-automations = "participants.claude_code_automations:ClaudeCodeAutoma
 codex = "participants.codex:CodexParticipant"
 codex-automations = "participants.codex_automations:CodexAutomationsParticipant"
 cursor = "participants.cursor:CursorParticipant"
+cursor-automations = "participants.cursor_automations:CursorAutomationsParticipant"
 copilot = "participants.copilot:CopilotParticipant"
 cascade = "participants.cascade:CascadeParticipant"
 claude-desktop-cowork = "participants.claude_desktop_cowork:ClaudeDesktopCoworkParticipant"

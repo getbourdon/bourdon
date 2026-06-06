@@ -53,6 +53,12 @@ from participants.copilot import (
     init_memory_file,
 )
 from participants.cursor import CursorParticipant
+from participants.cursor_automations import (
+    CursorAutomationsParticipant,
+    default_cursor_automations_dir,
+    init_automations_dir as cursor_init_automations_dir,
+    merge_automation_tree as cursor_merge_automation_tree,
+)
 from core.agents_export import (
     export_local_agents,
     resolve_local_name,
@@ -101,6 +107,10 @@ def _default_claude_desktop_code_l5_path() -> Path:
 
 def _default_cursor_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cursor.l5.yaml"
+
+
+def _default_cursor_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "cursor-automations.l5.yaml"
 
 
 def _default_copilot_l5_path() -> Path:
@@ -216,14 +226,307 @@ def _handle_deeper_context(args: argparse.Namespace) -> int:
 
 
 def _handle_cursor_export(args: argparse.Namespace) -> int:
-    cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
-    participant = CursorParticipant(cursor_dir=cursor_dir)
-    manifest = participant.export_l5(since=_parse_since(args.since))
+    """Hook-safe: silent on success, returns 0 in all failure modes."""
+    verbose = getattr(args, "verbose", False)
+    try:
+        cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
+        participant = CursorParticipant(cursor_dir=cursor_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(f"bourdon cursor export: no data ({exc}), skipping", file=sys.stderr)
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: export failed: {exc}", file=sys.stderr)
+        return 0
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_cursor_l5_path()
-    write_l5_dict(data, out_path)
-    if args.print_manifest:
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: write failed: {exc}", file=sys.stderr)
+        return 0
+    if getattr(args, "print_manifest", False):
         _print_yaml(data)
+    return 0
+
+
+def _handle_cursor_doctor(args: argparse.Namespace) -> int:
+    cursor_dir = Path(args.cursor_dir) if getattr(args, "cursor_dir", None) else None
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
+    report: dict[str, Any] = {
+        "health": {
+            "status": health.status, "reason": health.reason,
+            "details": health.details,
+        },
+        "cursor_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_compile_turn(args: argparse.Namespace) -> int:
+    from core.cursor_turn_compiler import compile_cursor_turn
+    brief = compile_cursor_turn(
+        args.prompt, cwd=getattr(args, "cwd", None),
+        access_level=getattr(args, "access_level", "team"),
+        library_path=(
+            Path(args.library_path)
+            if getattr(args, "library_path", None) else None
+        ),
+        max_items=getattr(args, "max_items", 6),
+    )
+    report: dict[str, Any] = {
+        "schema_version": brief.schema_version, "strategy": brief.strategy,
+        "cwd_project": brief.cwd_project, "prompt_tokens": brief.prompt_tokens,
+        "matched_entities": brief.matched_entities, "routing": brief.routing,
+        "compile_latency_us": brief.compile_latency_us,
+        "text": brief.to_text(),
+    }
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_sync_native(args: argparse.Namespace) -> int:
+    from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+    library_path = (
+        Path(args.library_path) if getattr(args, "library_path", None)
+        else DEFAULT_LIBRARY_PATH
+    )
+    access_level = getattr(args, "access_level", "team")
+    max_entities = getattr(args, "max_entities", 100)
+    max_sessions = getattr(args, "max_sessions", 20)
+    store = L6Store(library_path)
+    agents = store.list_agents()
+    all_entities: list[tuple[str, dict]] = []
+    all_sessions: list[tuple[str, dict]] = []
+    for agent_id in agents:
+        manifest = store.get_agent_manifest(agent_id, access_level=access_level)
+        if not manifest:
+            continue
+        for entity in manifest.get("known_entities") or []:
+            all_entities.append((agent_id, entity))
+        for session in manifest.get("recent_sessions") or []:
+            all_sessions.append((agent_id, session))
+    all_sessions.sort(key=lambda p: p[1].get("date", ""), reverse=True)
+    lines = [
+        "# Bourdon Federation Context", "",
+        f"_Auto-generated by `bourdon cursor sync-native`. "
+        f"{len(agents)} agents federated._", "",
+    ]
+    if all_entities:
+        lines.append("## Known Entities")
+        lines.append("")
+        for agent_id, entity in all_entities[:max_entities]:
+            name = entity.get("name", "?")
+            etype = entity.get("type", "topic")
+            summary = entity.get("summary", "")
+            line = f"- **{name}** ({etype}, via {agent_id})"
+            if summary:
+                line += f": {summary[:200]}"
+            lines.append(line)
+        lines.append("")
+    if all_sessions:
+        lines.append("## Recent Sessions")
+        lines.append("")
+        for agent_id, session in all_sessions[:max_sessions]:
+            sdate = session.get("date", "?")
+            cwd = session.get("cwd", "")
+            actions = session.get("key_actions", [])
+            action_text = (
+                "; ".join(str(a)[:120] for a in actions[:3]) if actions else ""
+            )
+            line = f"- **{sdate}** ({agent_id})"
+            if cwd:
+                line += f" in `{cwd}`"
+            if action_text:
+                line += f": {action_text}"
+            lines.append(line)
+        lines.append("")
+    text = "\n".join(lines) + "\n"
+    cursor_home = (
+        Path(args.cursor_dir) if getattr(args, "cursor_dir", None) else None
+    )
+    target = (
+        Path(args.out) if getattr(args, "out", None)
+        else (cursor_home or Path.home() / ".cursor") / "memory" / "bourdon_context.md"
+    )
+    if args.write:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    report = {
+        "mode": "write" if args.write else "dry-run",
+        "target": str(target), "agents_federated": len(agents),
+        "entities": len(all_entities), "sessions": len(all_sessions),
+        "bytes": len(text.encode("utf-8")), "written": bool(args.write),
+    }
+    if not args.write:
+        report["preview"] = text
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_init(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None) else None
+    )
+    automation_id = getattr(args, "automation_id", None) or "cursor-cloud-agent"
+    force = getattr(args, "force", False)
+    try:
+        path = cursor_init_automations_dir(
+            automations_dir=automations_dir,
+            automation_id=automation_id, force=force,
+        )
+        print(f"Created {path}")
+        print(
+            f"Edit {path / 'memory.md'} to add run entries, then run "
+            "`bourdon cursor-automations export`."
+        )
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _handle_cursor_automations_export(args: argparse.Namespace) -> int:
+    """Hook-safe: silent on success, returns 0 in all failure modes."""
+    verbose = getattr(args, "verbose", False)
+    try:
+        automations_dir = (
+            Path(args.automations_dir)
+            if getattr(args, "automations_dir", None) else None
+        )
+        participant = CursorAutomationsParticipant(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: no data ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: failed: {exc}", file=sys.stderr)
+        return 0
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = (
+        Path(args.out) if args.out
+        else _default_cursor_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: write failed: {exc}", file=sys.stderr)
+        return 0
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    return 0
+
+
+def _find_cursor_automations_root(extracted_dir: Path) -> Path | None:
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
+def _handle_cursor_automations_ingest(args: argparse.Namespace) -> int:
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cursor-ingest-")
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(f"cursor-automations ingest: zip not found: {zip_path}", file=sys.stderr)
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_cursor_automations_root(Path(tmp.name))
+        else:
+            print(
+                "cursor-automations ingest: specify --source or --artifact-zip.",
+                file=sys.stderr,
+            )
+            return 2
+        if source is None or not source.is_dir():
+            print(
+                "cursor-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+        dest_dir = (
+            Path(args.dest) if getattr(args, "dest", None)
+            else default_cursor_automations_dir()
+        )
+        result = cursor_merge_automation_tree(
+            source, dest_dir, default_kind=args.default_kind,
+        )
+        report = {
+            "source": str(source), "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
+
+
+def _handle_cursor_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None) else None
+    )
+    participant = CursorAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
+    report = {
+        "health": {
+            "status": health.status, "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
     return 0
 
 
@@ -1845,7 +2148,120 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the exported manifest after writing it.",
     )
+    cursor_export_cmd.add_argument(
+        "--verbose", action="store_true",
+        help="Print diagnostics to stderr on failure (normally silent).",
+    )
     cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
+    cursor_doctor_cmd = cursor_subparsers.add_parser(
+        "doctor", help="Diagnose Cursor memory sources",
+    )
+    cursor_doctor_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
+    cursor_doctor_cmd.add_argument("--report-out")
+    cursor_doctor_cmd.set_defaults(func=_handle_cursor_doctor)
+
+    cursor_compile_turn_cmd = cursor_subparsers.add_parser(
+        "compile-turn", help="Compile a turn-scoped Cursor recognition brief",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "prompt", help="The user prompt to compile recognition for.",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "--cwd", help="Current working directory for project context.",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_compile_turn_cmd.add_argument("--library-path")
+    cursor_compile_turn_cmd.add_argument("--max-items", type=int, default=6)
+    cursor_compile_turn_cmd.set_defaults(func=_handle_cursor_compile_turn)
+
+    cursor_sync_native_cmd = cursor_subparsers.add_parser(
+        "sync-native",
+        help="Render federation content into a Cursor-readable markdown file",
+    )
+    cursor_sync_mode = cursor_sync_native_cmd.add_mutually_exclusive_group()
+    cursor_sync_mode.add_argument(
+        "--dry-run", action="store_true", default=True,
+    )
+    cursor_sync_mode.add_argument(
+        "--write", action="store_true", default=False,
+        help="Write ~/.cursor/memory/bourdon_context.md.",
+    )
+    cursor_sync_native_cmd.add_argument("--out")
+    cursor_sync_native_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
+    cursor_sync_native_cmd.add_argument("--max-entities", type=int, default=100)
+    cursor_sync_native_cmd.add_argument("--max-sessions", type=int, default=20)
+    cursor_sync_native_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_sync_native_cmd.add_argument("--library-path")
+    cursor_sync_native_cmd.set_defaults(func=_handle_cursor_sync_native)
+
+    cursor_init_cmd = cursor_subparsers.add_parser(
+        "init",
+        help="Create a starter ~/.cursor/automations/ directory",
+    )
+    cursor_init_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cursor_init_cmd.add_argument(
+        "--automation-id", default="cursor-cloud-agent",
+    )
+    cursor_init_cmd.add_argument("--force", action="store_true")
+    cursor_init_cmd.set_defaults(func=_handle_cursor_init)
+
+    # ---- cursor automation subcommands -------------------------------------
+    cursor_automations = subparsers.add_parser(
+        "cursor-automations",
+        help="Cursor Cloud Agent automation memory commands",
+    )
+    cursor_automation_subparsers = cursor_automations.add_subparsers(
+        dest="cursor_automations_command",
+    )
+    cursor_automation_export_cmd = cursor_automation_subparsers.add_parser(
+        "export",
+        help="Build a Cursor automations L5 manifest",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--automations-dir", help=argparse.SUPPRESS,
+    )
+    cursor_automation_export_cmd.add_argument("--out")
+    cursor_automation_export_cmd.add_argument("--since")
+    cursor_automation_export_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--print", dest="print_manifest", action="store_true",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--verbose", action="store_true",
+    )
+    cursor_automation_export_cmd.set_defaults(
+        func=_handle_cursor_automations_export,
+    )
+    cursor_automation_doctor_cmd = cursor_automation_subparsers.add_parser(
+        "doctor", help="Diagnose local Cursor automation memory coverage",
+    )
+    cursor_automation_doctor_cmd.add_argument(
+        "--automations-dir", help=argparse.SUPPRESS,
+    )
+    cursor_automation_doctor_cmd.add_argument("--report-out")
+    cursor_automation_doctor_cmd.set_defaults(
+        func=_handle_cursor_automations_doctor,
+    )
+    cursor_automation_ingest_cmd = cursor_automation_subparsers.add_parser(
+        "ingest",
+        help="Ingest an automations/ tree into the local Cursor automations",
+    )
+    cursor_automation_ingest_cmd.add_argument("--source")
+    cursor_automation_ingest_cmd.add_argument("--artifact-zip")
+    cursor_automation_ingest_cmd.add_argument("--dest")
+    cursor_automation_ingest_cmd.add_argument(
+        "--default-kind", default="cursor-cloud-agent",
+    )
+    cursor_automation_ingest_cmd.set_defaults(
+        func=_handle_cursor_automations_ingest,
+    )
 
     # ---- codex automation subcommands --------------------------------------
     codex_automations = subparsers.add_parser(

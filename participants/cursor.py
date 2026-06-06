@@ -11,12 +11,6 @@ The SQLite extraction logic is in ``participants/_cursor_sqlite.py``. This
 module wraps it in the ``BourdonParticipant`` Protocol from
 ``participants/base.py`` and applies the project's standard visibility policy.
 
-Origin: this participant graduates from the v0 implementation in
-``ryandavispro1-cmyk/cursor-spot`` (``cursor_bourdon`` package). The
-SQLite extraction is preserved verbatim; the L5 emission is rewritten
-on top of Bourdon's normative schema (``participants/base.L5Manifest``,
-``Entity``, ``Session``) for federation consistency.
-
 Usage::
 
     from participants.cursor import CursorParticipant
@@ -28,22 +22,26 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from participants._cursor_sqlite import (
     CursorSQLiteMemories,
+    _iter_state_dbs,
     default_cursor_dir,
     extract_cursor_memories,
 )
 from participants.base import (
-    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
     Entity,
     HealthStatus,
     L5Manifest,
+    ParticipantDiscoveryError,
     Session,
     Visibility,
     VisibilityPolicy,
@@ -69,15 +67,111 @@ DEFAULT_POLICY = VisibilityPolicy(
 _SPEC_VERSION = "0.1"
 
 
-class CursorParticipant:
-    """External participant for Cursor's SQLite workspace state.
+# -- Short-index integration --------------------------------------------------
 
-    Implements the :class:`~participants.base.BourdonParticipant` Protocol
-    structurally. Defensive throughout: missing data dir → raise
-    ``ParticipantDiscoveryError`` from ``discover()``; everything else
-    degrades to empty results rather than raising, matching the
-    contract spec.
-    """
+
+def _read_short_index(path: Path) -> list[dict[str, Any]]:
+    """Read a short-index.json and return normalized entries."""
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("CursorParticipant: cannot read short-index %s: %s", path, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("topic_key")]
+
+
+def _short_index_to_entities(
+    workspace_root: Path | None,
+    cursor_dir: Path | None,
+) -> list[Entity]:
+    """Merge workspace + global short-index files into Entity objects."""
+    paths: list[Path] = []
+    if workspace_root:
+        paths.append(workspace_root / ".cursor" / "memory" / "short-index.json")
+    cursor_home = (
+        Path(os.environ["CURSOR_DIR"])
+        if os.environ.get("CURSOR_DIR")
+        else None
+    )
+    home_base = cursor_home or Path.home() / ".cursor"
+    home_index = home_base / "memory" / "short-index.json"
+    paths.append(home_index)
+
+    merged: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        for entry in _read_short_index(path):
+            key = str(entry["topic_key"]).strip().lower()
+            merged[key] = entry
+
+    entities: list[Entity] = []
+    for entry in merged.values():
+        name = str(entry.get("topic_name", entry.get("topic_key", ""))).strip()
+        if not name:
+            continue
+        aliases_raw = entry.get("triggers", entry.get("aliases", []))
+        aliases = (
+            [str(a).strip() for a in aliases_raw if str(a).strip()]
+            if isinstance(aliases_raw, list) else []
+        )
+        summary = str(entry.get("summary", "")).strip()
+        tags_raw = entry.get("tags", [])
+        tags = (
+            [str(t).strip() for t in tags_raw if str(t).strip()]
+            if isinstance(tags_raw, list) else []
+        )
+        tags.append("short-index")
+        access = str(entry.get("access_level", "team")).strip().lower()
+        visibility = Visibility.PRIVATE if access == "private" else (
+            Visibility.PUBLIC if access == "public" else Visibility.TEAM
+        )
+        entities.append(Entity(
+            name=name,
+            type="topic",
+            aliases=aliases,
+            summary=summary or None,
+            tags=tags,
+            last_touched=str(entry.get("last_updated", "")) or None,
+            visibility=visibility,
+        ))
+    return entities
+
+
+# -- Conversion helpers -------------------------------------------------------
+
+
+def _to_session(raw) -> Session:
+    return Session(
+        date=raw.date or "",
+        cwd=raw.cwd or None,
+        project_focus=[],
+        key_actions=list(raw.key_actions),
+        files_touched=list(raw.files_touched),
+    )
+
+
+def _to_entity(raw) -> Entity:
+    return Entity(
+        name=raw.name,
+        type=raw.entity_type or None,
+        aliases=list(raw.aliases),
+        summary=raw.summary or None,
+        tags=list(raw.tags),
+        last_touched=raw.last_updated or None,
+    )
+
+
+# -- Participant class --------------------------------------------------------
+
+
+class CursorParticipant:
+    """External participant for Cursor's SQLite workspace state."""
 
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
@@ -93,8 +187,13 @@ class CursorParticipant:
         """
         return (home or Path.home()) / ".cursor"
 
-    def __init__(self, cursor_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        cursor_dir: Path | None = None,
+        workspace_root: Path | None = None,
+    ) -> None:
         self._cursor_dir = cursor_dir
+        self._workspace_root = workspace_root
         self._policy = DEFAULT_POLICY
 
     @property
@@ -105,12 +204,7 @@ class CursorParticipant:
     # -- Protocol surface -----------------------------------------------------
 
     def discover(self) -> AgentStore:
-        """Locate the Cursor data directory and return metadata.
-
-        Raises ``ParticipantDiscoveryError`` if no Cursor data directory is
-        present at the default platform path or the explicitly-passed
-        ``cursor_dir``.
-        """
+        """Locate the Cursor data directory and return metadata."""
         path = self._cursor_dir or default_cursor_dir()
         if path is None or not path.is_dir():
             raise ParticipantDiscoveryError(
@@ -118,10 +212,23 @@ class CursorParticipant:
                 "Pass an explicit ``cursor_dir`` to CursorParticipant() if Cursor "
                 "stores its state somewhere non-standard."
             )
+        dbs = _iter_state_dbs(path)
+        db_details = []
+        for db in dbs:
+            try:
+                size = db.stat().st_size
+            except OSError:
+                size = -1
+            db_details.append({"path": str(db), "size_bytes": size})
+
         return AgentStore(
             path=str(path),
             version="unknown",
-            metadata={"platform_default": str(default_cursor_dir())},
+            metadata={
+                "platform_default": str(default_cursor_dir()),
+                "databases_found": len(dbs),
+                "databases": db_details,
+            },
         )
 
     def export_sessions(
@@ -129,7 +236,7 @@ class CursorParticipant:
         since: datetime,
         limit: int = 100,
     ) -> list[Session]:
-        """Return recent Cursor sessions newer than ``since``, capped at ``limit``."""
+        """Return recent Cursor sessions newer than ``since``."""
         memories = self._extract()
         out: list[Session] = []
         since_iso = since.astimezone(timezone.utc).date().isoformat()
@@ -144,9 +251,7 @@ class CursorParticipant:
     def export_l5(self, since: datetime | None = None) -> L5Manifest:
         """Build the L5 manifest from Cursor's current SQLite state.
 
-        Filters sessions to those newer than ``since`` when provided.
-        Applies ``DEFAULT_POLICY`` visibility before returning so the
-        manifest is safe to drop into ``~/agent-library/agents/``.
+        Merges curated short-index entities alongside SQLite-extracted ones.
         """
         memories = self._extract()
         sessions = [_to_session(s) for s in memories.sessions]
@@ -155,6 +260,14 @@ class CursorParticipant:
             sessions = [s for s in sessions if not s.date or s.date >= since_iso]
 
         entities = [_to_entity(e) for e in memories.entities]
+        short_index_entities = _short_index_to_entities(
+            self._workspace_root, self._cursor_dir,
+        )
+        seen_names = {e.name.lower() for e in entities}
+        for si_entity in short_index_entities:
+            if si_entity.name.lower() not in seen_names:
+                entities.append(si_entity)
+                seen_names.add(si_entity.name.lower())
         visible_entities = filter_for_federation(entities, self._policy)
 
         return L5Manifest(
@@ -234,26 +347,3 @@ class CursorParticipant:
 
     def _extract(self) -> CursorSQLiteMemories:
         return extract_cursor_memories(self._cursor_dir)
-
-
-# -- Conversion helpers -------------------------------------------------------
-
-
-def _to_session(raw) -> Session:
-    return Session(
-        date=raw.date or "",
-        cwd=raw.cwd or None,
-        project_focus=[],
-        key_actions=list(raw.key_actions),
-        files_touched=list(raw.files_touched),
-    )
-
-
-def _to_entity(raw) -> Entity:
-    return Entity(
-        name=raw.name,
-        type=raw.entity_type or None,
-        aliases=list(raw.aliases),
-        summary=raw.summary or None,
-        tags=list(raw.tags),
-    )
