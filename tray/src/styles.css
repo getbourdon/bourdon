@@ -461,20 +461,78 @@ a {
   margin: 1px 0;
 }
 
-/* ---- status bar ---- */
+/* ---- status bar + scope toggle ---- */
 .statusbar {
   flex: 0 0 auto;
   display: flex;
-  gap: 5px;
-  padding: 6px 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
   font-size: 11px;
   color: var(--text-dim);
 }
-.scope {
-  color: var(--text-muted);
+.scope-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
 }
-.scope-fed {
+.scope-seg {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 11px;
+  cursor: pointer;
+}
+.scope-seg.active {
+  background: var(--amber);
+  color: #fff;
+}
+.scope-status {
   color: var(--text-dim);
+}
+
+/* ---- federated: machine group headers ---- */
+.machine-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 4px 5px;
+}
+.machine-head:first-child {
+  padding-top: 2px;
+}
+.machine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+}
+.machine-dot.ok {
+  background: var(--green);
+}
+.machine-dot.down {
+  background: var(--red);
+}
+.machine-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+.machine-meta {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+.machine-empty {
+  padding: 2px 10px 8px 24px;
+}
+.src-tag {
+  color: var(--drone-deep);
+  font-weight: 500;
 }

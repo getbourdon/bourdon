@@ -80,6 +80,8 @@ function logoMarkup(d, cls, hex) {
 
 let lastResult = null; // most recent AgentsResult
 let openAgentId = null; // id of the agent in the detail view, or null
+let openAgentSource = null; // source machine of the open agent (federated disambiguation)
+let scope = "local"; // "local" | "federated"
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -149,64 +151,140 @@ function pulseClass(a) {
 
 // ---- overview ---------------------------------------------------------------
 
+function buildAgentRow(a) {
+  const row = document.createElement("div");
+  row.className = "agent-row";
+  row.tabIndex = 0;
+
+  const sub = a.parse_error
+    ? "manifest error"
+    : [
+        a.type || "agent",
+        a.instance || null,
+        typeof a.session_count === "number"
+          ? a.session_count > 0
+            ? `${a.session_count} session${a.session_count === 1 ? "" : "s"}`
+            : "no sessions yet"
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
+  const brand = agentBrand(a.id);
+  const touch = a.parse_error ? "" : humanize(a.last_updated);
+
+  row.innerHTML = `
+    <span class="agent-logo-wrap">
+      ${logoMarkup(brand.d, "agent-logo--row", brand.hex)}
+      <span class="agent-pulse ${pulseClass(a)}"></span>
+    </span>
+    <span class="agent-main">
+      <div class="agent-id">${esc(brand.name)}</div>
+      <div class="agent-sub">${esc(sub)}</div>
+    </span>
+    <span class="agent-touch">${esc(touch)}</span>
+    <span class="chev">›</span>`;
+
+  const open = () => openDetail(a.id, a.source || null);
+  row.addEventListener("click", open);
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") open();
+  });
+  return row;
+}
+
+// Flat list (This machine scope).
 function renderOverview(agents) {
   el("agent-count").textContent = String(agents.length);
   const root = el("agent-list");
   root.innerHTML = "";
+  for (const a of agents) root.appendChild(buildAgentRow(a));
+}
+
+// Grouped-by-machine list (Federated scope).
+function renderGrouped(agents) {
+  el("agent-count").textContent = String(agents.length);
+  const root = el("agent-list");
+  root.innerHTML = "";
+
+  const bySource = {};
   for (const a of agents) {
-    const row = document.createElement("div");
-    row.className = "agent-row";
-    row.tabIndex = 0;
-
-    const sub = a.parse_error
-      ? "manifest error"
-      : [
-          a.type || "agent",
-          a.instance || null,
-          typeof a.session_count === "number"
-            ? a.session_count > 0
-              ? `${a.session_count} session${a.session_count === 1 ? "" : "s"}`
-              : "no sessions yet"
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-
-    const brand = agentBrand(a.id);
-    const touch = a.parse_error ? "" : humanize(a.last_updated);
-
-    row.innerHTML = `
-      <span class="agent-logo-wrap">
-        ${logoMarkup(brand.d, "agent-logo--row", brand.hex)}
-        <span class="agent-pulse ${pulseClass(a)}"></span>
-      </span>
-      <span class="agent-main">
-        <div class="agent-id">${esc(brand.name)}</div>
-        <div class="agent-sub">${esc(sub)}</div>
-      </span>
-      <span class="agent-touch">${esc(touch)}</span>
-      <span class="chev">›</span>`;
-
-    row.addEventListener("click", () => openDetail(a.id));
-    row.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") openDetail(a.id);
-    });
-    root.appendChild(row);
+    const key = a.source || "?";
+    (bySource[key] = bySource[key] || []).push(a);
   }
+
+  // Source order: local first, then peers (as reported); synthesize any source
+  // that has agents but wasn't in the sources summary.
+  const sources = (lastResult && lastResult.report && lastResult.report.sources) || [];
+  const ordered = [...sources].sort(
+    (x, y) => (x.kind === "local" ? 0 : 1) - (y.kind === "local" ? 0 : 1)
+  );
+  const seen = new Set(ordered.map((s) => s.name));
+  for (const name of Object.keys(bySource)) {
+    if (!seen.has(name)) {
+      ordered.push({ name, kind: "peer", reachable: true, agent_count: bySource[name].length });
+    }
+  }
+
+  for (const s of ordered) {
+    const list = bySource[s.name] || [];
+    const count = s.agent_count != null ? s.agent_count : list.length;
+    const dot = s.kind === "local" ? "ok" : s.reachable ? "ok" : "down";
+    const meta =
+      s.kind === "local"
+        ? "this machine"
+        : s.reachable
+          ? "peer"
+          : "peer · unreachable";
+
+    const header = document.createElement("div");
+    header.className = "machine-head";
+    header.innerHTML = `
+      <span class="machine-dot ${dot}"></span>
+      <span class="machine-name">${esc(s.name)}</span>
+      <span class="machine-meta">${meta} · ${count} agent${count === 1 ? "" : "s"}</span>`;
+    root.appendChild(header);
+
+    if (!list.length) {
+      const note = document.createElement("div");
+      note.className = "machine-empty muted small";
+      note.textContent = s.reachable
+        ? "No agents published."
+        : "Unreachable — is this peer's Bourdon server running the latest build?";
+      root.appendChild(note);
+      continue;
+    }
+    for (const a of list) root.appendChild(buildAgentRow(a));
+  }
+}
+
+function renderListForScope(agents) {
+  if (scope === "federated") renderGrouped(agents);
+  else renderOverview(agents);
 }
 
 // ---- detail (deep report) ---------------------------------------------------
 
-function openDetail(id) {
+function openDetail(id, source) {
   openAgentId = id;
+  openAgentSource = source || null;
   renderDetail();
   if (!el("state-detail").classList.contains("hidden")) return;
   showOnly("state-detail");
 }
 
+// Match the open agent by (id, source); fall back to id alone (local scope).
+function findOpenAgent(agents) {
+  return (
+    agents.find(
+      (x) => x.id === openAgentId && (x.source || null) === openAgentSource
+    ) || agents.find((x) => x.id === openAgentId)
+  );
+}
+
 function renderDetail() {
   const agents = (lastResult && lastResult.report && lastResult.report.agents) || [];
-  const a = agents.find((x) => x.id === openAgentId);
+  const a = findOpenAgent(agents);
   const body = el("detail-body");
   if (!a) {
     // Agent vanished between refreshes — fall back to the overview.
@@ -266,6 +344,10 @@ function renderDetail() {
       : `<p class="muted small">No sessions recorded yet — this agent is registered but hasn't published activity.</p>`;
 
   const brand = agentBrand(a.id);
+  const srcTag =
+    scope === "federated" && a.source
+      ? ` · <span class="src-tag">${esc(a.source)}</span>`
+      : "";
   body.innerHTML = `
     <div class="detail-head">
       ${logoMarkup(brand.d, "agent-logo--detail", brand.hex)}
@@ -273,7 +355,7 @@ function renderDetail() {
         <div class="detail-id">${esc(brand.name)}</div>
         <div class="detail-type">${esc(a.type || "agent")}${
     a.instance ? " · " + esc(a.instance) : ""
-  }</div>
+  }${srcTag}</div>
       </div>
     </div>
     <div class="detail-stats">
@@ -291,8 +373,9 @@ function renderDetail() {
 
 function showOverview() {
   openAgentId = null;
+  openAgentSource = null;
   const agents = (lastResult && lastResult.report && lastResult.report.agents) || [];
-  renderOverview(agents);
+  renderListForScope(agents);
   showOnly("state-overview");
 }
 
@@ -301,6 +384,7 @@ function showOverview() {
 function render(result) {
   lastResult = result;
   setHealth(result.health);
+  updateScopeStatus(result);
 
   if (result.health === "red" && !result.report) {
     el("error-detail").textContent =
@@ -322,8 +406,8 @@ function render(result) {
   }
 
   // If we were viewing a detail and that agent still exists, stay there.
-  if (openAgentId && agents.some((a) => a.id === openAgentId)) {
-    renderOverview(agents); // keep the back-target fresh
+  if (openAgentId && findOpenAgent(agents)) {
+    renderListForScope(agents); // keep the back-target fresh
     renderDetail();
     showOnly("state-detail");
   } else {
@@ -335,13 +419,35 @@ function render(result) {
 
 let inFlight = false;
 
+function setScopeStatus(text) {
+  el("scope-status").textContent = text || "";
+}
+
+// Footer status: in federated scope, summarize peer reachability.
+function updateScopeStatus(result) {
+  if (scope !== "federated") {
+    setScopeStatus("");
+    return;
+  }
+  const sources = (result && result.report && result.report.sources) || [];
+  const peers = sources.filter((s) => s.kind === "peer");
+  if (!peers.length) {
+    setScopeStatus("no peers configured");
+    return;
+  }
+  const up = peers.filter((s) => s.reachable).length;
+  setScopeStatus(`${up}/${peers.length} peer${peers.length === 1 ? "" : "s"} online`);
+}
+
 async function load() {
   if (inFlight) return;
   inFlight = true;
   const btn = el("refresh-btn");
   btn.disabled = true;
+  if (scope === "federated") setScopeStatus("syncing peers…");
   try {
-    const result = await invoke("get_agents");
+    const cmd = scope === "federated" ? "get_agents_federated" : "get_agents";
+    const result = await invoke(cmd);
     render(result);
   } catch (e) {
     setHealth("red");
@@ -355,10 +461,28 @@ async function load() {
   }
 }
 
+function setScope(next) {
+  if (scope === next || inFlight) return;
+  scope = next;
+  el("scope-local").classList.toggle("active", scope === "local");
+  el("scope-federated").classList.toggle("active", scope === "federated");
+  openAgentId = null;
+  openAgentSource = null;
+  load();
+}
+
 el("refresh-btn").addEventListener("click", load);
 el("back-btn").addEventListener("click", showOverview);
+el("scope-local").addEventListener("click", () => setScope("local"));
+el("scope-federated").addEventListener("click", () => setScope("federated"));
 
+// Tray "Refresh" pushes a LOCAL payload. In federated scope, ignore it and
+// re-fetch federated instead so the view doesn't flip to local data.
 listen("agents-refreshed", (event) => {
+  if (scope === "federated") {
+    load();
+    return;
+  }
   if (event.payload) render(event.payload);
 });
 

@@ -91,8 +91,11 @@
     </main>
 
     <footer class="statusbar">
-      <span class="scope" id="scope-line">This machine</span>
-      <span class="scope-fed" title="Configure a peer to enable">· Federated (configure a peer)</span>
+      <div class="scope-toggle" role="group" aria-label="Scope">
+        <button class="scope-seg active" id="scope-local">This machine</button>
+        <button class="scope-seg" id="scope-federated">Federated</button>
+      </div>
+      <span class="scope-status" id="scope-status"></span>
     </footer>
 
     <script src="main.js"></script>

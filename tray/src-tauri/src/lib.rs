@@ -47,11 +47,20 @@ use tauri::{App, AppHandle, Emitter, Manager, WindowEvent};
 // std::process::Command does NOT use a shell, so there is no word-splitting,
 // globbing, or metacharacter interpretation. This is the required posture.
 
-/// The program to execute (argv[0]).
-const CLI_PROGRAM: &str = "python";
+/// Python executable. Override with `BOURDON_PYTHON` to point at a venv that has
+/// the `mcp` deps required for `--federated` peer calls; defaults to bare
+/// `python` (sufficient for local-only reads). The token for peers is read by
+/// the CLI from the environment this process inherits (e.g. `BOURDON_PEER_TOKEN_*`).
+fn cli_program() -> String {
+    std::env::var("BOURDON_PYTHON")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "python".to_string())
+}
 
 /// Fixed argv tail (argv[1..]). Never interpolate runtime values here.
-const CLI_ARGS: &[&str] = &["-m", "cli.main", "agents", "--json"];
+/// `--federated` is appended for the federated read only.
+const CLI_BASE_ARGS: &[&str] = &["-m", "cli.main", "agents", "--json"];
 
 /// Working directory for the CLI process. The repo root, because
 /// `python -m cli.main` must resolve the `cli` package from there.
@@ -126,6 +135,26 @@ pub struct Agent {
     /// is rendered as an error row, not a crash.
     #[serde(default)]
     pub parse_error: Option<String>,
+    /// Federation: which machine this agent came from, and local vs peer.
+    /// Present on every agent in `--federated` output; the local path tags it
+    /// with this machine's name. Must be carried on the Rust struct or it is
+    /// dropped on the round-trip to the frontend.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+}
+
+/// One federated source machine (local or a peer).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct Source {
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub reachable: bool,
+    #[serde(default)]
+    pub agent_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -133,8 +162,14 @@ pub struct AgentsReport {
     pub schema: String,
     #[serde(default)]
     pub generated_from: String,
+    /// Local-mode: this machine's name. (Federated mode omits it in favor of `sources`.)
+    #[serde(default)]
+    pub machine: Option<String>,
     #[serde(default)]
     pub agents: Vec<Agent>,
+    /// Federated mode: per-machine summary (local + each peer, reachable?).
+    #[serde(default)]
+    pub sources: Option<Vec<Source>>,
 }
 
 /// Health state machine (build plan §5).
@@ -251,16 +286,19 @@ fn compute_health(report: &AgentsReport) -> Health {
 // CLI invocation (argv array — NO shell)
 // ===========================================================================
 
-fn command_display() -> String {
-    format!("{} {}", CLI_PROGRAM, CLI_ARGS.join(" "))
-}
-
-fn run_cli() -> AgentsResult {
-    let cmd_str = command_display();
+fn run_cli(federated: bool) -> AgentsResult {
+    let program = cli_program();
+    let mut args: Vec<&str> = CLI_BASE_ARGS.to_vec();
+    if federated {
+        args.push("--federated");
+    }
+    let cmd_str = format!("{} {}", program, args.join(" "));
 
     // SECURITY: argv array, fixed constants, no shell. cwd is a path constant.
-    let output = Command::new(CLI_PROGRAM)
-        .args(CLI_ARGS)
+    // The process inherits this app's environment (so BOURDON_PEER_TOKEN_* and
+    // BOURDON_PYTHON flow through); no value is interpolated into a shell line.
+    let output = Command::new(&program)
+        .args(&args)
         .current_dir(repo_root())
         .output();
 
@@ -272,7 +310,7 @@ fn run_cli() -> AgentsResult {
                 health: Health::Red,
                 report: None,
                 error: Some(format!(
-                    "Failed to launch Bourdon CLI ({CLI_PROGRAM}): {e}.\n\
+                    "Failed to launch Bourdon CLI ({program}): {e}.\n\
                      Is Python on PATH and is the repo at the configured root?"
                 )),
                 command: cmd_str,
@@ -378,18 +416,29 @@ fn apply_health_to_tray(app: &AppHandle, health: Health, agent_count: usize) {
 // Tauri commands
 // ===========================================================================
 
-/// Frontend-facing read. Runs the CLI, returns the typed result, and (side
-/// effect) updates the tray icon to match the freshly-computed health.
-#[tauri::command]
-fn get_agents(app: AppHandle) -> AgentsResult {
-    let result = run_cli();
+/// Run a read, update the tray icon to match the health, return the result.
+fn read_and_apply(app: &AppHandle, federated: bool) -> AgentsResult {
+    let result = run_cli(federated);
     let agent_count = result
         .report
         .as_ref()
         .map(|r| r.agents.len())
         .unwrap_or(0);
-    apply_health_to_tray(&app, result.health, agent_count);
+    apply_health_to_tray(app, result.health, agent_count);
     result
+}
+
+/// Frontend-facing local read (fast — this machine only). Default on load.
+#[tauri::command]
+fn get_agents(app: AppHandle) -> AgentsResult {
+    read_and_apply(&app, false)
+}
+
+/// Frontend-facing federated read (this machine + peers, source-tagged). Slower
+/// (network fan-out) — invoked only when the user switches to the Federated scope.
+#[tauri::command]
+fn get_agents_federated(app: AppHandle) -> AgentsResult {
+    read_and_apply(&app, true)
 }
 
 /// Show + focus the main window (used by tray "Open Bourdon" and left-click).
@@ -490,8 +539,8 @@ fn build_tray(app: &App) -> tauri::Result<()> {
             "refresh" => {
                 // Re-run the read; this updates the tray icon as a side effect
                 // and pushes a fresh payload to the frontend via an event so an
-                // open window re-renders.
-                let result = run_cli();
+                // open window re-renders. (Tray refresh = local/fast.)
+                let result = run_cli(false);
                 let count = result
                     .report
                     .as_ref()
@@ -532,7 +581,7 @@ fn build_tray(app: &App) -> tauri::Result<()> {
 /// Useful for CI smoke, and for diagnosing the CLI wiring on a fresh machine
 /// without launching the desktop app.
 pub fn selftest() -> i32 {
-    let result = run_cli();
+    let result = run_cli(false);
     let count = result
         .report
         .as_ref()
@@ -557,7 +606,11 @@ pub fn selftest() -> i32 {
 pub fn run() {
     tauri::Builder::default()
         .manage(TrayState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_agents, show_main_window])
+        .invoke_handler(tauri::generate_handler![
+            get_agents,
+            get_agents_federated,
+            show_main_window
+        ])
         .setup(|app| {
             // macOS: tray-first app should not own a Dock icon. Accessory
             // policy = menubar/tray presence only. Set at runtime (robust to
