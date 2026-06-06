@@ -15,7 +15,11 @@ from adapters.cursor_automations import (
     _build_config,
     _extract_memory_runs,
     _iter_configs,
+    _parse_memory_sections,
+    _serialize_sections,
     default_cursor_automations_dir,
+    init_automations_dir,
+    merge_automation_tree,
 )
 
 # ---- Helpers ----------------------------------------------------------------
@@ -264,3 +268,167 @@ def test_class_attrs():
 def test_native_path_resolves(tmp_path):
     adapter = CursorAutomationsAdapter(automations_dir=tmp_path / "automations")
     assert adapter.native_path == str(tmp_path / "automations")
+
+
+# ---- init_automations_dir --------------------------------------------------
+
+
+def test_init_creates_toml_and_memory(tmp_path):
+    path = init_automations_dir(
+        automations_dir=tmp_path / "automations",
+        automation_id="test-agent",
+    )
+    assert (path / "automation.toml").is_file()
+    assert (path / "memory.md").is_file()
+    toml_text = (path / "automation.toml").read_text()
+    assert "test-agent" in toml_text
+
+
+def test_init_raises_if_exists(tmp_path):
+    base = tmp_path / "automations"
+    init_automations_dir(automations_dir=base, automation_id="a")
+    with pytest.raises(FileExistsError):
+        init_automations_dir(automations_dir=base, automation_id="a")
+
+
+def test_init_force_overwrites(tmp_path):
+    base = tmp_path / "automations"
+    init_automations_dir(automations_dir=base, automation_id="a")
+    path = init_automations_dir(automations_dir=base, automation_id="a", force=True)
+    assert (path / "automation.toml").is_file()
+
+
+# ---- _parse_memory_sections / _serialize_sections ---------------------------
+
+
+def test_parse_memory_sections_basic():
+    text = "2026-06-01\n- Did X.\n- Did Y.\n\n2026-06-02\n- Did Z.\n"
+    sections = _parse_memory_sections(text)
+    assert len(sections) == 2
+    assert sections[0] == ("2026-06-01", ["Did X.", "Did Y."])
+    assert sections[1] == ("2026-06-02", ["Did Z."])
+
+
+def test_parse_memory_sections_with_same_line_subtitle():
+    text = "2026-06-03 run: first pass\n- bullet\n"
+    sections = _parse_memory_sections(text)
+    assert len(sections) == 1
+    assert sections[0][0] == "2026-06-03"
+    assert "first pass" in sections[0][1][0]
+    assert sections[0][1][1] == "bullet"
+
+
+def test_serialize_sections_roundtrip():
+    sections = [("2026-06-01", ["A", "B"]), ("2026-06-02", ["C"])]
+    text = _serialize_sections(sections)
+    reparsed = _parse_memory_sections(text)
+    assert reparsed == sections
+
+
+# ---- merge_automation_tree --------------------------------------------------
+
+
+def test_merge_creates_new_automation(tmp_path):
+    source = tmp_path / "source"
+    _make_automation(source, "ci-check", memory="2026-06-01\n- Ran CI.\n")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    result = merge_automation_tree(source, dest)
+    assert result.automations_created == 1
+    assert result.bullets_added == 1
+    assert (dest / "ci-check" / "automation.toml").is_file()
+    assert (dest / "ci-check" / "memory.md").is_file()
+
+
+def test_merge_is_idempotent(tmp_path):
+    source = tmp_path / "source"
+    _make_automation(source, "monitor", memory="2026-06-01\n- Check.\n")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    merge_automation_tree(source, dest)
+    result2 = merge_automation_tree(source, dest)
+    assert result2.automations_created == 0
+    assert result2.bullets_added == 0
+
+
+def test_merge_appends_new_bullets(tmp_path):
+    source = tmp_path / "source"
+    _make_automation(source, "daily", memory="2026-06-01\n- New bullet.\n")
+
+    dest = tmp_path / "dest"
+    dest_auto = dest / "daily"
+    dest_auto.mkdir(parents=True)
+    (dest_auto / "automation.toml").write_text('id = "daily"\n', encoding="utf-8")
+    (dest_auto / "memory.md").write_text(
+        "2026-06-01\n- Existing bullet.\n", encoding="utf-8"
+    )
+
+    result = merge_automation_tree(source, dest)
+    assert result.bullets_added == 1
+    merged_text = (dest / "daily" / "memory.md").read_text()
+    assert "Existing bullet." in merged_text
+    assert "New bullet." in merged_text
+
+
+def test_merge_skips_invalid_ids(tmp_path):
+    source = tmp_path / "source"
+    bad = source / "bad id with spaces"
+    bad.mkdir(parents=True)
+    (bad / "automation.toml").write_text('id = "bad"\n', encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    result = merge_automation_tree(source, dest)
+    assert "bad id with spaces" in result.skipped
+
+
+def test_merge_synthesizes_toml_if_missing(tmp_path):
+    source = tmp_path / "source" / "no-toml"
+    source.mkdir(parents=True)
+    (source / "memory.md").write_text("2026-06-01\n- Run.\n", encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    merge_automation_tree(tmp_path / "source", dest)
+    toml = (dest / "no-toml" / "automation.toml").read_text()
+    assert "no-toml" in toml
+    assert "cursor-cloud-agent" in toml
+
+
+def test_merge_raises_on_missing_source(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        merge_automation_tree(tmp_path / "nope", tmp_path / "dest")
+
+
+def test_merge_preserves_chronological_order(tmp_path):
+    source = tmp_path / "source"
+    _make_automation(
+        source, "test",
+        memory="2026-06-03\n- Third.\n\n2026-06-01\n- First.\n",
+    )
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    merge_automation_tree(source, dest)
+    text = (dest / "test" / "memory.md").read_text()
+    first_pos = text.index("2026-06-01")
+    third_pos = text.index("2026-06-03")
+    assert first_pos < third_pos
+
+
+# ---- ci-signal detection ---------------------------------------------------
+
+
+def test_ci_signal_detected(tmp_path):
+    automations_dir = tmp_path / "automations"
+    _make_automation(
+        automations_dir,
+        "ci-pipeline",
+        memory="2026-06-01\n- GitHub Action workflow run completed.\n",
+    )
+    configs = _iter_configs(automations_dir)
+    runs = _extract_memory_runs(configs[0])
+    assert len(runs) == 1
+    assert "ci-signal" in runs[0].signals

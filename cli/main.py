@@ -50,7 +50,12 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
-from adapters.cursor_automations import CursorAutomationsAdapter, init_automations_dir
+from adapters.cursor_automations import (
+    CursorAutomationsAdapter,
+    default_cursor_automations_dir,
+    init_automations_dir,
+    merge_automation_tree,
+)
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -400,19 +405,143 @@ def _handle_cursor_init(args: argparse.Namespace) -> int:
 
 
 def _handle_cursor_automations_export(args: argparse.Namespace) -> int:
-    automations_dir = (
-        Path(args.automations_dir)
-        if getattr(args, "automations_dir", None)
-        else None
-    )
-    adapter = CursorAutomationsAdapter(automations_dir=automations_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    """Hook-safe: silent on success, returns 0 in all failure modes."""
+    verbose = getattr(args, "verbose", False)
+    try:
+        automations_dir = (
+            Path(args.automations_dir)
+            if getattr(args, "automations_dir", None)
+            else None
+        )
+        adapter = CursorAutomationsAdapter(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = adapter.export_l5(since=_parse_since(args.since))
+    except AdapterDiscoveryError as exc:
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: no data ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
-    out_path = Path(args.out) if args.out else _default_cursor_automations_l5_path()
-    write_l5_dict(data, out_path)
-    if args.print_manifest:
+    out_path = (
+        Path(args.out) if args.out
+        else _default_cursor_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: write failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
         _print_yaml(data)
     return 0
+
+
+def _find_cursor_automations_root(extracted_dir: Path) -> Path | None:
+    """Locate the 'automations/' subtree inside an extracted artifact."""
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
+def _handle_cursor_automations_ingest(args: argparse.Namespace) -> int:
+    """Ingest an automations/ tree into the local Cursor automations dir.
+
+    Two modes:
+      1. ``--source <local-dir>`` -- merge from a local tree.
+      2. ``--artifact-zip <path>`` -- unzip first, then merge.
+    """
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(
+                prefix="bourdon-cursor-ingest-"
+            )
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(
+                    f"cursor-automations ingest: zip not found: {zip_path}",
+                    file=sys.stderr,
+                )
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_cursor_automations_root(Path(tmp.name))
+        else:
+            print(
+                "cursor-automations ingest: specify --source or --artifact-zip.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if source is None or not source.is_dir():
+            print(
+                "cursor-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+
+        dest_dir = (
+            Path(args.dest)
+            if getattr(args, "dest", None)
+            else default_cursor_automations_dir()
+        )
+        result = merge_automation_tree(
+            source, dest_dir, default_kind=args.default_kind,
+        )
+
+        report = {
+            "source": str(source),
+            "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
 
 
 def _handle_cursor_automations_doctor(args: argparse.Namespace) -> int:
@@ -1997,6 +2126,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the exported manifest after writing it.",
     )
+    cursor_automation_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print diagnostics to stderr on failure (normally silent).",
+    )
     cursor_automation_export_cmd.set_defaults(func=_handle_cursor_automations_export)
 
     cursor_automation_doctor_cmd = cursor_automation_subparsers.add_parser(
@@ -2006,6 +2140,34 @@ def _build_parser() -> argparse.ArgumentParser:
     cursor_automation_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
     cursor_automation_doctor_cmd.add_argument("--report-out")
     cursor_automation_doctor_cmd.set_defaults(func=_handle_cursor_automations_doctor)
+
+    cursor_automation_ingest_cmd = cursor_automation_subparsers.add_parser(
+        "ingest",
+        help=(
+            "Ingest an automations/ tree into the local Cursor "
+            "automations directory."
+        ),
+    )
+    cursor_automation_ingest_cmd.add_argument(
+        "--source",
+        help="Local automations/ directory to merge from.",
+    )
+    cursor_automation_ingest_cmd.add_argument(
+        "--artifact-zip",
+        help="Path to a zip artifact containing an automations/ tree.",
+    )
+    cursor_automation_ingest_cmd.add_argument(
+        "--dest",
+        help="Destination automations dir (default: ~/.cursor/automations).",
+    )
+    cursor_automation_ingest_cmd.add_argument(
+        "--default-kind",
+        default="cursor-cloud-agent",
+        help="Default 'kind' for new automation.toml stubs.",
+    )
+    cursor_automation_ingest_cmd.set_defaults(
+        func=_handle_cursor_automations_ingest,
+    )
 
     # ---- codex automation subcommands --------------------------------------
     codex_automations = subparsers.add_parser(
