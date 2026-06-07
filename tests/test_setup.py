@@ -61,6 +61,8 @@ def test_detect_agents_reports_all_absent(fake_home):
         "claude-desktop-cowork",
         "codex",
         "copilot",
+        "copilot-cli",
+        "copilot-vscode",
         "cursor",
     ]
     assert all(not a.present for a in out)
@@ -78,6 +80,8 @@ def test_detect_agents_reports_present_when_paths_exist(fake_home):
         "codex": True,
         "cursor": False,
         "copilot": False,
+        "copilot-cli": False,
+        "copilot-vscode": False,
         "cascade": False,
     }
 
@@ -93,6 +97,8 @@ def test_detect_agents_ordering_is_stable(fake_home):
         "claude-desktop-cowork",
         "codex",
         "copilot",
+        "copilot-cli",
+        "copilot-vscode",
         "cursor",
     ]
 

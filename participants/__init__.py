@@ -6,11 +6,18 @@ Participants are registered via Python entry points in pyproject.toml under the
 `bourdon.participants` group.
 
 First-party participants:
-    - claude_code  -- Claude Code (reads claude-brain + auto-memory + MCP graph)
-    - codex       -- OpenAI Codex CLI (session_index, rollouts, SQLite state)
-    - cursor      -- Cursor IDE (SQLite workspace state)
-    - copilot     -- GitHub Copilot (convention-based memory.md)
-    - cascade     -- Cascade / Windsurf (convention-based memory.md)
+    - claude_code            -- Claude Code (reads claude-brain + auto-memory + MCP graph)
+    - claude_code_automations -- Claude Code automation runs (reads automation.toml + memory.md)
+    - claude_desktop_code    -- Claude Desktop GUI Code surface (metadata-only state)
+    - claude_desktop_cowork  -- Claude Desktop Co-Work surface
+    - codex                  -- OpenAI Codex CLI (session_index, rollouts, SQLite state)
+    - codex_automations      -- Codex automation runs (reads automation.toml + memory.md)
+    - cursor                 -- Cursor IDE (SQLite workspace state)
+    - copilot                -- GitHub Copilot (convention-based memory.md — fallback surface)
+    - copilot_cli            -- GitHub Copilot CLI (session-store.db SQLite)
+    - copilot_vscode         -- GitHub Copilot VS Code GUI (transcripts + memory-tool)
+    - copilot_automations    -- GitHub Copilot automations (convention-based memory)
+    - cascade                -- Cascade / Windsurf (convention-based memory.md)
 
 Planned / native publishers:
     - clyde  -- RADLAB Clyde (native publisher, not external participant)
