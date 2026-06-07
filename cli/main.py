@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from participants import discover_participants
 from participants.base import ParticipantDiscoveryError
 from participants.cascade import (
     CascadeParticipant,
@@ -348,21 +349,11 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 # -- Top-level doctor / export-all --------------------------------------------
 
-_PARTICIPANT_REGISTRY: list[tuple[str, type]] = [
-    ("claude-code", ClaudeCodeParticipant),
-    ("claude-code-automations", ClaudeCodeAutomationsParticipant),
-    ("codex", CodexParticipant),
-    ("codex-automations", CodexAutomationsParticipant),
-    ("cursor", CursorParticipant),
-    ("copilot", CopilotParticipant),
-    ("cascade", CascadeParticipant),
-]
-
 
 def _handle_doctor(args: argparse.Namespace) -> int:
     """Run health checks across all known participants."""
     results: list[dict[str, Any]] = []
-    for agent_id, participant_cls in _PARTICIPANT_REGISTRY:
+    for agent_id, participant_cls in discover_participants():
         try:
             participant = participant_cls()
             health = participant.health_check()
@@ -529,7 +520,7 @@ def _handle_export_all(args: argparse.Namespace) -> int:
     since = _parse_since(getattr(args, "since", None))
     results: list[dict[str, Any]] = []
 
-    for agent_id, participant_cls in _PARTICIPANT_REGISTRY:
+    for agent_id, participant_cls in discover_participants():
         try:
             participant = participant_cls()
             manifest = participant.export_l5(since=since)

@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from participants import discover_participants
+
 
 # ---------------------------------------------------------------------------
 # Agent detection
@@ -48,25 +50,40 @@ class AgentDetection:
     hint_path: Path  # where we looked; useful when present=False
 
 
+def _humanize(agent_id: str) -> str:
+    """Derive a display label from an agent id (``"claude-code" -> "Claude Code"``)."""
+    return agent_id.replace("-", " ").replace("_", " ").title()
+
+
 def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
     """Inspect the user's home directory for known agent paths.
 
-    Returns a list ordered so the "most common to wire" agents appear first.
-    Detection is filesystem-only (no shelling out, no PATH lookups), which
-    keeps the wizard fast and predictable.
+    The agent set is derived from :func:`participants.discover_participants` (a
+    scan of the ``participants/`` package), so dropping in a new top-level
+    participant module makes it appear here with no edits. ``-automations``
+    sub-surfaces are excluded: the wizard wires the *parent* agent and the
+    automations export/observe surface comes with it.
+
+    Each agent's label comes from its optional ``display_name`` class attribute,
+    falling back to a humanized id. Its detection path comes from the
+    participant's ``default_native_path(home)``. The result is sorted by agent
+    id, which is deterministic and stable across machines.
+
+    Detection is filesystem-only (no shelling out, no PATH lookups), which keeps
+    the wizard fast and predictable.
     """
     h = home or Path.home()
-    candidates = [
-        ("claude-code", "Claude Code", h / ".claude"),
-        ("codex", "Codex", h / ".codex"),
-        ("cursor", "Cursor", h / ".cursor"),
-        ("copilot", "GitHub Copilot", h / ".copilot-bourdon"),
-        ("cascade", "Cascade (Windsurf)", h / ".cascade-bourdon"),
-    ]
-    return [
-        AgentDetection(id=aid, label=label, present=path.exists(), hint_path=path)
-        for aid, label, path in candidates
-    ]
+    detections: list[AgentDetection] = []
+    for agent_id, cls in discover_participants():
+        if agent_id.endswith("-automations"):
+            continue
+        label = getattr(cls, "display_name", None) or _humanize(agent_id)
+        native = getattr(cls, "default_native_path", None)
+        path = native(h) if native is not None else h / f".{agent_id}"
+        detections.append(
+            AgentDetection(id=agent_id, label=label, present=path.exists(), hint_path=path)
+        )
+    return detections
 
 
 # ---------------------------------------------------------------------------

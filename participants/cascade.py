@@ -286,6 +286,14 @@ class CascadeParticipant(BourdonParticipant):
 
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
+    display_name = "Cascade (Windsurf)"
+
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional ``~/.cascade-bourdon`` dir used by the setup wizard's detection."""
+        if home is not None:
+            return home / ".cascade-bourdon"
+        return default_cascade_dir()
 
     def __init__(
         self,

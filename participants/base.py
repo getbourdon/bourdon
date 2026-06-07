@@ -169,6 +169,20 @@ class BourdonParticipant(Protocol):
     agent_type: str
     native_path: str
 
+    # -- Optional members (not required for structural conformance) ------------
+    # A participant MAY expose these; the auto-discovery + setup wizard fall back
+    # to sensible defaults when they are absent.
+    #
+    #   display_name: str
+    #       Human-friendly label for the agent (e.g. "GitHub Copilot"). When
+    #       absent, callers humanize ``agent_id`` ("claude-code" -> "Claude Code").
+    #
+    #   @classmethod
+    #   def default_native_path(cls, home: Path | None = None) -> Path:
+    #       Conventional filesystem path the setup wizard probes to detect the
+    #       agent's presence. Honors an explicit ``home`` for testability; falls
+    #       back to ``Path.home()`` otherwise.
+
     def discover(self) -> AgentStore:
         """Check that the native store exists; return metadata. Raises ParticipantDiscoveryError if missing."""
         ...

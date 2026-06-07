@@ -18,8 +18,12 @@ Design choices
 - **Plants only in convention-file participants.** Cursor's SQLite and Codex's
   session index are owned by their IDE/CLI; writing to them is invasive.
   Claude Code's ``~/claude-brain`` is a real git repo; planting there commits
-  to history if cleanup races. Those three participants appear in the matrix as
-  "snapshot" rows -- we export what's there but don't manipulate it.
+  to history if cleanup races. The participant set is auto-discovered from the
+  ``participants/`` package (see :func:`participants.discover_participants`), so
+  every registered participant -- including the ``-automations`` export/observe
+  surfaces -- appears in the matrix as a "snapshot" row; only the plantable
+  convention-file participants are written to. We export what the rest have but
+  don't manipulate it.
 - **Ephemeral library.** The exports land in a ``tempfile.mkdtemp`` directory
   that's deleted on exit. The user's real ``~/agent-library/`` is untouched.
 - **Idempotent cleanup.** The cleanup filters the marker out of the
@@ -49,12 +53,10 @@ from typing import Any, Callable
 
 import yaml
 
+from participants import discover_participants
 from participants.base import Visibility
-from participants.cascade import CascadeParticipant, default_cascade_memory_path
-from participants.claude_code import ClaudeCodeParticipant
-from participants.codex import CodexParticipant
-from participants.copilot import CopilotParticipant, default_copilot_memory_path
-from participants.cursor import CursorParticipant
+from participants.cascade import default_cascade_memory_path
+from participants.copilot import default_copilot_memory_path
 from core.codex_context import filter_manifest_for_access
 from core.l5_io import write_l5_dict
 from core.l6_store import L6Store
@@ -64,16 +66,6 @@ logger = logging.getLogger(__name__)
 # Participants dogfood will attempt to plant in. The rest are exported and
 # observed but never written to.
 PLANTABLE_AGENTS = {"copilot", "cascade"}
-
-# Participant registry kept in sync with cli.main._PARTICIPANT_REGISTRY. Mirroring
-# rather than importing avoids a circular-import surface in main.py.
-_REGISTRY: list[tuple[str, type]] = [
-    ("claude-code", ClaudeCodeParticipant),
-    ("codex", CodexParticipant),
-    ("cursor", CursorParticipant),
-    ("copilot", CopilotParticipant),
-    ("cascade", CascadeParticipant),
-]
 
 
 @dataclass
@@ -258,8 +250,8 @@ def run_dogfood(
         If True, planted markers are NOT removed at the end. Useful for
         debugging or to leave a trail an external agent can pick up.
     access_level
-        L6Store query access level. Defaults to ``team`` because three of
-        five participants default-tag entities as TEAM and ``public`` queries
+        L6Store query access level. Defaults to ``team`` because several
+        participants default-tag entities as TEAM and ``public`` queries
         would silently miss them. See ``claude-brain`` Finding 2 for context.
     library_dir
         Override the ephemeral library path. When None (default), a fresh
@@ -273,10 +265,14 @@ def run_dogfood(
     agents_dir = library / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
+    # Single source of truth for the participant set: scan the participants/
+    # package. Snapshot it once so every phase iterates the same registry.
+    registry = discover_participants()
+
     cleanups: list[Callable[[], None]] = []
     reports: dict[str, ParticipantReport] = {
         agent_id: ParticipantReport(agent_id=agent_id, plantable=(agent_id in PLANTABLE_AGENTS))
-        for agent_id, _ in _REGISTRY
+        for agent_id, _ in registry
     }
 
     try:
@@ -307,7 +303,7 @@ def run_dogfood(
                 rep.planted = False
 
         # Phase 2: export every participant to the ephemeral library.
-        for agent_id, participant_cls in _REGISTRY:
+        for agent_id, participant_cls in registry:
             discovered, exported, notes = _export_one(
                 agent_id, participant_cls, agents_dir, access_level
             )
@@ -344,7 +340,7 @@ def run_dogfood(
             access_level=access_level,
             started_at=started,
             finished_at=finished,
-            participants=[reports[a] for a, _ in _REGISTRY],
+            participants=[reports[a] for a, _ in registry],
             passed=passed,
         )
     finally:
