@@ -29,6 +29,9 @@ EXPECTED_AGENT_IDS = [
     "codex",
     "codex-automations",
     "copilot",
+    "copilot-automations",
+    "copilot-cli",
+    "copilot-vscode",
     "cursor",
 ]
 

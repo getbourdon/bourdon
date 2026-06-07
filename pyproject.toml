@@ -96,6 +96,9 @@ copilot = "participants.copilot:CopilotParticipant"
 cascade = "participants.cascade:CascadeParticipant"
 claude-desktop-cowork = "participants.claude_desktop_cowork:ClaudeDesktopCoworkParticipant"
 claude-desktop-code = "participants.claude_desktop_code:ClaudeDesktopCodeParticipant"
+copilot-cli = "participants.copilot_cli:CopilotCliParticipant"
+copilot-vscode = "participants.copilot_vscode:CopilotVscodeParticipant"
+copilot-automations = "participants.copilot_automations:CopilotAutomationsParticipant"
 # clyde = "participants.clyde:ClydeParticipant"     # native publisher lives in ~/.clyde/, not here
 # clair = "participants.clair:ClairParticipant"     # same pattern -- native publisher
 
