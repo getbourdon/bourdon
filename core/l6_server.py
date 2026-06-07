@@ -792,6 +792,15 @@ def _parse_args() -> argparse.Namespace:
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
     )
     parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help=(
+            "Bind host for HTTP transport (default: 0.0.0.0 — all interfaces, "
+            "required for cross-host / Tailnet federation). Use 127.0.0.1 to "
+            "restrict to localhost."
+        ),
+    )
+    parser.add_argument(
         "--peer",
         action="append",
         default=[],
@@ -823,7 +832,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_peers(
+def load_peers(
     config_path: Path,
     inline_urls: list[str],
 ) -> list[RemoteL6Client]:
@@ -832,6 +841,10 @@ def _load_peers(
     Returns an empty list if no peers are configured. Import of
     :class:`RemoteL6Client` is local so importing this module without the
     ``[federation]`` extras stays cheap.
+
+    Shared by both serve entry points: ``python -m core.l6_server`` (``main``)
+    and ``bourdon serve`` (``cli.main._handle_serve``). Public so the CLI can
+    reuse the exact same flag + config-file resolution.
     """
     from core.l6_remote import RemoteL6Client
 
@@ -903,10 +916,65 @@ def _build_auth_middleware():
     return _BearerAuth
 
 
+def run_l6_server(
+    server: Any,
+    *,
+    transport: str = "stdio",
+    port: int = 7500,
+    host: str = "0.0.0.0",
+    allow_unauthenticated: bool = False,
+) -> None:
+    """Run an already-created L6 MCP server under the requested transport.
+
+    Shared by both serve entry points (``python -m core.l6_server`` and
+    ``bourdon serve``) so they get identical transport, bind host, and
+    Bearer-auth behavior.
+
+    - ``stdio`` (default): blocks until the connecting MCP client disconnects.
+    - ``http``: always run under uvicorn so the bind ``host`` is ours to set.
+      ``allow_unauthenticated`` skips the Bearer middleware (only safe on
+      localhost / a closed Tailnet); otherwise the Starlette app is wrapped
+      with :func:`_build_auth_middleware`, which fails closed (503) when
+      ``BOURDON_PEER_TOKEN_SERVER`` is unset.
+
+    HTTP always binds ``host`` (default ``0.0.0.0``) via ``uvicorn.run``. We do
+    NOT use ``server.run(transport="http")``: FastMCP binds ``127.0.0.1`` there,
+    which silently defeats ``--allow-unauthenticated`` for cross-host / Tailnet
+    federation (the bind ends up loopback-only despite the flag).
+    """
+    if transport == "stdio":
+        server.run()  # fastmcp default: stdio
+        return
+
+    # HTTP transport: always via uvicorn so we control the bind host + the
+    # middleware stack. (Both authed and unauth paths bind `host`.)
+    try:
+        import uvicorn
+        from starlette.middleware import Middleware
+    except ImportError as exc:
+        raise RuntimeError(
+            "uvicorn + starlette are required for HTTP transport. "
+            "Install via: pip install 'bourdon[server,federation]'"
+        ) from exc
+
+    if allow_unauthenticated:
+        logger.warning(
+            "Serving HTTP transport WITHOUT auth on %s:%d (--allow-unauthenticated). "
+            "Restrict to localhost / a closed Tailnet.",
+            host,
+            port,
+        )
+        app = server.http_app()
+    else:
+        auth_cls = _build_auth_middleware()
+        app = server.http_app(middleware=[Middleware(auth_cls)])
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    peers = _load_peers(args.peers_config, args.peer)
+    peers = load_peers(args.peers_config, args.peer)
     logger.info(
         "Bourdon L6 server starting -- library=%s, transport=%s, peers=%d",
         args.library,
@@ -918,39 +986,13 @@ def main() -> None:
     store = L6Store(args.library, peers=peers)
     logger.info("Loaded %d agent(s): %s", len(store.list_agents()), store.list_agents())
     server = create_l6_server(store)
-    if args.transport == "stdio":
-        server.run()  # fastmcp default: stdio
-        return
-
-    # HTTP transport ----------------------------------------------------------
-    if args.allow_unauthenticated:
-        logger.warning(
-            "Serving HTTP transport WITHOUT auth (--allow-unauthenticated). "
-            "Restrict to localhost / Tailnet only."
-        )
-        try:
-            server.run(transport="http", port=args.port)
-        except TypeError:
-            logger.warning(
-                "This fastmcp version does not accept transport='http'; falling back to stdio."
-            )
-            server.run()
-        return
-
-    # Authenticated HTTP path: build the Starlette ASGI app, wrap with bearer
-    # middleware, run under uvicorn ourselves so we own the middleware stack.
-    try:
-        import uvicorn
-        from starlette.middleware import Middleware
-    except ImportError as exc:
-        raise RuntimeError(
-            "uvicorn + starlette are required for HTTP transport. "
-            "Install via: pip install 'bourdon[server,federation]'"
-        ) from exc
-
-    auth_cls = _build_auth_middleware()
-    app = server.http_app(middleware=[Middleware(auth_cls)])
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    run_l6_server(
+        server,
+        transport=args.transport,
+        port=args.port,
+        host=args.host,
+        allow_unauthenticated=args.allow_unauthenticated,
+    )
 
 
 if __name__ == "__main__":

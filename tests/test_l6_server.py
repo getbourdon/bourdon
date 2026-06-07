@@ -251,3 +251,144 @@ def test_export_agents_tool_is_local_only(library, monkeypatch):
     assert report["agents"][0]["source"] == "pc"
     assert report["agents"][0]["source_kind"] == "local"
     assert "sources" not in report
+# -- Peer loading (load_peers) -------------------------------------------------
+
+
+def test_load_peers_empty_when_no_config_and_no_inline(tmp_path):
+    """No config file + no inline URLs -> empty peer list (federation off)."""
+    missing = tmp_path / "nope.yaml"
+    assert server_module.load_peers(missing, []) == []
+
+
+def test_load_peers_from_config_file(tmp_path):
+    """A peers.yaml is parsed into RemoteL6Client objects with token_env honored."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "peers": [
+                    {"name": "pc", "url": "http://pc.tailnet:7500", "token_env": "TOK_PC"},
+                    {"name": "mac", "url": "http://mac.tailnet:7500"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    peers = server_module.load_peers(cfg, [])
+    assert [p.name for p in peers] == ["pc", "mac"]
+    # RemoteL6Client.__post_init__ normalizes the URL with a /mcp suffix.
+    assert peers[0].url == "http://pc.tailnet:7500/mcp"
+    assert peers[0].token_env == "TOK_PC"
+    # Missing token_env defaults to the shared env var.
+    assert peers[1].token_env == "BOURDON_PEER_TOKEN"
+
+
+def test_load_peers_inline_urls(tmp_path):
+    """Inline --peer URLs become peers named after the URL."""
+    missing = tmp_path / "absent.yaml"
+    peers = server_module.load_peers(missing, ["http://localhost:7501"])
+    assert len(peers) == 1
+    assert peers[0].name == "http://localhost:7501"
+    assert peers[0].url == "http://localhost:7501/mcp"
+
+
+def test_load_peers_dedupes_config_and_inline(tmp_path):
+    """The same URL in both the config file and an inline flag yields one peer."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"peers": [{"name": "pc", "url": "http://dup:7500"}]}),
+        encoding="utf-8",
+    )
+    peers = server_module.load_peers(cfg, ["http://dup:7500"])
+    assert len(peers) == 1
+    assert peers[0].name == "pc"  # config entry wins; inline dup is skipped
+
+
+def test_load_peers_malformed_config_degrades_to_empty(tmp_path):
+    """A malformed config never raises -- it degrades to no peers."""
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text("peers:\n  - not-a-mapping\n  - url: ''\n", encoding="utf-8")
+    assert server_module.load_peers(cfg, []) == []
+
+
+# -- Shared run path (run_l6_server) -------------------------------------------
+
+
+class _RecordingServer:
+    """Stand-in fastmcp server that records how .run() was invoked."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.http_app_calls: list = []
+
+    def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.calls.append(dict(kwargs))
+
+    def http_app(self, middleware=None):  # noqa: ANN001
+        self.http_app_calls.append(middleware)
+        return ("ASGI_APP", middleware)
+
+
+def test_run_l6_server_stdio_uses_default_run():
+    server = _RecordingServer()
+    server_module.run_l6_server(server, transport="stdio")
+    assert server.calls == [{}]
+
+
+def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch):
+    """--allow-unauthenticated must bind 0.0.0.0 via uvicorn — NOT
+    server.run(transport='http'), which FastMCP binds to 127.0.0.1 and thereby
+    silently hides the server from the Tailnet (the bug the Mac peer caught)."""
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(
+            app=app, host=host, port=port
+        ),
+    )
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server, transport="http", port=7501, allow_unauthenticated=True
+    )
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 7501
+    assert server.http_app_calls == [None]  # no auth middleware wrapped
+    assert server.calls == []  # never falls back to server.run(transport=http)
+
+
+def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(
+            host=host, port=port
+        ),
+    )
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server, transport="http", port=7502, allow_unauthenticated=False
+    )
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 7502
+    # Authed path passes a non-empty middleware list to http_app().
+    assert server.http_app_calls and server.http_app_calls[0] is not None
+
+
+def test_run_l6_server_http_respects_explicit_host(monkeypatch):
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host=None, port=None, log_level=None: captured.update(host=host),
+    )
+    server = _RecordingServer()
+    server_module.run_l6_server(
+        server,
+        transport="http",
+        port=7503,
+        host="127.0.0.1",
+        allow_unauthenticated=True,
+    )
+    assert captured["host"] == "127.0.0.1"

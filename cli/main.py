@@ -733,7 +733,7 @@ def _handle_agents(args: argparse.Namespace) -> int:
     local_name = resolve_local_name()
 
     if getattr(args, "federated", False):
-        from core.l6_server import _load_peers
+        from core.l6_server import load_peers
         from core.l6_store import L6Store
 
         peers_config = (
@@ -741,7 +741,7 @@ def _handle_agents(args: argparse.Namespace) -> int:
             if getattr(args, "peers_config", None)
             else _DEFAULT_PEERS_CONFIG
         )
-        peers = _load_peers(peers_config, [])
+        peers = load_peers(peers_config, [])
         # The store's library is the PARENT of the agents dir (it appends
         # ``agents/`` itself). For the default dir this is ~/agent-library.
         store = L6Store(agents_dir.parent, peers=peers)
@@ -770,14 +770,23 @@ def _handle_dogfood(args: argparse.Namespace) -> int:
 def _handle_serve(args: argparse.Namespace) -> int:
     """Launch the L6 federation MCP server.
 
-    Thin wrapper around ``python -m core.l6_server`` that prints an
-    onboarding banner (library path, agents loaded, transport, paste-ready
-    MCP config snippet) before handing off to the underlying server.
-    Stdio transport blocks until the connecting MCP client disconnects;
-    HTTP transport blocks until interrupted. Either way, this handler
-    returns the server's exit code, or 1 if startup fails.
+    Wrapper around ``python -m core.l6_server`` that prints an onboarding
+    banner (library path, agents loaded, transport, peers, paste-ready MCP
+    config snippet) before handing off to the shared :func:`run_l6_server`.
+    Peer federation (``--peer`` / ``--peers-config``) and HTTP Bearer auth
+    (``--allow-unauthenticated``) are resolved identically to the module entry
+    point via :func:`load_peers` + :func:`run_l6_server`, so both serve paths
+    behave the same. Stdio transport blocks until the connecting MCP client
+    disconnects; HTTP transport blocks until interrupted. Returns the server's
+    exit code (0 on clean shutdown / KeyboardInterrupt).
     """
-    from core.l6_server import L6Store, create_l6_server  # type: ignore[attr-defined]
+    from core.l6_server import (  # type: ignore[attr-defined]
+        DEFAULT_PEERS_CONFIG,
+        L6Store,
+        create_l6_server,
+        load_peers,
+        run_l6_server,
+    )
 
     library_path = Path(args.library) if getattr(args, "library", None) else None
     if library_path is None:
@@ -786,8 +795,16 @@ def _handle_serve(args: argparse.Namespace) -> int:
 
     transport = getattr(args, "transport", "stdio")
     port = getattr(args, "port", 7500)
+    host = getattr(args, "host", "0.0.0.0")
+    allow_unauthenticated = getattr(args, "allow_unauthenticated", False)
 
-    store = L6Store(library_path)
+    # Cross-machine peer federation (Phase 1.6+): merge --peer URLs with the
+    # optional peers.yaml so `bourdon serve` matches `python -m core.l6_server`.
+    peers_config = getattr(args, "peers_config", None) or DEFAULT_PEERS_CONFIG
+    peer_urls = list(getattr(args, "peer", []) or [])
+    peers = load_peers(Path(peers_config), peer_urls)
+
+    store = L6Store(library_path, peers=peers)
     agents = store.list_agents()
 
     if getattr(args, "quiet", False) is False:
@@ -799,29 +816,33 @@ def _handle_serve(args: argparse.Namespace) -> int:
         print(f"  agents:    {len(agents)} loaded ({agent_names})", file=sys.stderr)
         print(f"  transport: {transport}", file=sys.stderr)
         if transport == "http":
-            print(f"  port:      {port}", file=sys.stderr)
+            print(f"  bind:      {host}:{port}", file=sys.stderr)
+            auth_state = (
+                "disabled (--allow-unauthenticated)"
+                if allow_unauthenticated
+                else "Bearer (set BOURDON_PEER_TOKEN_SERVER)"
+            )
+            print(f"  auth:      {auth_state}", file=sys.stderr)
+        if peers:
+            peer_desc = ", ".join(f"{p.name} -> {p.url}" for p in peers)
+            print(f"  peers:     {len(peers)} ({peer_desc})", file=sys.stderr)
         print("", file=sys.stderr)
         if transport == "stdio":
             print("MCP client config (stdio):", file=sys.stderr)
             print('  {"command": "bourdon", "args": ["serve"]}', file=sys.stderr)
         else:
-            print(f"MCP client config (http): http://127.0.0.1:{port}/", file=sys.stderr)
+            print(f"MCP client endpoint (http): http://127.0.0.1:{port}/mcp", file=sys.stderr)
         print("", file=sys.stderr)
 
     server = create_l6_server(store)
     try:
-        if transport == "stdio":
-            server.run()
-        else:
-            try:
-                server.run(transport="http", port=port)
-            except TypeError:
-                print(
-                    "WARN: this fastmcp version does not accept transport='http'; "
-                    "falling back to stdio.",
-                    file=sys.stderr,
-                )
-                server.run()
+        run_l6_server(
+            server,
+            transport=transport,
+            port=port,
+            host=host,
+            allow_unauthenticated=allow_unauthenticated,
+        )
     except KeyboardInterrupt:
         return 0
     return 0
@@ -2487,9 +2508,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
     )
     serve_cmd.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help=(
+            "Bind host for HTTP transport (default: 0.0.0.0 — all interfaces, "
+            "required for cross-host / Tailnet federation; use 127.0.0.1 for "
+            "localhost only)."
+        ),
+    )
+    serve_cmd.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress the onboarding banner",
+    )
+    serve_cmd.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "Peer L6 server URL to federate with (e.g. http://pc.tailnet:7500). "
+            "Repeatable. Merged with peers from --peers-config. Cross-machine "
+            "federation requires the bourdon[federation] extra."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--peers-config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a YAML file listing peer L6 servers (entries: name, url, "
+            "token_env). Loaded if present; defaults to ~/.bourdon/peers.yaml. "
+            "See config/peers.example.yaml."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help=(
+            "Serve HTTP transport without Bearer-token auth. Off by default "
+            "(authenticated HTTP requires BOURDON_PEER_TOKEN_SERVER). Only safe "
+            "on localhost / a closed Tailnet."
+        ),
     )
     serve_cmd.set_defaults(func=_handle_serve)
 
