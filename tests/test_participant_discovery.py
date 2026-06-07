@@ -24,6 +24,8 @@ EXPECTED_AGENT_IDS = [
     "cascade",
     "claude-code",
     "claude-code-automations",
+    "claude-desktop-code",
+    "claude-desktop-cowork",
     "codex",
     "codex-automations",
     "copilot",

@@ -33,6 +33,8 @@ from participants.claude_code_automations import (
     default_claude_code_automations_dir,
     merge_automation_tree,
 )
+from participants.claude_desktop_code import ClaudeDesktopCodeParticipant
+from participants.claude_desktop_cowork import ClaudeDesktopCoworkParticipant
 from participants.codex import (
     CodexParticipant,
     _build_codex_native_memory_payload,
@@ -87,6 +89,14 @@ def _default_claude_code_automations_l5_path() -> Path:
 
 def _default_codex_automations_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+
+def _default_claude_desktop_cowork_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-desktop-cowork.l5.yaml"
+
+
+def _default_claude_desktop_code_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-desktop-code.l5.yaml"
 
 
 def _default_cursor_l5_path() -> Path:
@@ -1366,6 +1376,126 @@ def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_claude_desktop_cowork_export(args: argparse.Namespace) -> int:
+    """Build a Claude Desktop Co-Work L5 manifest and write it to
+    ``~/agent-library/agents/claude-desktop-cowork.l5.yaml`` (or ``--out``).
+
+    Emits recognition metadata only -- never conversation content. Silent on
+    success; never raises -- matches the SessionEnd hook contract of
+    ``_handle_claude_code_export``.
+    """
+    store_dir = Path(args.store_dir) if getattr(args, "store_dir", None) else None
+    try:
+        participant = ClaudeDesktopCoworkParticipant(store_dir=store_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: participant init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-desktop-cowork export: no Co-Work store "
+                f"found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = Path(args.out) if args.out else _default_claude_desktop_cowork_l5_path()
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: write to {out_path} failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-desktop-cowork export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_desktop_code_export(args: argparse.Namespace) -> int:
+    """Build a Claude Desktop Code (GUI) L5 manifest and write it to
+    ``~/agent-library/agents/claude-desktop-code.l5.yaml`` (or ``--out``).
+
+    Emits recognition metadata only -- never conversation content. Silent on
+    success; never raises -- matches the SessionEnd hook contract of
+    ``_handle_claude_code_export``.
+    """
+    store_dir = Path(args.store_dir) if getattr(args, "store_dir", None) else None
+    try:
+        participant = ClaudeDesktopCodeParticipant(store_dir=store_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: participant init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-desktop-code export: no Code store "
+                f"found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = Path(args.out) if args.out else _default_claude_desktop_code_l5_path()
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: write to {out_path} failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-desktop-code export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def _handle_claude_code_automations_ingest(args: argparse.Namespace) -> int:
     """Ingest an ``automations/`` tree into the local one.
 
@@ -2326,6 +2456,76 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     cca_ingest_cmd.set_defaults(func=_handle_claude_code_automations_ingest)
+
+    # ---- claude-desktop-cowork subcommands ---------------------------------
+    cdcw = subparsers.add_parser(
+        "claude-desktop-cowork",
+        help="Claude desktop app Co-Work / local-agent memory commands",
+    )
+    cdcw_subparsers = cdcw.add_subparsers(dest="cdcw_command")
+
+    cdcw_export_cmd = cdcw_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Desktop Co-Work L5 manifest from local "
+            "local-agent-mode-sessions/ state (metadata only -- no content)."
+        ),
+    )
+    cdcw_export_cmd.add_argument("--store-dir", help=argparse.SUPPRESS)
+    cdcw_export_cmd.add_argument("--out")
+    cdcw_export_cmd.add_argument("--since")
+    cdcw_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cdcw_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cdcw_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cdcw_export_cmd.set_defaults(func=_handle_claude_desktop_cowork_export)
+
+    # ---- claude-desktop-code subcommands -----------------------------------
+    cdco = subparsers.add_parser(
+        "claude-desktop-code",
+        help="Claude desktop app GUI Claude Code memory commands",
+    )
+    cdco_subparsers = cdco.add_subparsers(dest="cdco_command")
+
+    cdco_export_cmd = cdco_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Desktop Code L5 manifest from local "
+            "claude-code-sessions/ state (metadata only -- no content)."
+        ),
+    )
+    cdco_export_cmd.add_argument("--store-dir", help=argparse.SUPPRESS)
+    cdco_export_cmd.add_argument("--out")
+    cdco_export_cmd.add_argument("--since")
+    cdco_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cdco_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cdco_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cdco_export_cmd.set_defaults(func=_handle_claude_desktop_code_export)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(

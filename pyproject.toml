@@ -94,6 +94,8 @@ codex-automations = "participants.codex_automations:CodexAutomationsParticipant"
 cursor = "participants.cursor:CursorParticipant"
 copilot = "participants.copilot:CopilotParticipant"
 cascade = "participants.cascade:CascadeParticipant"
+claude-desktop-cowork = "participants.claude_desktop_cowork:ClaudeDesktopCoworkParticipant"
+claude-desktop-code = "participants.claude_desktop_code:ClaudeDesktopCodeParticipant"
 # clyde = "participants.clyde:ClydeParticipant"     # native publisher lives in ~/.clyde/, not here
 # clair = "participants.clair:ClairParticipant"     # same pattern -- native publisher
 
