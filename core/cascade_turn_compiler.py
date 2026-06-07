@@ -24,12 +24,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from participants._windsurf_native import (
     NativeWindsurfState,
     read_native_windsurf_state,
 )
-
-from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from participants.codex import _safe_native_memory_text
 
 SCHEMA_VERSION = "cascade-turn-brief/v1"
