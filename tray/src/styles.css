@@ -1,0 +1,538 @@
+/*
+ * Bourdon Desktop Tray — Phase 0 styles. BSL 1.1 (repo root LICENSE).
+ *
+ * Paper-light theme, matched to the Bourdon Design System (colors_and_type.css):
+ * warm paper surfaces, ink text, dusty-rose (drone) accent, moss/ochre/clay
+ * semantics, warm rose-tinted shadows. A compact tray popover; calm overview,
+ * deep detail one click away.
+ *
+ * Type: Geist is the brand sans; we use its documented fallback stack (Segoe UI
+ * on Windows) rather than loading the webfont, so the app stays offline-clean.
+ * (Future: bundle Geist woff2 + @font-face for exact brand type.)
+ */
+
+:root {
+  /* surfaces — warm paper, never cool gray */
+  --bg: #f7f1e8;          /* paper */
+  --bg-elev: #f0e7d8;     /* paper-tinted — topbar, cards */
+  --bg-elev2: #ebe6d5;    /* paper-deep — chips, wells */
+  --border: #d8d4c8;      /* rule */
+  --border-soft: #e3ddcb; /* softer rule */
+  /* ink */
+  --text: #1a1a1a;        /* ink */
+  --text-muted: #534b48;  /* ink-muted */
+  --text-dim: #8a7d75;    /* ink-faint */
+  /* accent + semantics (true brand values — they read on paper) */
+  --amber: #c17c74;       /* drone rose — accent / links */
+  --drone-deep: #8e5a55;
+  --grey: #8a7d75;        /* ink-faint */
+  --green: #4f6b50;       /* moss */
+  --yellow: #a47b3a;      /* ochre */
+  --red: #a8543a;         /* clay */
+  --shadow-rest: 0 1px 3px rgba(193, 124, 116, 0.18);
+  --shadow-raised: 0 6px 20px rgba(193, 124, 116, 0.22);
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv11";
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+a {
+  color: var(--amber);
+}
+.muted {
+  color: var(--text-muted);
+}
+.small {
+  font-size: 11.5px;
+}
+.center {
+  text-align: center;
+  margin-top: 32px;
+}
+.hidden {
+  display: none !important;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+.mark {
+  display: inline-flex;
+  line-height: 0;
+}
+.brand-name {
+  letter-spacing: -0.01em;
+  font-size: 14px;
+  color: var(--drone-deep);
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- health badge ---- */
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--grey);
+}
+.health-badge[data-health="grey"] .health-dot {
+  background: var(--grey);
+}
+.health-badge[data-health="green"] .health-dot {
+  background: var(--green);
+}
+.health-badge[data-health="yellow"] .health-dot {
+  background: var(--yellow);
+}
+.health-badge[data-health="red"] .health-dot {
+  background: var(--red);
+}
+.health-badge[data-health="red"] {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.icon-btn {
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.icon-btn:hover {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- content ---- */
+.content {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 10px 12px;
+}
+.state-panel {
+  animation: fade 0.12s ease;
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+.state-title {
+  margin: 4px 0 8px;
+  font-size: 16px;
+  color: var(--drone-deep);
+  letter-spacing: -0.01em;
+}
+.error-title {
+  color: var(--red);
+}
+.diag {
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px;
+  font-size: 11.5px;
+  font-family: "Geist Mono", "SFMono-Regular", Consolas, monospace;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.docs-link {
+  font-weight: 600;
+}
+
+/* ---- overview: agent list ---- */
+.list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+.list-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+.count-chip {
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.agent-row:hover {
+  background: var(--bg-elev);
+  border-color: var(--border);
+  box-shadow: var(--shadow-rest);
+}
+.agent-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+}
+.agent-pulse.fresh {
+  background: var(--green);
+}
+.agent-pulse.stale {
+  background: var(--yellow);
+}
+.agent-pulse.idle {
+  background: var(--text-dim);
+}
+.agent-pulse.err {
+  background: var(--red);
+}
+.agent-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.agent-id {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.agent-sub {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-touch {
+  color: var(--text-dim);
+  font-size: 11px;
+  flex: 0 0 auto;
+  text-align: right;
+}
+.chev {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+  font-size: 15px;
+}
+
+/* ---- agent brand logos ---- */
+.agent-logo-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+}
+.agent-logo {
+  fill: var(--text);
+  display: block;
+}
+.agent-logo--row {
+  width: 22px;
+  height: 22px;
+}
+.agent-logo--detail {
+  width: 30px;
+  height: 30px;
+}
+.agent-logo--fallback {
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+}
+/* freshness pulse becomes a small corner badge on the logo */
+.agent-logo-wrap .agent-pulse {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.agent-row:hover .agent-logo-wrap .agent-pulse {
+  box-shadow: 0 0 0 2px var(--bg-elev);
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 4px;
+}
+
+/* ---- detail: deep report ---- */
+.back-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 2px 0 10px;
+}
+.back-btn:hover {
+  color: var(--amber);
+}
+.detail-id {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--drone-deep);
+  letter-spacing: -0.01em;
+}
+.detail-type {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+.detail-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+.stat {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  box-shadow: var(--shadow-rest);
+}
+.stat b {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.stat span {
+  color: var(--text-dim);
+}
+.detail-role {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-rest);
+}
+.detail-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+.detail-error {
+  color: var(--red);
+  font-size: 12.5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+/* session/activity entries in detail */
+.sess {
+  border-left: 2px solid var(--border);
+  padding: 0 0 12px 12px;
+  margin-left: 3px;
+  position: relative;
+}
+.sess::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+.sess-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sess-date {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.vis-badge {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.vis-badge.vis-public {
+  color: var(--green);
+  border-color: var(--green);
+}
+.vis-badge.vis-private {
+  color: var(--red);
+  border-color: var(--red);
+}
+.sess-focus {
+  color: var(--drone-deep);
+  font-size: 11px;
+  margin-top: 3px;
+}
+.sess-actions {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.sess-actions li {
+  margin: 1px 0;
+}
+
+/* ---- status bar + scope toggle ---- */
+.statusbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.scope-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.scope-seg {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 11px;
+  cursor: pointer;
+}
+.scope-seg.active {
+  background: var(--amber);
+  color: #fff;
+}
+.scope-status {
+  color: var(--text-dim);
+}
+
+/* ---- federated: machine group headers ---- */
+.machine-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 4px 5px;
+}
+.machine-head:first-child {
+  padding-top: 2px;
+}
+.machine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+}
+.machine-dot.ok {
+  background: var(--green);
+}
+.machine-dot.down {
+  background: var(--red);
+}
+.machine-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+.machine-meta {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+.machine-empty {
+  padding: 2px 10px 8px 24px;
+}
+.src-tag {
+  color: var(--drone-deep);
+  font-weight: 500;
+}
