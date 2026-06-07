@@ -47,7 +47,9 @@ def test_default_dir_uses_env(monkeypatch):
 
 
 def test_default_dir_falls_back_to_home():
-    assert str(default_cursor_automations_dir()).endswith(".cursor/automations")
+    # Compare as Path so the assertion is OS-separator agnostic (Windows uses
+    # backslashes; the old str.endswith(".cursor/automations") failed there).
+    assert default_cursor_automations_dir() == Path.home() / ".cursor" / "automations"
 
 
 # ---- discover ---------------------------------------------------------------

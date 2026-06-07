@@ -33,6 +33,7 @@ EXPECTED_AGENT_IDS = [
     "copilot-cli",
     "copilot-vscode",
     "cursor",
+    "cursor-automations",
 ]
 
 
