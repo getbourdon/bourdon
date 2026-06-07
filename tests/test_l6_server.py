@@ -339,6 +339,7 @@ def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch)
     """--allow-unauthenticated must bind 0.0.0.0 via uvicorn — NOT
     server.run(transport='http'), which FastMCP binds to 127.0.0.1 and thereby
     silently hides the server from the Tailnet (the bug the Mac peer caught)."""
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
     captured: dict = {}
     monkeypatch.setattr(
         "uvicorn.run",
@@ -357,6 +358,7 @@ def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch)
 
 
 def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
     captured: dict = {}
     monkeypatch.setattr(
         "uvicorn.run",
@@ -375,6 +377,7 @@ def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
 
 
 def test_run_l6_server_http_respects_explicit_host(monkeypatch):
+    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
     captured: dict = {}
     monkeypatch.setattr(
         "uvicorn.run",

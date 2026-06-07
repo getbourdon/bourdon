@@ -319,9 +319,11 @@ def test_agents_federated_prints_federated_json_exit_zero(
     agents_dir: Path, capsys, monkeypatch
 ):
     _write_manifest(agents_dir, "claude-code", _WELL_FORMED)
-    monkeypatch.setattr(cli_main, "_load_peers", lambda *a, **k: [], raising=False)
-    # Patch the store class as resolved inside _handle_agents (imported lazily
-    # from core.l6_store).
+    # Patch load_peers + the store class at their source, as resolved inside
+    # _handle_agents (both imported lazily). load_peers was promoted from
+    # _load_peers in the serve-flags work (#114); patching the source also keeps
+    # the test isolated from any real ~/.bourdon/peers.yaml on the dev machine.
+    monkeypatch.setattr("core.l6_server.load_peers", lambda *a, **k: [])
     monkeypatch.setattr("core.l6_store.L6Store", _FakeStore)
 
     exit_code = main(

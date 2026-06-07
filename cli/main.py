@@ -430,7 +430,7 @@ def _handle_agents(args: argparse.Namespace) -> int:
     local_name = resolve_local_name()
 
     if getattr(args, "federated", False):
-        from core.l6_server import _load_peers
+        from core.l6_server import load_peers
         from core.l6_store import L6Store
 
         peers_config = (
@@ -438,7 +438,7 @@ def _handle_agents(args: argparse.Namespace) -> int:
             if getattr(args, "peers_config", None)
             else _DEFAULT_PEERS_CONFIG
         )
-        peers = _load_peers(peers_config, [])
+        peers = load_peers(peers_config, [])
         # The store's library is the PARENT of the agents dir (it appends
         # ``agents/`` itself). For the default dir this is ~/agent-library.
         store = L6Store(agents_dir.parent, peers=peers)
