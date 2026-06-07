@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _PEER_TOOL_NAMES = {
     "list_agents",
+    "export_agents",
     "query_agent_memory",
     "list_recent_work",
     "find_entity",
@@ -147,6 +148,21 @@ class RemoteL6Client:
         if isinstance(result, dict) and isinstance(result.get("agents"), list):
             return [str(a) for a in result["agents"] if isinstance(a, str)]
         return []
+
+    async def export_agents(self) -> dict | None:
+        """Fetch this peer's LOCAL agent export (``bourdon.agents/v1``).
+
+        Returns the peer's raw ``{"schema", "machine", "agents": [...]}`` dict.
+        On any failure -- network, peer down, or a peer too old to expose the
+        ``export_agents`` tool -- returns ``None`` so the caller can mark the
+        peer unreachable instead of crashing. The caller is responsible for
+        re-tagging each returned agent's ``source`` with this peer's name; the
+        peer's self-reported ``machine`` / per-agent ``source`` is never trusted
+        (prevents a peer from spoofing another machine's attribution or echoing
+        agents back as its own).
+        """
+        result = await self._call_tool("export_agents", {})
+        return result if isinstance(result, dict) else None
 
     async def find_entity(
         self,

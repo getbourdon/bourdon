@@ -44,6 +44,10 @@ Tools exposed
   Write-side tool. Cloud-only / webview-wrapper agents (Claude Desktop,
   ChatGPT desktop, etc.) call this to push L5 contributions when they
   have no readable on-disk store for a Bourdon participant to scrape.
+- ``export_agents()``
+  Source-attributed export of THIS machine's local agents only (LOCAL-ONLY:
+  no peer fan-out, to avoid the bidirectional-federation echo). The desktop
+  tray's federated read merges this with each peer's ``export_agents``.
 """
 
 from __future__ import annotations
@@ -560,6 +564,28 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         tools where each agent is tagged ``peer:<peer-name>:<agent>``.
         """
         return {"agents": await store.list_agents_federated()}
+
+    @mcp.tool()
+    def export_agents() -> dict:
+        """Export THIS server's LOCAL agents only, source-attributed for the tray.
+
+        Returns the ``bourdon.agents/v1`` envelope for this machine's own
+        ``*.l5.yaml`` manifests -- each agent redacted and tagged
+        ``source=<this machine>`` / ``source_kind="local"``.
+
+        Critically, this tool does NOT fan out to peers. The federated merge
+        (local + every peer's ``export_agents``) happens caller-side in
+        :meth:`core.l6_store.L6Store.export_agents_federated`, which re-tags
+        each peer's agents with that peer's name. Keeping this tool local-only
+        is what prevents the bidirectional-federation echo: when peer A calls
+        peer B's ``export_agents``, B returns only B's agents, never A's agents
+        bounced back.
+        """
+        from core.agents_export import export_local_agents, resolve_local_name
+
+        return export_local_agents(
+            store.library_path / "agents", resolve_local_name()
+        )
 
     @mcp.tool()
     def commit_to_federation(

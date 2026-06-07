@@ -50,6 +50,10 @@ from participants.copilot import (
     init_memory_file,
 )
 from participants.cursor import CursorParticipant
+from core.agents_export import (
+    export_local_agents,
+    resolve_local_name,
+)
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -94,6 +98,14 @@ def _default_copilot_l5_path() -> Path:
 
 def _default_cascade_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cascade.l5.yaml"
+
+
+def _default_agents_dir() -> Path:
+    """Resolve ~/agent-library/agents at call time (test-monkeypatch friendly)."""
+    return Path.home() / "agent-library" / "agents"
+
+
+_DEFAULT_PEERS_CONFIG = Path.home() / ".bourdon" / "peers.yaml"
 
 
 def _parse_since(value: str | None) -> datetime | None:
@@ -379,6 +391,62 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     report = {"participants": results}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
+    return 0
+
+
+def _handle_agents(args: argparse.Namespace) -> int:
+    """Enumerate L5 manifests as a stable, redacted, source-attributed JSON object.
+
+    Read foundation for the Phase 0 desktop tray: keeps redaction and
+    access-level handling server-side so the tray never reads raw YAML. The
+    summarization is the single shared implementation in
+    :mod:`core.agents_export`, so the local and federated paths can never drift.
+
+    Without ``--federated`` this enumerates only THIS machine's local agents,
+    each tagged ``source=<local_name>`` / ``source_kind="local"``. Exits nonzero
+    only if the agents dir itself is missing/unreadable; per-manifest parse
+    errors are represented inline (``parse_error``) and still exit 0 so the tray
+    can distinguish "no data" from "broken".
+
+    With ``--federated`` it additionally fans out to configured peers via the
+    L6 store, merging each peer's own ``export_agents`` output re-tagged
+    ``source=<peer-name>`` / ``source_kind="peer"``. A peer that is unreachable
+    (or runs a build without the ``export_agents`` tool) contributes nothing and
+    is marked ``reachable: false`` rather than crashing the export.
+    """
+    agents_dir = (
+        Path(args.agents_dir)
+        if getattr(args, "agents_dir", None)
+        else _default_agents_dir()
+    )
+    if not agents_dir.is_dir():
+        print(
+            f"agents: agent-library directory not found: {agents_dir}",
+            file=sys.stderr,
+        )
+        return 2
+
+    local_name = resolve_local_name()
+
+    if getattr(args, "federated", False):
+        from core.l6_server import _load_peers
+        from core.l6_store import L6Store
+
+        peers_config = (
+            Path(args.peers_config)
+            if getattr(args, "peers_config", None)
+            else _DEFAULT_PEERS_CONFIG
+        )
+        peers = _load_peers(peers_config, [])
+        # The store's library is the PARENT of the agents dir (it appends
+        # ``agents/`` itself). For the default dir this is ~/agent-library.
+        store = L6Store(agents_dir.parent, peers=peers)
+        report = asyncio.run(store.export_agents_federated(local_name=local_name))
+        print(json.dumps(report, indent=2, sort_keys=False))
+        return 0
+
+    report = export_local_agents(agents_dir, local_name)
+    print(json.dumps(report, indent=2, sort_keys=False))
     return 0
 
 
@@ -1809,6 +1877,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_all_cmd.add_argument("--report-out")
     export_all_cmd.set_defaults(func=_handle_export_all)
+
+    agents_cmd = subparsers.add_parser(
+        "agents",
+        help=(
+            "Enumerate L5 manifests as a redacted, source-attributed JSON "
+            "object (read foundation for the desktop tray). With --federated, "
+            "merge this machine's agents with configured peers'."
+        ),
+    )
+    agents_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON (the stable tray contract; currently the default).",
+    )
+    agents_cmd.add_argument(
+        "--federated",
+        action="store_true",
+        help=(
+            "Also fan out to configured L6 peers and merge their agents in, "
+            "each re-tagged with the peer's machine name."
+        ),
+    )
+    agents_cmd.add_argument("--agents-dir", help=argparse.SUPPRESS)
+    agents_cmd.add_argument("--peers-config", help=argparse.SUPPRESS)
+    agents_cmd.set_defaults(func=_handle_agents)
 
     dogfood_cmd = subparsers.add_parser(
         "dogfood",
