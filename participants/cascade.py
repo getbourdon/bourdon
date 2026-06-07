@@ -24,19 +24,23 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
+from participants._windsurf_native import (
+    NativeWindsurfState,
+    read_native_windsurf_state,
+)
 from participants.base import (
     SPEC_VERSION,
-    ParticipantDiscoveryError,
     AgentInfo,
     AgentStore,
     BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
+    ParticipantDiscoveryError,
     Session,
     Visibility,
     VisibilityPolicy,
@@ -88,7 +92,7 @@ def default_cascade_memory_path() -> Path:
     return default_cascade_dir() / _MEMORY_FILENAME
 
 
-def _parse_frontmatter(text: str, source: Optional[Path] = None) -> dict[str, Any]:
+def _parse_frontmatter(text: str, source: Path | None = None) -> dict[str, Any]:
     """
     Extract YAML front-matter from a ``---`` fenced block.
 
@@ -291,9 +295,23 @@ class CascadeParticipant(BourdonParticipant):
         self,
         cascade_dir: Path | None = None,
         policy: VisibilityPolicy | None = None,
+        cwd: Path | None = None,
+        windsurf_data_dir: Path | None = None,
     ) -> None:
         self._dir = cascade_dir or default_cascade_dir()
         self._policy = policy or DEFAULT_POLICY
+        self._cwd = cwd
+        self._windsurf_data_dir = windsurf_data_dir
+
+    @property
+    def native_state(self) -> NativeWindsurfState:
+        """Read native Windsurf on-disk state (cached)."""
+        if not hasattr(self, "_native_state_cache"):
+            self._native_state_cache = read_native_windsurf_state(
+                windsurf_data_dir=self._windsurf_data_dir,
+                cwd=self._cwd,
+            )
+        return self._native_state_cache
 
     @property
     def native_path(self) -> str:
@@ -443,6 +461,7 @@ class CascadeParticipant(BourdonParticipant):
             )
 
         report = _inspect_cascade_memory(self._dir)
+        report["native_windsurf"] = self.native_state.to_dict()
         if not report.get("present"):
             return HealthStatus(
                 status="degraded",
