@@ -339,6 +339,16 @@ class CodexAutomationsParticipant:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Codex automations dir (``~/.codex/automations``).
+
+        The setup wizard wires the *parent* ``codex`` participant and skips
+        ``-automations`` sub-surfaces, so this is provided for protocol uniformity
+        rather than wizard detection.
+        """
+        return default_codex_automations_dir(home)
+
     def __init__(
         self,
         automations_dir: Path | None = None,

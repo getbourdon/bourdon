@@ -82,6 +82,17 @@ class CursorParticipant:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Cursor config dir (``~/.cursor``) used by the setup wizard.
+
+        The wizard probes ``~/.cursor`` for *presence*; the SQLite workspace state
+        that ``export_l5`` actually reads lives at the platform-specific
+        :func:`default_cursor_dir` (e.g. ``%APPDATA%/Cursor``). Detection and
+        extraction intentionally use different anchors.
+        """
+        return (home or Path.home()) / ".cursor"
+
     def __init__(self, cursor_dir: Path | None = None) -> None:
         self._cursor_dir = cursor_dir
         self._policy = DEFAULT_POLICY

@@ -596,6 +596,16 @@ class ClaudeCodeParticipant:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Claude Code config dir used by the setup wizard's detection.
+
+        This is the ``~/.claude`` config directory (where Claude Code keeps
+        ``settings.json`` + ``projects/``), not the ``claude-brain`` memory anchor
+        in ``native_path`` -- the wizard probes for Claude Code's *presence*.
+        """
+        return (home or Path.home()) / ".claude"
+
     def __init__(self) -> None:
         self.native_path = str(Path.home() / "claude-brain")  # primary anchor
         self._brain_path = _resolve_claude_brain_path()

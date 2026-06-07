@@ -2235,6 +2235,11 @@ class CodexParticipant:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Codex home (``~/.codex``) used by the setup wizard's detection."""
+        return (home or Path.home()) / ".codex"
+
     def __init__(
         self,
         codex_home: Path | None = None,

@@ -528,6 +528,16 @@ class ClaudeCodeAutomationsParticipant:
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
 
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Claude Code automations dir (``~/.claude/automations``).
+
+        The setup wizard wires the *parent* ``claude-code`` participant and skips
+        ``-automations`` sub-surfaces, so this is provided for protocol uniformity
+        rather than wizard detection.
+        """
+        return default_claude_code_automations_dir(home)
+
     def __init__(
         self,
         automations_dir: Path | None = None,

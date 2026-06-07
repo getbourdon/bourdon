@@ -321,6 +321,14 @@ class CopilotParticipant:
 
     agent_id = AGENT_ID
     agent_type = AGENT_TYPE
+    display_name = "GitHub Copilot"
+
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional ``~/.copilot-bourdon`` dir used by the setup wizard's detection."""
+        if home is not None:
+            return home / ".copilot-bourdon"
+        return default_copilot_bourdon_dir()
 
     def __init__(self, copilot_dir: Optional[Path] = None) -> None:
         self._copilot_dir = copilot_dir
