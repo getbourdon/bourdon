@@ -692,10 +692,104 @@ def _handle_doctor(args: argparse.Namespace) -> int:
                 ),
             })
 
-    report = {"participants": results}
+    report = {"participants": results, "federation": _doctor_federation_checks()}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
     return 0
+
+
+def _doctor_federation_checks() -> list[dict[str, Any]]:
+    """v0.9.0 federation hygiene checks (spec R6).
+
+    - transport/auth posture: legacy shared token vs per-agent registry
+    - members missing a tier (corrupt/hand-edited registry rows)
+    - revoked members whose token hash is still present (prune candidates)
+    - stale staged writes (> 7 days awaiting promote/reject)
+    """
+    import os as _os
+
+    from core.federation_registry import FederationRegistry
+    from core.federation_staging import list_staged
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+
+    checks: list[dict[str, Any]] = []
+
+    registry = FederationRegistry()
+    members = registry.list_agents()
+    legacy = bool(_os.environ.get("BOURDON_PEER_TOKEN_SERVER"))
+    if not members and not legacy:
+        checks.append({
+            "check": "auth",
+            "status": "info",
+            "reason": (
+                "no federation members registered and no legacy token set — "
+                "HTTP transport will refuse non-loopback binds"
+            ),
+        })
+    elif legacy and not members:
+        checks.append({
+            "check": "auth",
+            "status": "warn",
+            "reason": (
+                "running on the legacy shared token only "
+                "(BOURDON_PEER_TOKEN_SERVER) — migrate peers to per-agent "
+                "tokens via `bourdon agent add` for tiered access + revocation"
+            ),
+        })
+    else:
+        checks.append({
+            "check": "auth",
+            "status": "ok",
+            "reason": f"{len(members)} registered member(s)",
+        })
+
+    for agent_id, row in members.items():
+        if row.get("tier") not in ("trusted", "quarantined"):
+            checks.append({
+                "check": "tier",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": f"member has invalid/missing tier {row.get('tier')!r}",
+                "proposed_fix": f"bourdon agent set-tier {agent_id} quarantined",
+            })
+        if row.get("revoked") and row.get("has_token"):
+            checks.append({
+                "check": "revoked-token-present",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": (
+                    "revoked member still has a token hash on file (it cannot "
+                    "authenticate, but consider pruning the row)"
+                ),
+            })
+
+    try:
+        staged = list_staged(DEFAULT_LIBRARY_PATH)
+    except OSError:
+        staged = []
+    for item in staged:
+        if item.age_days > 7:
+            checks.append({
+                "check": "stale-staged-write",
+                "status": "warn",
+                "agent": item.agent_id,
+                "reason": (
+                    f"staged write from {item.caller!r} is {item.age_days:.0f} "
+                    "days old"
+                ),
+                "proposed_fix": (
+                    f"bourdon staging promote {item.agent_id}  # or: "
+                    f"bourdon staging reject {item.agent_id}"
+                ),
+            })
+    if staged and all(item.age_days <= 7 for item in staged):
+        checks.append({
+            "check": "staging",
+            "status": "info",
+            "reason": f"{len(staged)} staged write(s) awaiting review",
+        })
+
+    return checks
 
 
 def _handle_agents(args: argparse.Namespace) -> int:
@@ -850,6 +944,70 @@ def _handle_serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 0
     return 0
+
+
+# -- OpenClaw (quarantined-class, network-shaped) handlers (v0.9.0) -------------
+
+
+def _handle_openclaw_export(args: argparse.Namespace) -> int:
+    """Export the OpenClaw instance's L5 manifest INTO STAGING.
+
+    Unlike the on-disk participants this is an explicit operator command with
+    loud failures: a handshake refusal (unpatched / auth-disabled instance)
+    prints the exact reason + fix and exits non-zero. On success the manifest
+    lands in ``<library>/staging/openclaw/`` — promote it with
+    ``bourdon staging promote openclaw`` (spec/SPEC_v0.9.0.md D6).
+    """
+    from core.federation_staging import stage_manifest
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    try:
+        manifest = participant.export_l5(since=_parse_since(getattr(args, "since", None)))
+    except ParticipantDiscoveryError as exc:
+        print(f"bourdon openclaw export: handshake refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"bourdon openclaw export: failed: {exc}", file=sys.stderr)
+        return 1
+
+    data = filter_manifest_for_access(
+        manifest, access_level=getattr(args, "access_level", "team")
+    )
+    library = (
+        Path(args.library)
+        if getattr(args, "library", None)
+        else Path.home() / "agent-library"
+    )
+    out_path = stage_manifest(library, "openclaw", data)
+    print(
+        f"bourdon openclaw export: STAGED {len(data.get('known_entities') or [])} "
+        f"entities / {len(data.get('recent_sessions') or [])} sessions at {out_path}"
+    )
+    print(
+        "Quarantined-class content never writes to the live store directly. "
+        "Review and promote with: bourdon staging promote openclaw",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _handle_openclaw_doctor(args: argparse.Namespace) -> int:
+    """Health-check the configured OpenClaw instance (handshake gate included)."""
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    health = participant.health_check()
+    row: dict[str, Any] = {
+        "agent": "openclaw",
+        "status": health.status,
+        "reason": health.reason,
+        "details": health.details,
+    }
+    if health.proposed_fix:
+        row["proposed_fix"] = health.proposed_fix
+    _print_yaml({"participants": [row]})
+    return 0 if health.status == "ok" else 1
 
 
 # -- Federation trust management handlers (v0.9.0) -----------------------------
@@ -1083,15 +1241,25 @@ def _handle_export_all(args: argparse.Namespace) -> int:
             participant = participant_cls()
             manifest = participant.export_l5(since=since)
             data = filter_manifest_for_access(manifest, access_level=access_level)
-            out_path = (
-                Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
-            )
-            write_l5_dict(data, out_path)
+            if getattr(participant_cls, "QUARANTINED_CLASS", False):
+                # Quarantine follows the content (spec/SPEC_v0.9.0.md D6):
+                # quarantined-class exports stage for review, never write
+                # to the live store directly.
+                from core.federation_staging import stage_manifest
+
+                out_path = stage_manifest(Path(args.library), agent_id, data)
+                status = "staged"
+            else:
+                out_path = (
+                    Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
+                )
+                write_l5_dict(data, out_path)
+                status = "ok"
             entity_count = len(data.get("known_entities") or [])
             session_count = len(data.get("recent_sessions") or [])
             results.append({
                 "agent": agent_id,
-                "status": "ok",
+                "status": status,
                 "path": str(out_path),
                 "entities": entity_count,
                 "sessions": session_count,
@@ -2892,6 +3060,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit raw JSONL (machine-readable) instead of the table",
     )
     audit_cmd.set_defaults(func=_handle_audit)
+
+    openclaw_cmd = subparsers.add_parser(
+        "openclaw",
+        help="OpenClaw adapter (quarantined class — exports stage for review)",
+    )
+    openclaw_sub = openclaw_cmd.add_subparsers(dest="openclaw_command")
+    openclaw_export = openclaw_sub.add_parser(
+        "export",
+        help="Export the OpenClaw instance's L5 manifest into staging",
+    )
+    openclaw_export.add_argument(
+        "--url",
+        default=None,
+        help="OpenClaw instance URL (default: $OPENCLAW_URL or http://127.0.0.1:8080)",
+    )
+    openclaw_export.add_argument("--since")
+    openclaw_export.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    openclaw_export.add_argument("--library", type=Path, default=None)
+    openclaw_export.set_defaults(func=_handle_openclaw_export)
+    openclaw_doctor = openclaw_sub.add_parser(
+        "doctor", help="Health-check the OpenClaw instance (handshake gate)"
+    )
+    openclaw_doctor.add_argument("--url", default=None)
+    openclaw_doctor.set_defaults(func=_handle_openclaw_doctor)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")

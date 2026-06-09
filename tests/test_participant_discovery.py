@@ -34,6 +34,7 @@ EXPECTED_AGENT_IDS = [
     "copilot-vscode",
     "cursor",
     "cursor-automations",
+    "openclaw",
 ]
 
 
