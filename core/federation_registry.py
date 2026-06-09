@@ -114,15 +114,30 @@ class FederationRegistry:
             path = Path(env) if env else DEFAULT_REGISTRY_PATH
         self.path = Path(path)
         self._agents: dict[str, dict[str, Any]] = {}
-        self._loaded_mtime: float | None = None
+        self._loaded_stat: tuple[int, int] | None = None
         self._load()
 
     # -- persistence -----------------------------------------------------------
 
+    def _stat_key(self) -> tuple[int, int] | None:
+        """Staleness key for cross-process reload detection.
+
+        ``st_mtime_ns`` + ``st_size`` rather than float ``st_mtime``: two
+        writes within the same coarse timestamp tick (seen on Windows CI)
+        would otherwise be invisible to a running server — which would make
+        it miss a revocation written between its reads. Size breaks the tie
+        because every mutation changes the serialized payload.
+        """
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
     def _load(self) -> None:
         if not self.path.exists():
             self._agents = {}
-            self._loaded_mtime = None
+            self._loaded_stat = None
             return
         try:
             data = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
@@ -130,21 +145,14 @@ class FederationRegistry:
             logger.error("Failed to parse federation registry %s: %s", self.path, exc)
             # Fail closed: no agents authenticate off a corrupt registry.
             self._agents = {}
-            self._loaded_mtime = None
+            self._loaded_stat = None
             return
         agents = data.get("agents")
         self._agents = dict(agents) if isinstance(agents, dict) else {}
-        try:
-            self._loaded_mtime = self.path.stat().st_mtime
-        except OSError:
-            self._loaded_mtime = None
+        self._loaded_stat = self._stat_key()
 
     def _refresh_if_stale(self) -> None:
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            mtime = None
-        if mtime != self._loaded_mtime:
+        if self._stat_key() != self._loaded_stat:
             self._load()
 
     def _save(self) -> None:
@@ -153,10 +161,7 @@ class FederationRegistry:
         tmp = self.path.with_suffix(".yaml.tmp")
         tmp.write_text(yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.path)
-        try:
-            self._loaded_mtime = self.path.stat().st_mtime
-        except OSError:
-            self._loaded_mtime = None
+        self._loaded_stat = self._stat_key()
 
     # -- queries ----------------------------------------------------------------
 
