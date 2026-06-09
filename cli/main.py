@@ -1030,15 +1030,18 @@ def _handle_agent_add(args: argparse.Namespace) -> int:
     from core.federation_registry import FederationRegistry, RegistryError
 
     tier = getattr(args, "tier", "quarantined")
-    if tier == "trusted" and _is_quarantined_class(args.agent_id):
-        if not getattr(args, "risk_ack", False):
-            print(
-                f"refusing: {args.agent_id!r} is a quarantined-class agent. "
-                "Registering it as trusted exposes the full federation to it. "
-                "Re-run with --i-understand-the-risk to override.",
-                file=sys.stderr,
-            )
-            return 1
+    if (
+        tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Registering it as trusted exposes the full federation to it. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
     registry = FederationRegistry()
     try:
         token = registry.add_agent(
@@ -1089,14 +1092,17 @@ def _handle_agent_rotate(args: argparse.Namespace) -> int:
 def _handle_agent_set_tier(args: argparse.Namespace) -> int:
     from core.federation_registry import FederationRegistry, RegistryError
 
-    if args.tier == "trusted" and _is_quarantined_class(args.agent_id):
-        if not getattr(args, "risk_ack", False):
-            print(
-                f"refusing: {args.agent_id!r} is a quarantined-class agent. "
-                "Re-run with --i-understand-the-risk to override.",
-                file=sys.stderr,
-            )
-            return 1
+    if (
+        args.tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         FederationRegistry().set_tier(args.agent_id, args.tier)
     except RegistryError as exc:

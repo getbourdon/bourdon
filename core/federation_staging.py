@@ -227,12 +227,12 @@ def reject(library_path: Path, agent_id: str) -> int:
 
 
 def _prune_empty_dir(path: Path) -> None:
+    import contextlib
+
     try:
         next(path.iterdir())
     except StopIteration:
-        try:
+        with contextlib.suppress(OSError):
             path.rmdir()
-        except OSError:
-            pass
     except OSError:
         pass
