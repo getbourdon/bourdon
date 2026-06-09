@@ -1108,7 +1108,7 @@ def _build_auth_middleware(registry: FederationRegistry):
 
     class _BearerAuth(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if legacy is None and not registry.has_active_agents():
+            if legacy is None and not registry.is_configured():
                 return JSONResponse(
                     {
                         "error": (

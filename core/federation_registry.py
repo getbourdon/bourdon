@@ -183,6 +183,15 @@ class FederationRegistry:
             for row in self._agents.values()
         )
 
+    def is_configured(self) -> bool:
+        """True when the operator has registered ANY member, even if all are
+        revoked. Distinguishes "auth was never set up" (the middleware's 503
+        fail-closed case) from "your token is invalid or revoked" (401) —
+        revoking the last member must yield 401s, not flip the server back
+        into the unconfigured state."""
+        self._refresh_if_stale()
+        return bool(self._agents)
+
     def authenticate(self, token: str) -> AgentIdentity | None:
         """Resolve a presented Bearer token to an identity, or ``None``.
 
