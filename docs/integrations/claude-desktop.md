@@ -2,7 +2,11 @@
 
 Claude Desktop is Anthropic's MCP host with the simplest setup story: a single JSON config file, no plugin marketplace, no per-workspace surface. That makes it the lowest-friction reader for cross-agent federation. **If you only wire one MCP host, wire this one** — it's the demo described in [`docs/PROOF.md`](../PROOF.md).
 
-Claude Desktop is a **reader**. It doesn't write its own L5 manifests yet (no Claude Desktop participant ships in Bourdon as of v0.4.1). You federate other agents' content *into* Claude Desktop.
+Claude Desktop federates in **both directions**:
+
+- **Reading**: any conversation can query the federation through the Bourdon tools (this page's main setup).
+- **Code + Co-Work surfaces** publish native L5 manifests via the `claude-desktop-code` and `claude-desktop-cowork` participants (shipped v0.8.x — they parse the desktop app's on-disk state).
+- **Chat** (claude.ai conversations in the desktop app) is the canonical **self-authoring** member: its IndexedDB store is opaque by design, so there is no parser — the chat model itself calls `commit_to_federation` with `agent_id="claude-desktop-chat"` whenever it has context worth sharing. See [The chat write path](#the-chat-write-path-claude-desktop-chat) below.
 
 ## What this gives you
 
@@ -138,8 +142,49 @@ bourdon dogfood
 #   Bourdon MCP tools (`list_recent_work`, `find_entity`, etc.)."
 ```
 
-## Known limitations
+## The chat write path (`claude-desktop-chat`)
 
-- **No write side yet.** Claude Desktop doesn't have a Bourdon participant; it can't *contribute* to the federation, only read from it. If you want what happens in Claude Desktop sessions to be part of the federation, you'd need to either (a) wait for a future Claude Desktop participant or (b) manually summarize and feed back into another agent's store.
+The desktop app's Chat surface contributes to the federation by self-authoring:
+the model calls `commit_to_federation` when it decides a piece of context is
+worth sharing. No participant code, no IndexedDB reverse-engineering — this is
+the canonical pattern for every cloud-only / webview surface
+(`docs/AUTHORING_A_PARTICIPANT.md` § write-side).
+
+With the MCP server wired (above), the only missing piece is telling the model
+when to commit. Add a fragment like this to your Claude personal preferences
+(Settings → Profile → "What personal preferences should Claude consider in
+responses?") or a Project's custom instructions:
+
+> When a conversation produces context worth remembering across my AI agents —
+> a decision, a plan, a fact about an ongoing project — call the Bourdon MCP
+> tool `commit_to_federation` with `agent_id="claude-desktop-chat"` and
+> `agent_type="other"`. Put the durable fact in `entities` (name + summary,
+> tags where useful) and the session shape in `sessions` (ISO date,
+> project_focus, key_actions). Set `visibility: "private"` on anything
+> credential-like, financial, or personal. Don't commit small talk; do commit
+> decisions and direction changes. Use `mode="merge"` (the default).
+
+Conventions:
+
+- `agent_id` is always `claude-desktop-chat` (one manifest for the surface).
+- `agent_type` is `other`.
+- Repeated commits merge: entities dedupe by name, sessions by `(date, cwd)`.
+- The contribution lands in `~/agent-library/agents/claude-desktop-chat.l5.yaml`
+  and is immediately visible to every other federated agent, the tray, and
+  peers. (Note: under v0.9.0 trust tiers, stdio callers are the trusted
+  operator — chat commits write directly. Remote/quarantined members stage
+  instead; see `docs/security-model.md`.)
+
+Verify the path without the desktop app in the loop:
+
+```
+# Any MCP client (or another agent) against the same server:
+"Call commit_to_federation with agent_id='claude-desktop-chat',
+ agent_type='other', and one test entity."
+# Then:
+bourdon agents | grep claude-desktop-chat
+```
+
+## Known limitations
 - **No automatic refresh.** The L6 server reads `~/agent-library/` on startup. New manifests written *while* Claude Desktop has the MCP server running won't show up until you restart Claude Desktop. (Future: file-watching in `L6Store`, tracked but not scheduled.)
 - **Subprocess lifecycle quirks.** If Claude Desktop's MCP subprocess management gets confused, the Bourdon server can end up in a half-attached state. `pkill -f "core.l6_server"` clears it; restarting Claude Desktop respawns cleanly.
