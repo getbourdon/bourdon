@@ -1775,11 +1775,12 @@ def _patch_serve_runtime(monkeypatch) -> dict:
     capturing the store the server was built from and the run() kwargs."""
     captured: dict = {}
 
-    def fake_create(store, name="bourdon-l6"):
+    def fake_create(store, name="bourdon-l6", registry=None, audit=None):
         captured["store"] = store
         return object()
 
     def fake_run(server, **kwargs):
+        kwargs.pop("registry", None)  # identity plumbing, not a transport kwarg
         captured["run_kwargs"] = kwargs
 
     monkeypatch.setattr("core.l6_server.create_l6_server", fake_create)
@@ -1856,6 +1857,7 @@ def test_cli_serve_no_peers_by_default(tmp_path, monkeypatch):
     assert captured["run_kwargs"] == {
         "transport": "stdio",
         "port": 7500,
-        "host": "0.0.0.0",
+        # v0.9.0: default bind is loopback-only (spec/SPEC_v0.9.0.md D8).
+        "host": "127.0.0.1",
         "allow_unauthenticated": False,
     }
