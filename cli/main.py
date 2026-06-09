@@ -692,10 +692,104 @@ def _handle_doctor(args: argparse.Namespace) -> int:
                 ),
             })
 
-    report = {"participants": results}
+    report = {"participants": results, "federation": _doctor_federation_checks()}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
     return 0
+
+
+def _doctor_federation_checks() -> list[dict[str, Any]]:
+    """v0.9.0 federation hygiene checks (spec R6).
+
+    - transport/auth posture: legacy shared token vs per-agent registry
+    - members missing a tier (corrupt/hand-edited registry rows)
+    - revoked members whose token hash is still present (prune candidates)
+    - stale staged writes (> 7 days awaiting promote/reject)
+    """
+    import os as _os
+
+    from core.federation_registry import FederationRegistry
+    from core.federation_staging import list_staged
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+
+    checks: list[dict[str, Any]] = []
+
+    registry = FederationRegistry()
+    members = registry.list_agents()
+    legacy = bool(_os.environ.get("BOURDON_PEER_TOKEN_SERVER"))
+    if not members and not legacy:
+        checks.append({
+            "check": "auth",
+            "status": "info",
+            "reason": (
+                "no federation members registered and no legacy token set — "
+                "HTTP transport will refuse non-loopback binds"
+            ),
+        })
+    elif legacy and not members:
+        checks.append({
+            "check": "auth",
+            "status": "warn",
+            "reason": (
+                "running on the legacy shared token only "
+                "(BOURDON_PEER_TOKEN_SERVER) — migrate peers to per-agent "
+                "tokens via `bourdon agent add` for tiered access + revocation"
+            ),
+        })
+    else:
+        checks.append({
+            "check": "auth",
+            "status": "ok",
+            "reason": f"{len(members)} registered member(s)",
+        })
+
+    for agent_id, row in members.items():
+        if row.get("tier") not in ("trusted", "quarantined"):
+            checks.append({
+                "check": "tier",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": f"member has invalid/missing tier {row.get('tier')!r}",
+                "proposed_fix": f"bourdon agent set-tier {agent_id} quarantined",
+            })
+        if row.get("revoked") and row.get("has_token"):
+            checks.append({
+                "check": "revoked-token-present",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": (
+                    "revoked member still has a token hash on file (it cannot "
+                    "authenticate, but consider pruning the row)"
+                ),
+            })
+
+    try:
+        staged = list_staged(DEFAULT_LIBRARY_PATH)
+    except OSError:
+        staged = []
+    for item in staged:
+        if item.age_days > 7:
+            checks.append({
+                "check": "stale-staged-write",
+                "status": "warn",
+                "agent": item.agent_id,
+                "reason": (
+                    f"staged write from {item.caller!r} is {item.age_days:.0f} "
+                    "days old"
+                ),
+                "proposed_fix": (
+                    f"bourdon staging promote {item.agent_id}  # or: "
+                    f"bourdon staging reject {item.agent_id}"
+                ),
+            })
+    if staged and all(item.age_days <= 7 for item in staged):
+        checks.append({
+            "check": "staging",
+            "status": "info",
+            "reason": f"{len(staged)} staged write(s) awaiting review",
+        })
+
+    return checks
 
 
 def _handle_agents(args: argparse.Namespace) -> int:
@@ -795,7 +889,7 @@ def _handle_serve(args: argparse.Namespace) -> int:
 
     transport = getattr(args, "transport", "stdio")
     port = getattr(args, "port", 7500)
-    host = getattr(args, "host", "0.0.0.0")
+    host = getattr(args, "host", "127.0.0.1")
     allow_unauthenticated = getattr(args, "allow_unauthenticated", False)
 
     # Cross-machine peer federation (Phase 1.6+): merge --peer URLs with the
@@ -818,9 +912,9 @@ def _handle_serve(args: argparse.Namespace) -> int:
         if transport == "http":
             print(f"  bind:      {host}:{port}", file=sys.stderr)
             auth_state = (
-                "disabled (--allow-unauthenticated)"
+                "disabled (--allow-unauthenticated, loopback only)"
                 if allow_unauthenticated
-                else "Bearer (set BOURDON_PEER_TOKEN_SERVER)"
+                else "Bearer (bourdon agent add / BOURDON_PEER_TOKEN_SERVER)"
             )
             print(f"  auth:      {auth_state}", file=sys.stderr)
         if peers:
@@ -834,7 +928,10 @@ def _handle_serve(args: argparse.Namespace) -> int:
             print(f"MCP client endpoint (http): http://127.0.0.1:{port}/mcp", file=sys.stderr)
         print("", file=sys.stderr)
 
-    server = create_l6_server(store)
+    from core.federation_registry import FederationRegistry
+
+    registry = FederationRegistry()
+    server = create_l6_server(store, registry=registry)
     try:
         run_l6_server(
             server,
@@ -842,9 +939,300 @@ def _handle_serve(args: argparse.Namespace) -> int:
             port=port,
             host=host,
             allow_unauthenticated=allow_unauthenticated,
+            registry=registry,
         )
     except KeyboardInterrupt:
         return 0
+    return 0
+
+
+# -- OpenClaw (quarantined-class, network-shaped) handlers (v0.9.0) -------------
+
+
+def _handle_openclaw_export(args: argparse.Namespace) -> int:
+    """Export the OpenClaw instance's L5 manifest INTO STAGING.
+
+    Unlike the on-disk participants this is an explicit operator command with
+    loud failures: a handshake refusal (unpatched / auth-disabled instance)
+    prints the exact reason + fix and exits non-zero. On success the manifest
+    lands in ``<library>/staging/openclaw/`` — promote it with
+    ``bourdon staging promote openclaw`` (spec/SPEC_v0.9.0.md D6).
+    """
+    from core.federation_staging import stage_manifest
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    try:
+        manifest = participant.export_l5(since=_parse_since(getattr(args, "since", None)))
+    except ParticipantDiscoveryError as exc:
+        print(f"bourdon openclaw export: handshake refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"bourdon openclaw export: failed: {exc}", file=sys.stderr)
+        return 1
+
+    data = filter_manifest_for_access(
+        manifest, access_level=getattr(args, "access_level", "team")
+    )
+    library = (
+        Path(args.library)
+        if getattr(args, "library", None)
+        else Path.home() / "agent-library"
+    )
+    out_path = stage_manifest(library, "openclaw", data)
+    print(
+        f"bourdon openclaw export: STAGED {len(data.get('known_entities') or [])} "
+        f"entities / {len(data.get('recent_sessions') or [])} sessions at {out_path}"
+    )
+    print(
+        "Quarantined-class content never writes to the live store directly. "
+        "Review and promote with: bourdon staging promote openclaw",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _handle_openclaw_doctor(args: argparse.Namespace) -> int:
+    """Health-check the configured OpenClaw instance (handshake gate included)."""
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    health = participant.health_check()
+    row: dict[str, Any] = {
+        "agent": "openclaw",
+        "status": health.status,
+        "reason": health.reason,
+        "details": health.details,
+    }
+    if health.proposed_fix:
+        row["proposed_fix"] = health.proposed_fix
+    _print_yaml({"participants": [row]})
+    return 0 if health.status == "ok" else 1
+
+
+# -- Federation trust management handlers (v0.9.0) -----------------------------
+
+
+def _is_quarantined_class(agent_id: str) -> bool:
+    """Whether a participant declares itself quarantined-class (e.g. OpenClaw).
+
+    Quarantined-class agents may only be registered/promoted to ``trusted``
+    with an explicit ``--i-understand-the-risk`` acknowledgement.
+    """
+    for pid, participant_cls in discover_participants():
+        if pid == agent_id and getattr(participant_cls, "QUARANTINED_CLASS", False):
+            return True
+    return False
+
+
+def _handle_agent_add(args: argparse.Namespace) -> int:
+    """Register a federation member and print its token (shown ONCE)."""
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    tier = getattr(args, "tier", "quarantined")
+    if (
+        tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Registering it as trusted exposes the full federation to it. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
+    registry = FederationRegistry()
+    try:
+        token = registry.add_agent(
+            args.agent_id, tier=tier, grants=list(getattr(args, "grant", []) or [])
+        )
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"registered {args.agent_id} (tier: {tier})")
+    print(f"token: {token}")
+    print(
+        "This token is shown ONCE and stored only as a hash. "
+        "Pass it as `Authorization: Bearer <token>` on the HTTP transport.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _handle_agent_list(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry
+
+    rows = FederationRegistry().list_agents()
+    if not rows:
+        print("no federation members registered (see `bourdon agent add`)")
+        return 0
+    for agent_id, row in rows.items():
+        status = "REVOKED" if row.get("revoked") else row.get("tier", "?")
+        grants = ", ".join(row.get("grants") or []) or "-"
+        print(f"{agent_id:30s} {status:12s} grants: {grants}")
+    return 0
+
+
+def _handle_agent_rotate(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        token = FederationRegistry().rotate_token(args.agent_id)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"rotated {args.agent_id}")
+    print(f"token: {token}")
+    print("This token is shown ONCE. The previous token no longer authenticates.",
+          file=sys.stderr)
+    return 0
+
+
+def _handle_agent_set_tier(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    if (
+        args.tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        FederationRegistry().set_tier(args.agent_id, args.tier)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.agent_id} -> tier: {args.tier}")
+    return 0
+
+
+def _handle_grant(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().grant(args.agent_id, args.namespace)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"granted {args.agent_id} read access to namespace {args.namespace!r}")
+    return 0
+
+
+def _handle_ungrant(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().ungrant(args.agent_id, args.namespace)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"removed {args.agent_id} grant on namespace {args.namespace!r}")
+    return 0
+
+
+def _handle_revoke(args: argparse.Namespace) -> int:
+    """Amputate a federation member: token dead, access dead, effective now."""
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().revoke(args.agent_id)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"revoked {args.agent_id}: token invalidated, federation access cut. "
+        "Its audit history remains queryable (`bourdon audit --agent "
+        f"{args.agent_id}`)."
+    )
+    return 0
+
+
+def _staging_library(args: argparse.Namespace) -> Path:
+    lib = getattr(args, "library", None)
+    if lib:
+        return Path(lib)
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+
+    return DEFAULT_LIBRARY_PATH
+
+
+def _handle_staging_list(args: argparse.Namespace) -> int:
+    from core.federation_staging import list_staged
+
+    staged = list_staged(_staging_library(args))
+    if not staged:
+        print("no staged writes")
+        return 0
+    for item in staged:
+        print(
+            f"{item.agent_id:30s} via {item.caller:20s} "
+            f"{item.entities:3d} entities {item.sessions:3d} sessions  "
+            f"staged {item.age_days:.1f}d ago"
+        )
+    return 0
+
+
+def _handle_staging_promote(args: argparse.Namespace) -> int:
+    from core.federation_staging import promote
+
+    try:
+        results = promote(_staging_library(args), args.agent_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for summary in results:
+        print(
+            f"promoted {args.agent_id}: "
+            f"+{summary.get('entities_added', 0)} entities "
+            f"(~{summary.get('entities_updated', 0)} updated), "
+            f"+{summary.get('sessions_added', 0)} sessions "
+            f"(~{summary.get('sessions_updated', 0)} updated)"
+        )
+    return 0
+
+
+def _handle_staging_reject(args: argparse.Namespace) -> int:
+    from core.federation_staging import reject
+
+    try:
+        count = reject(_staging_library(args), args.agent_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"rejected {count} staged write(s) for {args.agent_id}")
+    return 0
+
+
+def _handle_audit(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from core.federation_audit import FederationAudit
+
+    entries = FederationAudit().entries(
+        agent=getattr(args, "agent", None),
+        denials_only=getattr(args, "denials", False),
+        limit=getattr(args, "limit", 50),
+    )
+    if getattr(args, "export", False):
+        for entry in entries:
+            print(_json.dumps(entry, ensure_ascii=False))
+        return 0
+    if not entries:
+        print("no audit entries match")
+        return 0
+    for entry in entries:
+        detail = f"  ({entry['detail']})" if entry.get("detail") else ""
+        print(
+            f"{entry.get('ts', '?'):28s} {entry.get('decision', '?'):5s} "
+            f"{entry.get('agent', '?'):20s} {entry.get('op', '?'):28s} "
+            f"ns={entry.get('namespace', '*')}{detail}"
+        )
     return 0
 
 
@@ -859,15 +1247,25 @@ def _handle_export_all(args: argparse.Namespace) -> int:
             participant = participant_cls()
             manifest = participant.export_l5(since=since)
             data = filter_manifest_for_access(manifest, access_level=access_level)
-            out_path = (
-                Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
-            )
-            write_l5_dict(data, out_path)
+            if getattr(participant_cls, "QUARANTINED_CLASS", False):
+                # Quarantine follows the content (spec/SPEC_v0.9.0.md D6):
+                # quarantined-class exports stage for review, never write
+                # to the live store directly.
+                from core.federation_staging import stage_manifest
+
+                out_path = stage_manifest(Path(args.library), agent_id, data)
+                status = "staged"
+            else:
+                out_path = (
+                    Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
+                )
+                write_l5_dict(data, out_path)
+                status = "ok"
             entity_count = len(data.get("known_entities") or [])
             session_count = len(data.get("recent_sessions") or [])
             results.append({
                 "agent": agent_id,
-                "status": "ok",
+                "status": status,
                 "path": str(out_path),
                 "entities": entity_count,
                 "sessions": session_count,
@@ -2509,11 +2907,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve_cmd.add_argument(
         "--host",
-        default="0.0.0.0",
+        default="127.0.0.1",
         help=(
-            "Bind host for HTTP transport (default: 0.0.0.0 — all interfaces, "
-            "required for cross-host / Tailnet federation; use 127.0.0.1 for "
-            "localhost only)."
+            "Bind host for HTTP transport (default: 127.0.0.1 — loopback only). "
+            "Use 0.0.0.0 for cross-host / Tailnet federation; non-loopback "
+            "binds require auth configured (bourdon agent add / "
+            "BOURDON_PEER_TOKEN_SERVER) or the server refuses to start."
         ),
     )
     serve_cmd.add_argument(
@@ -2546,12 +2945,155 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow-unauthenticated",
         action="store_true",
         help=(
-            "Serve HTTP transport without Bearer-token auth. Off by default "
-            "(authenticated HTTP requires BOURDON_PEER_TOKEN_SERVER). Only safe "
-            "on localhost / a closed Tailnet."
+            "Serve HTTP transport without Bearer-token auth. Off by default. "
+            "v0.9.0: honored on loopback binds ONLY — combined with a "
+            "non-loopback --host the server refuses to start."
         ),
     )
     serve_cmd.set_defaults(func=_handle_serve)
+
+    # -- Federation trust management (v0.9.0) ----------------------------------
+
+    agent_cmd = subparsers.add_parser(
+        "agent", help="Manage federation member identities (tokens + tiers)"
+    )
+    agent_sub = agent_cmd.add_subparsers(dest="agent_command")
+
+    agent_add = agent_sub.add_parser(
+        "add", help="Register a federation member; prints its token ONCE"
+    )
+    agent_add.add_argument("agent_id", help="Member slug (e.g. openclaw, clyde)")
+    agent_add.add_argument(
+        "--tier",
+        choices=("trusted", "quarantined"),
+        default="quarantined",
+        help="Trust tier (default: quarantined — deny-by-default)",
+    )
+    agent_add.add_argument(
+        "--grant",
+        action="append",
+        default=[],
+        metavar="NAMESPACE",
+        help="Agent-manifest namespace this member may read (repeatable)",
+    )
+    agent_add.add_argument(
+        "--i-understand-the-risk",
+        action="store_true",
+        dest="risk_ack",
+        help=(
+            "Required to register a quarantined-class agent (e.g. openclaw) "
+            "as trusted"
+        ),
+    )
+    agent_add.set_defaults(func=_handle_agent_add)
+
+    agent_list = agent_sub.add_parser(
+        "list", help="List registered federation members (no token material)"
+    )
+    agent_list.set_defaults(func=_handle_agent_list)
+
+    agent_rotate = agent_sub.add_parser(
+        "rotate", help="Rotate a member's token; prints the new token ONCE"
+    )
+    agent_rotate.add_argument("agent_id")
+    agent_rotate.set_defaults(func=_handle_agent_rotate)
+
+    agent_set_tier = agent_sub.add_parser(
+        "set-tier", help="Change a member's trust tier"
+    )
+    agent_set_tier.add_argument("agent_id")
+    agent_set_tier.add_argument("tier", choices=("trusted", "quarantined"))
+    agent_set_tier.add_argument(
+        "--i-understand-the-risk",
+        action="store_true",
+        dest="risk_ack",
+        help="Required to promote a quarantined-class agent to trusted",
+    )
+    agent_set_tier.set_defaults(func=_handle_agent_set_tier)
+
+    grant_cmd = subparsers.add_parser(
+        "grant", help="Grant a quarantined member read access to one namespace"
+    )
+    grant_cmd.add_argument("agent_id")
+    grant_cmd.add_argument("namespace", help="Agent-manifest namespace (agent id)")
+    grant_cmd.set_defaults(func=_handle_grant)
+
+    ungrant_cmd = subparsers.add_parser(
+        "ungrant", help="Remove a namespace grant from a member"
+    )
+    ungrant_cmd.add_argument("agent_id")
+    ungrant_cmd.add_argument("namespace")
+    ungrant_cmd.set_defaults(func=_handle_ungrant)
+
+    revoke_cmd = subparsers.add_parser(
+        "revoke",
+        help="Immediately invalidate a member's token and federation access",
+    )
+    revoke_cmd.add_argument("agent_id")
+    revoke_cmd.set_defaults(func=_handle_revoke)
+
+    staging_cmd = subparsers.add_parser(
+        "staging", help="Review quarantined writes awaiting promotion"
+    )
+    staging_sub = staging_cmd.add_subparsers(dest="staging_command")
+    staging_list = staging_sub.add_parser("list", help="List staged writes")
+    staging_list.add_argument("--library", type=Path, default=None)
+    staging_list.set_defaults(func=_handle_staging_list)
+    staging_promote = staging_sub.add_parser(
+        "promote", help="Merge a staged write into the live federation store"
+    )
+    staging_promote.add_argument("agent_id")
+    staging_promote.add_argument("--library", type=Path, default=None)
+    staging_promote.set_defaults(func=_handle_staging_promote)
+    staging_reject = staging_sub.add_parser(
+        "reject", help="Delete a staged write without promoting it"
+    )
+    staging_reject.add_argument("agent_id")
+    staging_reject.add_argument("--library", type=Path, default=None)
+    staging_reject.set_defaults(func=_handle_staging_reject)
+
+    audit_cmd = subparsers.add_parser(
+        "audit", help="Query the append-only federation audit log"
+    )
+    audit_cmd.add_argument("--agent", default=None, help="Filter to one member")
+    audit_cmd.add_argument(
+        "--denials", action="store_true", help="Show only denied operations"
+    )
+    audit_cmd.add_argument("--limit", type=int, default=50)
+    audit_cmd.add_argument(
+        "--export",
+        action="store_true",
+        help="Emit raw JSONL (machine-readable) instead of the table",
+    )
+    audit_cmd.set_defaults(func=_handle_audit)
+
+    openclaw_cmd = subparsers.add_parser(
+        "openclaw",
+        help="OpenClaw adapter (quarantined class — exports stage for review)",
+    )
+    openclaw_sub = openclaw_cmd.add_subparsers(dest="openclaw_command")
+    openclaw_export = openclaw_sub.add_parser(
+        "export",
+        help="Export the OpenClaw instance's L5 manifest into staging",
+    )
+    openclaw_export.add_argument(
+        "--url",
+        default=None,
+        help="OpenClaw instance URL (default: $OPENCLAW_URL or http://127.0.0.1:8080)",
+    )
+    openclaw_export.add_argument("--since")
+    openclaw_export.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    openclaw_export.add_argument("--library", type=Path, default=None)
+    openclaw_export.set_defaults(func=_handle_openclaw_export)
+    openclaw_doctor = openclaw_sub.add_parser(
+        "doctor", help="Health-check the OpenClaw instance (handshake gate)"
+    )
+    openclaw_doctor.add_argument("--url", default=None)
+    openclaw_doctor.set_defaults(func=_handle_openclaw_doctor)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")

@@ -324,7 +324,7 @@ class _RecordingServer:
     def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.calls.append(dict(kwargs))
 
-    def http_app(self, middleware=None):  # noqa: ANN001
+    def http_app(self, middleware=None, stateless_http=None):  # noqa: ANN001
         self.http_app_calls.append(middleware)
         return ("ASGI_APP", middleware)
 
@@ -335,10 +335,10 @@ def test_run_l6_server_stdio_uses_default_run():
     assert server.calls == [{}]
 
 
-def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch):
-    """--allow-unauthenticated must bind 0.0.0.0 via uvicorn — NOT
-    server.run(transport='http'), which FastMCP binds to 127.0.0.1 and thereby
-    silently hides the server from the Tailnet (the bug the Mac peer caught)."""
+def test_run_l6_server_http_default_binds_loopback_only(monkeypatch):
+    """v0.9.0 contract (spec D8): the default HTTP bind is 127.0.0.1.
+    Cross-host / Tailnet serving requires an explicit --host 0.0.0.0 AND
+    auth configured."""
     pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
     captured: dict = {}
     monkeypatch.setattr(
@@ -351,14 +351,51 @@ def test_run_l6_server_http_unauth_binds_all_interfaces_via_uvicorn(monkeypatch)
     server_module.run_l6_server(
         server, transport="http", port=7501, allow_unauthenticated=True
     )
-    assert captured["host"] == "0.0.0.0"
+    assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 7501
-    assert server.http_app_calls == [None]  # no auth middleware wrapped
+    # Unauth path wraps the operator-identity middleware (never bare).
+    assert server.http_app_calls and server.http_app_calls[0] is not None
     assert server.calls == []  # never falls back to server.run(transport=http)
 
 
-def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
-    pytest.importorskip("uvicorn")  # optional [server] extra; skip if absent in CI
+def test_run_l6_server_http_nonloopback_without_auth_refuses_to_start(monkeypatch):
+    """v0.9.0 negative test: 0.0.0.0 with no auth configured must exit
+    non-zero at startup — not serve and 503 per request."""
+    pytest.importorskip("uvicorn")
+    monkeypatch.delenv("BOURDON_PEER_TOKEN_SERVER", raising=False)
+    called: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda *a, **k: called.update(ran=True)
+    )
+    server = _RecordingServer()
+    with pytest.raises(SystemExit):
+        server_module.run_l6_server(
+            server, transport="http", host="0.0.0.0", allow_unauthenticated=False
+        )
+    assert "ran" not in called
+
+
+def test_run_l6_server_http_nonloopback_unauthenticated_refuses_to_start(monkeypatch):
+    """--allow-unauthenticated is loopback-only in v0.9.0; combined with a
+    non-loopback bind the server refuses to start even if auth env is set."""
+    pytest.importorskip("uvicorn")
+    monkeypatch.setenv("BOURDON_PEER_TOKEN_SERVER", "shh")
+    called: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda *a, **k: called.update(ran=True)
+    )
+    server = _RecordingServer()
+    with pytest.raises(SystemExit):
+        server_module.run_l6_server(
+            server, transport="http", host="0.0.0.0", allow_unauthenticated=True
+        )
+    assert "ran" not in called
+
+
+def test_run_l6_server_http_nonloopback_with_auth_binds_all_interfaces(monkeypatch):
+    """Tailnet serving still works: explicit 0.0.0.0 + auth configured."""
+    pytest.importorskip("uvicorn")
+    monkeypatch.setenv("BOURDON_PEER_TOKEN_SERVER", "shh-its-a-secret")
     captured: dict = {}
     monkeypatch.setattr(
         "uvicorn.run",
@@ -368,7 +405,8 @@ def test_run_l6_server_http_authenticated_wraps_bearer_middleware(monkeypatch):
     )
     server = _RecordingServer()
     server_module.run_l6_server(
-        server, transport="http", port=7502, allow_unauthenticated=False
+        server, transport="http", port=7502, host="0.0.0.0",
+        allow_unauthenticated=False,
     )
     assert captured["host"] == "0.0.0.0"
     assert captured["port"] == 7502

@@ -186,13 +186,18 @@ BOURDON_PEER_TOKEN=$TOKEN_MAC \
 Or declare peers in `~/.bourdon/peers.yaml` (see
 [`config/peers.example.yaml`](../config/peers.example.yaml)).
 
-### Auth defaults
+### Auth defaults (v0.9.0)
 
-- HTTP transport requires `BOURDON_PEER_TOKEN_SERVER` to be set; missing
-  token + missing `--allow-unauthenticated` flag returns 503 to every
-  request (fails closed).
-- `--allow-unauthenticated` exists as an explicit escape hatch for
-  localhost-only testing. Don't use it on Tailscale-exposed ports.
+- **Per-agent Bearer tokens** via `bourdon agent add <id>` (hashed at rest,
+  shown once, revocable with `bourdon revoke`). Each token resolves to that
+  member's identity + trust tier; see [`docs/security-model.md`](security-model.md).
+- The legacy shared token (`BOURDON_PEER_TOKEN_SERVER`) still authenticates
+  and maps to the trusted operator identity (migration path). No auth source
+  configured + no `--allow-unauthenticated` returns 503 to every request
+  (fails closed).
+- Default bind is `127.0.0.1` (**changed from 0.0.0.0 in v0.9.0**).
+  Non-loopback binds refuse to start without auth configured;
+  `--allow-unauthenticated` is loopback-only.
 - Client-side: default env is `BOURDON_PEER_TOKEN`; per-peer override via
   `token_env:` in `peers.yaml`.
 
@@ -207,9 +212,24 @@ Or declare peers in `~/.bourdon/peers.yaml` (see
 | `prepare_recognition_context` | sync (~1.2 ms) | local fires first, peers queried in parallel with per-peer timeout (default 200 ms). Peer-matched entities merged with `peer:<name>:<agent>` tags. Slow/dead peers dropped. See `peer_latencies_us` in the response. |
 | `commit_to_federation` | local | local-only; peers commit to their own libraries |
 
+## OpenClaw (v0.9.0 — quarantined class)
+
+- **Read-side adapter:** `participants/openclaw.py` — network-shaped (reads the
+  instance's local HTTP API, not on-disk artifacts). Hard handshake gate:
+  refuses instances unpatched for CVE-2026-25253 (< 2026.1.29) or with auth
+  disabled. `bourdon openclaw export` writes INTO STAGING; promote with
+  `bourdon staging promote openclaw`.
+- **Live federation member:** register with `bourdon agent add openclaw`
+  (quarantined by default; trusted requires `--i-understand-the-risk`), grant
+  namespaces with `bourdon grant`. Guide:
+  [`docs/integrations/openclaw.md`](integrations/openclaw.md).
+- The OpenClaw-side ClawHub plugin (`bourdon-openclaw`) is a separate,
+  complementary surface.
+
 ### Out of scope for v0
 
-- Peer auth rotation / multi-tenant ACLs (Phase 1.7).
+- ~~Peer auth rotation~~ — shipped in v0.9.0 (`bourdon agent rotate`).
+  Multi-tenant ACLs remain out of scope.
 - Conflict resolution beyond "newest wins" (Phase 1.7).
 - Per-peer rate limiting / circuit breaking.
 - Cross-peer pagination cursor (cursored calls fall back to local-only paging).
