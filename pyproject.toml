@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bourdon"
-version = "0.9.0"
+version = "0.9.1"
 description = "Recognition-first runtime + agent federation memory for human-AI collaboration"
 readme = "README.md"
 license = { text = "BUSL-1.1" }
