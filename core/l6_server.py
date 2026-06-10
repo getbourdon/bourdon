@@ -772,6 +772,14 @@ def create_l6_server(
         and only the caller's own ``agent_id`` namespace is writable.
         Staged content is invisible to every read until the operator runs
         ``bourdon staging promote <agent>``.
+
+        DURABILITY (issue #134): commits are durable only on commit-only
+        slugs (``claude-desktop-chat``, ``clyde``, other self-authoring
+        agents). Reader-backed manifests (``claude-code``, ``codex``,
+        ``cursor``, ...) are REGENERATED from their native stores by
+        ``bourdon export-all`` / the per-agent export hooks, which discards
+        rows previously merged in via this tool. Commit under your own
+        self-authoring agent_id, not a reader's.
         """
         caller = _resolve_caller()
         if not caller.is_trusted:

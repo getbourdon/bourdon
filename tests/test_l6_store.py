@@ -1185,3 +1185,88 @@ def test_commit_l5_sessions_sorted_newest_first_after_write(library):
     manifest = store.get_agent_manifest("agent-x", access_level="team")
     dates = [s["date"] for s in manifest["recent_sessions"]]
     assert dates == sorted(dates, reverse=True)
+
+
+# -- Issue #134: merge vs scalar-typed list fields -------------------------------
+
+
+def test_commit_l5_merge_coerces_existing_string_list_field(library):
+    """Repro for #134: a reader-exported manifest carries ``project_focus``
+    as a bare string; a commit colliding on (date, cwd) must merge, not
+    crash with 'str' object has no attribute 'append'."""
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-09T00:00:00+00:00",
+            "recent_sessions": [
+                {
+                    "date": "2026-06-09",
+                    "cwd": "/repo",
+                    "project_focus": "Bourdon",  # scalar, not a list
+                }
+            ],
+            "known_entities": [],
+        },
+    )
+    store = L6Store(library["path"])
+    result = store.commit_l5(
+        "claude-code",
+        sessions=[
+            {
+                "date": "2026-06-09",
+                "cwd": "/repo",
+                "project_focus": ["Phase 3"],
+                "key_actions": ["closed the loop"],
+            }
+        ],
+    )
+    assert result["sessions_updated"] == 1
+    manifest = store.get_agent_manifest("claude-code", include_private=True)
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["Bourdon", "Phase 3"]
+    assert session["key_actions"] == ["closed the loop"]
+
+
+def test_commit_l5_merge_coerces_incoming_string_list_field(library):
+    """The incoming side of the union must coerce too — iterating a bare
+    string would otherwise union its CHARACTERS (silent corruption)."""
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop-chat",
+        agent_type="other",
+        sessions=[{"date": "2026-06-09", "cwd": "/x", "project_focus": ["A"]}],
+    )
+    store.commit_l5(
+        "claude-desktop-chat",
+        sessions=[{"date": "2026-06-09", "cwd": "/x", "project_focus": "Bourdon"}],
+    )
+    manifest = store.get_agent_manifest("claude-desktop-chat", include_private=True)
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["A", "Bourdon"]  # not [..., "B","o","u",...]
+
+
+def test_commit_l5_merge_coerces_entity_string_tags(library):
+    """Same coercion for entity list fields (tags / aliases)."""
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-09T00:00:00+00:00",
+            "recent_sessions": [],
+            "known_entities": [
+                {"name": "Bourdon", "type": "project", "tags": "federation"}
+            ],
+        },
+    )
+    store = L6Store(library["path"])
+    result = store.commit_l5(
+        "claude-code",
+        entities=[{"name": "Bourdon", "tags": ["phase-3"]}],
+    )
+    assert result["entities_updated"] == 1
+    manifest = store.get_agent_manifest("claude-code", include_private=True)
+    (entity,) = manifest["known_entities"]
+    assert entity["tags"] == ["federation", "phase-3"]
