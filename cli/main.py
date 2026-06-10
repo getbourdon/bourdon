@@ -17,6 +17,21 @@ from typing import Any
 
 import yaml
 
+from core.agents_export import (
+    export_local_agents,
+    resolve_local_name,
+)
+from core.codex_context import (
+    filter_manifest_for_access,
+    write_codex_context_artifacts,
+)
+from core.codex_fixtures import create_sample_codex_sources
+from core.codex_turn_compiler import compile_codex_turn
+from core.l2 import query_l2
+from core.l5_io import write_l5_dict
+from core.l6_server import prepare_recognition_context_from_store
+from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+from core.recognition_runtime import recognition_first
 from participants import discover_participants
 from participants.base import ParticipantDiscoveryError
 from participants.cascade import (
@@ -56,24 +71,13 @@ from participants.cursor import CursorParticipant
 from participants.cursor_automations import (
     CursorAutomationsParticipant,
     default_cursor_automations_dir,
+)
+from participants.cursor_automations import (
     init_automations_dir as cursor_init_automations_dir,
+)
+from participants.cursor_automations import (
     merge_automation_tree as cursor_merge_automation_tree,
 )
-from core.agents_export import (
-    export_local_agents,
-    resolve_local_name,
-)
-from core.codex_context import (
-    filter_manifest_for_access,
-    write_codex_context_artifacts,
-)
-from core.codex_fixtures import create_sample_codex_sources
-from core.codex_turn_compiler import compile_codex_turn
-from core.l2 import query_l2
-from core.l5_io import write_l5_dict
-from core.l6_server import prepare_recognition_context_from_store
-from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
-from core.recognition_runtime import recognition_first
 
 
 def _default_claude_code_l5_path() -> Path:
@@ -1369,7 +1373,9 @@ def _handle_sync_pull(args: argparse.Namespace) -> int:
 
 def _handle_codex_build_context(args: argparse.Namespace) -> int:
     participant = _build_participant(args)
-    manifest = _manifest_for_access(participant, since=_parse_since(args.since), access_level="team")
+    manifest = _manifest_for_access(
+        participant, since=_parse_since(args.since), access_level="team"
+    )
     report = write_codex_context_artifacts(manifest, Path(args.out_dir), access_level="team")
     _print_yaml(report)
     return 0
@@ -2507,6 +2513,21 @@ def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_improve_sync(args: argparse.Namespace) -> int:
+    from core.improve_backlog import sync
+
+    summary = sync(
+        Path(args.path).resolve(),
+        args.library,
+        agent_id=args.agent_id,
+        dry_run=args.dry_run,
+    )
+    if not args.dry_run:
+        # Dry-run already printed its would-be payload inside sync().
+        _print_yaml(summary)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bourdon",
@@ -2628,6 +2649,41 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cursor_init_cmd.add_argument("--force", action="store_true")
     cursor_init_cmd.set_defaults(func=_handle_cursor_init)
+
+    # ---- improve backlog subcommands ----------------------------------------
+    improve = subparsers.add_parser(
+        "improve",
+        help="shadcn/improve plan-backlog commands",
+    )
+    improve_subparsers = improve.add_subparsers(dest="improve_command")
+
+    improve_sync_cmd = improve_subparsers.add_parser(
+        "sync",
+        help="Federate a repo's improve-format plans/ backlog into the L6 store",
+    )
+    improve_sync_cmd.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Repo root containing a plans/ backlog (default: current directory)",
+    )
+    improve_sync_cmd.add_argument(
+        "--library",
+        type=Path,
+        default=DEFAULT_LIBRARY_PATH,
+        help=f"Path to agent-library (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    improve_sync_cmd.add_argument(
+        "--agent-id",
+        default="improve",
+        help="Agent slug to commit the backlog under (default: improve)",
+    )
+    improve_sync_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be committed without writing.",
+    )
+    improve_sync_cmd.set_defaults(func=_handle_improve_sync)
 
     # ---- cursor automation subcommands -------------------------------------
     cursor_automations = subparsers.add_parser(
