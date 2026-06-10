@@ -1359,6 +1359,31 @@ _ENTITY_LIST_FIELDS = ("tags", "aliases")
 _SESSION_LIST_FIELDS = ("project_focus", "key_actions", "files_touched")
 
 
+def _coerce_list(value: Any) -> list:
+    """Normalize a list-typed manifest field that may arrive as a scalar.
+
+    Reader-exported manifests can carry list fields as bare strings (e.g.
+    ``project_focus: "Bourdon"``). Without coercion the merge union either
+    crashes (`'str' object has no attribute 'append'` when the EXISTING side
+    is a string) or silently corrupts (iterating an INCOMING string unions
+    its characters). Issue #134.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _union_list_field(target: dict, field_name: str, value: Any) -> None:
+    """Union ``value`` into ``target[field_name]``, coercing both sides."""
+    current = _coerce_list(target.get(field_name))
+    target[field_name] = current
+    for item in _coerce_list(value):
+        if item not in current:
+            current.append(item)
+
+
 def _merge_entities(
     existing: list[dict], incoming: list[dict]
 ) -> tuple[int, int]:
@@ -1383,10 +1408,7 @@ def _merge_entities(
             target = by_key[key]
             for field_name, value in incoming_ent.items():
                 if field_name in _ENTITY_LIST_FIELDS:
-                    target.setdefault(field_name, [])
-                    for item in value or []:
-                        if item not in target[field_name]:
-                            target[field_name].append(item)
+                    _union_list_field(target, field_name, value)
                 elif value is not None:
                     target[field_name] = value
             updated += 1
@@ -1421,10 +1443,7 @@ def _merge_sessions(
             target = by_key[key]
             for field_name, value in incoming_ses.items():
                 if field_name in _SESSION_LIST_FIELDS:
-                    target.setdefault(field_name, [])
-                    for item in value or []:
-                        if item not in target[field_name]:
-                            target[field_name].append(item)
+                    _union_list_field(target, field_name, value)
                 elif value is not None:
                     target[field_name] = value
             updated += 1
