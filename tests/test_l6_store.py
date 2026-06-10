@@ -1270,3 +1270,28 @@ def test_commit_l5_merge_coerces_entity_string_tags(library):
     manifest = store.get_agent_manifest("claude-code", include_private=True)
     (entity,) = manifest["known_entities"]
     assert entity["tags"] == ["federation", "phase-3"]
+
+
+def test_commit_l5_add_normalizes_string_list_fields(library):
+    """Freshly ADDED rows (no dedupe collision) store list fields as lists
+    even when the caller passed a scalar, so manifests land schema-clean
+    for every consumer — not just the merge union (#134 follow-up)."""
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        sessions=[
+            {
+                "date": "2026-06-09",
+                "cwd": "/tmp/foo",
+                "project_focus": "solo-string",  # scalar in, list out
+            }
+        ],
+        entities=[{"name": "Bourdon", "tags": "memory"}],
+    )
+
+    manifest = store.get_agent_manifest("claude-desktop", access_level="team")
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["solo-string"]
+    (entity,) = manifest["known_entities"]
+    assert entity["tags"] == ["memory"]

@@ -1384,6 +1384,20 @@ def _union_list_field(target: dict, field_name: str, value: Any) -> None:
             current.append(item)
 
 
+def _normalized_row(row: dict, list_fields: tuple[str, ...]) -> dict:
+    """Copy ``row`` with every present list field coerced via ``_coerce_list``.
+
+    Applied on the add path so freshly written rows land schema-clean on
+    disk — manifest consumers beyond the merge union (agents export,
+    recognition, the tray) read these fields too (#134 follow-up).
+    """
+    out = dict(row)
+    for field_name in list_fields:
+        if field_name in out:
+            out[field_name] = _coerce_list(out[field_name])
+    return out
+
+
 def _merge_entities(
     existing: list[dict], incoming: list[dict]
 ) -> tuple[int, int]:
@@ -1413,7 +1427,7 @@ def _merge_entities(
                     target[field_name] = value
             updated += 1
         else:
-            existing.append(dict(incoming_ent))
+            existing.append(_normalized_row(incoming_ent, _ENTITY_LIST_FIELDS))
             by_key[key] = existing[-1]
             added += 1
     return added, updated
@@ -1448,7 +1462,7 @@ def _merge_sessions(
                     target[field_name] = value
             updated += 1
         else:
-            existing.append(dict(incoming_ses))
+            existing.append(_normalized_row(incoming_ses, _SESSION_LIST_FIELDS))
             by_key[key] = existing[-1]
             added += 1
     return added, updated
