@@ -249,6 +249,36 @@ def test_dry_run_performs_no_write(tmp_path, capsys):
     assert list((library / "agents").iterdir()) == []  # library dir untouched
 
 
+def test_dry_run_survives_narrow_codepage_stdout(tmp_path, monkeypatch, capsys):
+    """cp1252 consoles can't encode e.g. U+2192; dry-run must degrade, not crash."""
+    import builtins
+
+    repo = _write_repo(tmp_path)
+    plans = repo / "plans"
+    index = (plans / "README.md").read_text(encoding="utf-8")
+    (plans / "README.md").write_text(
+        index.replace("Wire the frobnicator", "Wire → frobnicator"), encoding="utf-8"
+    )
+    library = _library(tmp_path)
+
+    real_print = builtins.print
+    calls = {"n": 0}
+
+    def cp1252_print(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate a console that cannot encode the arrow.
+            str(args[0]).encode("cp1252")
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", cp1252_print)
+    payload = sync(repo, library, dry_run=True)
+    assert payload["dry_run"] is True
+    out = capsys.readouterr().out
+    assert "frobnicator" in out  # fallback actually printed
+    assert list((library / "agents").iterdir()) == []
+
+
 def test_sync_round_trips_through_l6store(tmp_path):
     repo = _write_repo(tmp_path)
     library = _library(tmp_path)
