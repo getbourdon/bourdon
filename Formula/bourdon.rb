@@ -3,8 +3,8 @@ class Bourdon < Formula
 
   desc "Recognition-first runtime + agent federation memory for human-AI collaboration"
   homepage "https://bourdon.ai"
-  url "https://github.com/getbourdon/bourdon/archive/refs/tags/v0.10.0.tar.gz"
-  sha256 "66f889772adf9c821f56da2c4d1d4be2cc32304f926b6d0e16b2282ec2dfe04c"
+  url "https://github.com/getbourdon/bourdon/archive/refs/tags/v0.10.1.tar.gz"
+  sha256 "0469c7515346c240438742a390e25c22b89dac3b881f4760f57139ee55429087"
   license "BUSL-1.1"
   head "https://github.com/getbourdon/bourdon.git", branch: "main"
 
