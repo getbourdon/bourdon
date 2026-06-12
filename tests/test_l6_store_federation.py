@@ -289,6 +289,39 @@ async def test_list_recent_work_federated_no_peers_returns_local(populated_libra
     assert all(not s.agent.startswith("peer:") for s in page.sessions)
 
 
+@pytest.mark.asyncio
+async def test_list_recent_work_federated_never_double_tags(populated_library: Path) -> None:
+    """Rows already carrying peer provenance keep their tag verbatim (#139).
+
+    A pre-#139 peer (or a misconfigured loop) can return rows that are
+    themselves federated merges, e.g. ``peer:mac:improve``. Re-tagging those
+    produced the ``peer:pc:peer:mac:peer:pc:...`` corruption — the merge must
+    pass them through untouched and dedupe them against repeats.
+    """
+    pre_tagged = {
+        "agent": "peer:mac:improve",
+        "date": "2026-06-11",
+        "cwd": "/c/repos/bourdon-gateway",
+        "project_focus": ["bourdon-gateway"],
+    }
+    peer = StubPeer(
+        name="pc",
+        list_recent_work_return={
+            # The same pre-tagged row twice — must collapse to one.
+            "sessions": [pre_tagged, dict(pre_tagged), {"agent": "codex", "date": "2026-06-11", "cwd": "/c"}],
+            "has_more": False,
+            "next_cursor": None,
+        },
+    )
+    store = L6Store(populated_library, peers=[peer])
+    since = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    page = await store.list_recent_work_federated(since=since, access_level="team")
+    tags = [s.agent for s in page.sessions if "improve" in s.agent]
+    assert tags == ["peer:mac:improve"]  # untouched, deduped, NOT peer:pc:peer:mac:
+    fresh = [s.agent for s in page.sessions if s.agent.endswith(":codex")]
+    assert fresh == ["peer:pc:codex"]  # untagged peer rows still get provenance
+
+
 # ---------------------------------------------------------------------------
 # get_cross_agent_summary_federated
 # ---------------------------------------------------------------------------

@@ -251,6 +251,105 @@ def test_export_agents_tool_is_local_only(library, monkeypatch):
     assert report["agents"][0]["source"] == "pc"
     assert report["agents"][0]["source_kind"] == "local"
     assert "sources" not in report
+
+
+# -- Depth-1 federation: peer-originated calls must not fan out (#139) ---------
+
+
+class _RecordingPeer:
+    """Fake peer that records every query and returns benign canned results."""
+
+    name = "mac"
+    recognition_timeout = 0.2
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def list_agents(self):
+        self.calls.append("list_agents")
+        return ["peer-agent"]
+
+    async def find_entity(self, name, access_level="team", include_private=False):
+        self.calls.append("find_entity")
+        return []
+
+    async def list_recent_work(self, **kwargs):
+        self.calls.append("list_recent_work")
+        return {"sessions": [], "next_cursor": None, "has_more": False}
+
+    async def get_cross_agent_summary(
+        self, project, access_level="team", include_private=False
+    ):
+        self.calls.append("get_cross_agent_summary")
+        return {"project": project, "agents": [], "recent_sessions": [], "entities": []}
+
+    async def prepare_recognition_context(
+        self, prompt, access_level="team", include_private=False
+    ):
+        self.calls.append("prepare_recognition_context")
+        return {"matched_entities": []}
+
+
+def _server_with_recording_peer(library):
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-01T12:00:00+00:00",
+            "known_entities": [{"name": "Bourdon", "type": "project"}],
+            "recent_sessions": [],
+        },
+    )
+    peer = _RecordingPeer()
+    store = L6Store(library["path"], peers=[peer])
+    return server_module.create_l6_server(store), peer
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("list_agents", {}),
+        ("find_entity", {"name": "Bourdon"}),
+        ("list_recent_work", {}),
+        ("get_cross_agent_summary", {"project": "Bourdon"}),
+        ("prepare_recognition_context", {"prompt": "What is Bourdon?"}),
+    ],
+)
+def test_federation_hop_1_answers_local_only(library, tool_name, args):
+    """A peer-originated call (federation_hop=1) must never re-fan out.
+
+    Without this guard, bidirectional peering (A lists B, B lists A) recurses
+    until fd exhaustion — issue #139.
+    """
+    _require_fastmcp_or_skip()
+    import asyncio
+
+    server, peer = _server_with_recording_peer(library)
+
+    async def _call():
+        tool = await server.get_tool(tool_name)
+        return await tool.fn(federation_hop=1, **args)
+
+    result = asyncio.run(_call())
+    assert peer.calls == [], f"{tool_name} fanned out to peers despite federation_hop=1"
+    assert "error" not in result
+
+
+def test_federation_hop_0_still_fans_out(library):
+    """Default client calls (federation_hop=0) keep the federated merge."""
+    _require_fastmcp_or_skip()
+    import asyncio
+
+    server, peer = _server_with_recording_peer(library)
+
+    async def _call():
+        tool = await server.get_tool("list_agents")
+        return await tool.fn()
+
+    result = asyncio.run(_call())
+    assert "list_agents" in peer.calls
+    assert "peer-agent" in result["agents"]
 # -- Peer loading (load_peers) -------------------------------------------------
 
 

@@ -140,9 +140,14 @@ class RemoteL6Client:
         return None
 
     # ----------------------------------------------------- mirrored query API
+    #
+    # Every fan-out-capable query sends ``federation_hop: 1`` so the peer
+    # answers from its LOCAL store only. Federation is depth-1 by contract:
+    # without this, bidirectional peering (A lists B, B lists A) recurses
+    # until fd exhaustion — see issue #139.
 
     async def list_agents(self) -> list[str]:
-        result = await self._call_tool("list_agents", {})
+        result = await self._call_tool("list_agents", {"federation_hop": 1})
         if isinstance(result, list):
             return [str(a) for a in result if isinstance(a, str)]
         if isinstance(result, dict) and isinstance(result.get("agents"), list):
@@ -176,6 +181,7 @@ class RemoteL6Client:
                 "name": name,
                 "access_level": access_level,
                 "include_private": include_private,
+                "federation_hop": 1,
             },
         )
         if isinstance(result, list):
@@ -198,6 +204,7 @@ class RemoteL6Client:
             "access_level": access_level,
             "include_private": include_private,
             "summary": summary,
+            "federation_hop": 1,
         }
         if since is not None:
             args["since"] = since
@@ -224,6 +231,7 @@ class RemoteL6Client:
                 "project": project,
                 "access_level": access_level,
                 "include_private": include_private,
+                "federation_hop": 1,
             },
         )
         return result if isinstance(result, dict) else {}
@@ -240,6 +248,7 @@ class RemoteL6Client:
                 "prompt": prompt,
                 "access_level": access_level,
                 "include_private": include_private,
+                "federation_hop": 1,
             },
         )
         return result if isinstance(result, dict) else {}
