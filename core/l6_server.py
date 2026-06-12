@@ -532,6 +532,7 @@ def create_l6_server(
         limit: int | None = None,
         cursor: str | None = None,
         summary: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Return a page of sessions across agents (or a single agent).
@@ -556,6 +557,10 @@ def create_l6_server(
             When true, omit ``key_actions`` and ``files_touched`` from
             each session row. Useful for timeline/dashboard callers that
             only need date + agent + project focus.
+        federation_hop : int, optional
+            Internal depth guard. Peer L6 servers pass ``1`` so a federated
+            query answers from the local store only — federation is depth-1
+            by contract (#139). End clients leave this at ``0``.
         """
         caller = _resolve_caller()
         if not caller.is_trusted and agent is not None and not caller.may_read(agent):
@@ -580,10 +585,12 @@ def create_l6_server(
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
         try:
-            if store.peers and not cursor:
+            if store.peers and not cursor and federation_hop <= 0:
                 # Federated path: merge local + peer sessions. Cursoring across
                 # peers is not supported in v0; a non-None cursor falls back to
                 # local-only paging (where the cursor encoding is valid).
+                # Peer-originated calls (federation_hop > 0) take the local
+                # branch below — fanning out again would recurse (#139).
                 page = await store.list_recent_work_federated(
                     since=cutoff,
                     agent=agent,
@@ -638,6 +645,7 @@ def create_l6_server(
         name: str,
         access_level: str = "public",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Find an entity by name across all agents.
@@ -649,14 +657,25 @@ def create_l6_server(
         When the server has peer L6 servers configured (``--peer`` flag),
         the result also merges matches from each peer's library, tagging
         peer-sourced agents as ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
         caller = _resolve_caller()
         _audit(caller, "find_entity")
-        matches = await store.find_entity_federated(
-            name,
-            include_private=include_private,
-            access_level=access_level,
-        )
+        if federation_hop > 0:
+            matches = store.find_entity(
+                name,
+                include_private=include_private,
+                access_level=access_level,
+            )
+        else:
+            matches = await store.find_entity_federated(
+                name,
+                include_private=include_private,
+                access_level=access_level,
+            )
         matches = _filter_entity_matches(matches, caller)
         return {
             "name": name,
@@ -666,16 +685,23 @@ def create_l6_server(
         }
 
     @mcp.tool()
-    async def list_agents() -> dict:
+    async def list_agents(federation_hop: int = 0) -> dict:
         """
         List agent IDs known to this L6 server, plus any peers' agents.
 
         Peer-sourced agents are NOT prefix-tagged here — call sites that need
         provenance use the more detailed ``find_entity`` / ``get_cross_agent_summary``
         tools where each agent is tagged ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
         caller = _resolve_caller()
-        agents = await store.list_agents_federated()
+        if federation_hop > 0:
+            agents = sorted(store.list_agents())
+        else:
+            agents = await store.list_agents_federated()
         if not caller.is_trusted:
             agents = [a for a in agents if caller.may_read(a)]
         _audit(caller, "list_agents")
@@ -848,6 +874,7 @@ def create_l6_server(
         project: str,
         access_level: str = "public",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Aggregate everything the federation knows about a project.
@@ -856,16 +883,27 @@ def create_l6_server(
         ``project_focus`` references it, and entity matches. When peers are
         configured (``--peer`` flag), peer libraries are merged in with
         agents tagged as ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
         caller = _resolve_caller()
         if not caller.is_trusted:
             return _denied("get_cross_agent_summary", caller)
         _audit(caller, "get_cross_agent_summary")
-        summary = await store.get_cross_agent_summary_federated(
-            project,
-            include_private=include_private,
-            access_level=access_level,
-        )
+        if federation_hop > 0:
+            summary = store.get_cross_agent_summary(
+                project,
+                include_private=include_private,
+                access_level=access_level,
+            )
+        else:
+            summary = await store.get_cross_agent_summary_federated(
+                project,
+                include_private=include_private,
+                access_level=access_level,
+            )
         return summary.to_dict()
 
     @mcp.tool()
@@ -873,6 +911,7 @@ def create_l6_server(
         prompt: str,
         access_level: str = "team",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Return immediate recognition and a bounded prompt-context fragment.
@@ -887,12 +926,16 @@ def create_l6_server(
         are merged into ``matched_entities`` with agents tagged
         ``peer:<peer-name>:<agent>``. Slow / dead peers are dropped and
         reported in ``peer_latencies_us`` so the response is bounded.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
         caller = _resolve_caller()
         if not caller.is_trusted:
             return _denied("prepare_recognition_context", caller)
         _audit(caller, "prepare_recognition_context")
-        if store.peers:
+        if store.peers and federation_hop <= 0:
             return await prepare_recognition_context_federated(
                 store,
                 prompt,

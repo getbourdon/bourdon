@@ -971,7 +971,11 @@ class L6Store:
                         target.tags.append(tag)
                 for agent_id, summary in (entry.get("summaries") or {}).items():
                     if isinstance(agent_id, str) and isinstance(summary, str):
-                        tagged = f"peer:{peer.name}:{agent_id}"
+                        tagged = (
+                            agent_id
+                            if agent_id.startswith("peer:")
+                            else f"peer:{peer.name}:{agent_id}"
+                        )
                         target.summaries.setdefault(tagged, summary)
         return list(by_key.values())
 
@@ -1027,7 +1031,15 @@ class L6Store:
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
-                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                # Don't re-tag rows that already carry peer provenance — a
+                # well-behaved peer answers local-only (depth-1, #139), but a
+                # pre-#139 peer may return its own federated merge.
+                raw_agent = str(s.get("agent") or "")
+                tagged_agent = (
+                    raw_agent
+                    if raw_agent.startswith("peer:")
+                    else f"peer:{peer.name}:{raw_agent}"
+                )
                 date_str = str(s.get("date") or "")
                 cwd = s.get("cwd")
                 key = (date_str, cwd, tagged_agent)
@@ -1102,11 +1114,18 @@ class L6Store:
                 continue
             for a in payload.get("agents") or []:
                 if isinstance(a, str):
-                    agent_set.add(f"peer:{peer.name}:{a}")
+                    agent_set.add(
+                        a if a.startswith("peer:") else f"peer:{peer.name}:{a}"
+                    )
             for s in payload.get("recent_sessions") or []:
                 if not isinstance(s, dict):
                     continue
-                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                raw_agent = str(s.get("agent") or "")
+                tagged_agent = (
+                    raw_agent
+                    if raw_agent.startswith("peer:")
+                    else f"peer:{peer.name}:{raw_agent}"
+                )
                 key = (str(s.get("date") or ""), s.get("cwd"), tagged_agent)
                 if key in seen:
                     continue
@@ -1134,7 +1153,7 @@ class L6Store:
                     merged_entities[key2] = target
                 for a in entry.get("agents") or []:
                     if isinstance(a, str):
-                        tagged = f"peer:{peer.name}:{a}"
+                        tagged = a if a.startswith("peer:") else f"peer:{peer.name}:{a}"
                         if tagged not in target.agents:
                             target.agents.append(tagged)
                 for t in entry.get("types") or []:
@@ -1146,7 +1165,10 @@ class L6Store:
                 for agent_id, summary in (entry.get("summaries") or {}).items():
                     if isinstance(agent_id, str) and isinstance(summary, str):
                         target.summaries.setdefault(
-                            f"peer:{peer.name}:{agent_id}", summary
+                            agent_id
+                            if agent_id.startswith("peer:")
+                            else f"peer:{peer.name}:{agent_id}",
+                            summary,
                         )
         merged_sessions.sort(key=lambda s: s.date, reverse=True)
         return ProjectSummary(
