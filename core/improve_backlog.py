@@ -355,7 +355,14 @@ def sync(
             "entities": entities,
             "sessions": [session],
         }
-        print(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
+        text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            # Narrow-codepage consoles (Windows cp1252) can't encode every
+            # character a plan title may carry (e.g. "->" arrows); degrade to
+            # escaped ASCII instead of crashing.
+            print(text.encode("ascii", "backslashreplace").decode("ascii"))
         return payload
 
     return L6Store(Path(library_path)).commit_l5(
