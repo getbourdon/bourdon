@@ -1758,6 +1758,8 @@ def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
     explicit_text = str(brief_data["delivery"].get("explicit_text") or "").strip()
     if brief_data["routing"].get("mode") != "inject" or not explicit_text:
         return 0
+    if brief_data["routing"].get("confidence") == "low":
+        return 0
 
     hook_response = {
         "hookSpecificOutput": {

@@ -1139,6 +1139,51 @@ def test_cli_codex_hook_user_prompt_submit_skips_when_no_anchor(
     assert captured.err == ""
 
 
+def test_cli_codex_hook_user_prompt_submit_skips_low_confidence_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Platform Launch",
+                "type": "project",
+                "summary": "Low-confidence single-token overlap.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "launch",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_cli_codex_hook_user_prompt_submit_malformed_json_fails_open(
     tmp_path,
     monkeypatch,
