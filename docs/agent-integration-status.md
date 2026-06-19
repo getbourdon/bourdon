@@ -13,7 +13,8 @@ Status: export hook available.
 
 ## Codex
 
-Status: SQLite-backed fallback and turn preparation available.
+Status: SQLite-backed fallback and turn preparation available; Codex CLI live
+hook available.
 
 - `bourdon codex doctor` diagnoses `~/.codex/state_5.sqlite`, stale-index fallback,
   and fallback recall.
@@ -21,6 +22,10 @@ Status: SQLite-backed fallback and turn preparation available.
   back to `session_index.jsonl` on older Codex installs.
 - `bourdon codex prepare-turn` refreshes Codex fallback memory surfaces and emits
   prompt-ready recognition context.
+- `bourdon codex hook user-prompt-submit` implements the Codex CLI
+  `UserPromptSubmit` hook contract and injects `additionalContext` for
+  high-confidence recognition turns. See
+  [`integrations/codex-cli.md`](integrations/codex-cli.md).
 - `bourdon codex sync-native --from-library` sources `bourdon_fallback.md` from
   the federation library (`~/agent-library/agents/*.l5.yaml`) instead of local
   Codex history. Required on a fresh machine where Codex has no local sessions

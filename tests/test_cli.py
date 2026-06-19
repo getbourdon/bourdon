@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import sqlite3
@@ -1044,6 +1045,154 @@ def test_cli_compile_turn_report_out_writes_requested_report(tmp_path, capsys):
     assert stdout_report["schema_version"] == "codex-turn-brief/v1"
     assert written_report["schema_version"] == "codex-turn-brief/v1"
     assert written_report["items"][0]["name"] == "Bourdon"
+
+
+def test_cli_codex_hook_user_prompt_submit_injects_additional_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    hook_output = response["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "UserPromptSubmit"
+    assert "Bourdon turn recognition brief" in hook_output["additionalContext"]
+    assert "Bourdon" in hook_output["additionalContext"]
+
+
+def test_cli_codex_hook_user_prompt_submit_skips_when_no_anchor(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "What is the weather in Seattle?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_malformed_json_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_compiler_error_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+            "--max-chars",
+            "10",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
