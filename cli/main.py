@@ -1710,6 +1710,65 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
+    """Codex UserPromptSubmit hook: inject a bounded turn brief.
+
+    Hook handlers run inside the user's live turn. They must fail open: if the
+    hook input is malformed or Bourdon cannot compile a useful brief, Codex
+    should continue without recognition context.
+    """
+    raw_input = sys.stdin.read()
+    if not raw_input.strip():
+        return 0
+
+    try:
+        hook_payload = json.loads(raw_input)
+    except json.JSONDecodeError as exc:
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: invalid JSON: {exc}", file=sys.stderr)
+        return 0
+
+    if not isinstance(hook_payload, dict):
+        return 0
+
+    prompt = hook_payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return 0
+
+    hook_cwd = hook_payload.get("cwd")
+    cwd = hook_cwd if isinstance(hook_cwd, str) and hook_cwd.strip() else args.cwd
+
+    try:
+        brief = compile_codex_turn(
+            prompt,
+            cwd=cwd,
+            codex_home=getattr(args, "codex_home", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery="explicit",
+        )
+    except Exception as exc:  # noqa: BLE001 -- hook contract: degrade, never block
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: {exc}", file=sys.stderr)
+        return 0
+
+    brief_data = brief.to_dict()
+    explicit_text = str(brief_data["delivery"].get("explicit_text") or "").strip()
+    if brief_data["routing"].get("mode") != "inject" or not explicit_text:
+        return 0
+
+    hook_response = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": explicit_text,
+        }
+    }
+    print(json.dumps(hook_response, indent=2, sort_keys=False))
+    return 0
+
+
 def _fixture_participant() -> CodexParticipant:
     tmpdir = tempfile.TemporaryDirectory()
     sources = create_sample_codex_sources(Path(tmpdir.name) / "home")
@@ -3351,6 +3410,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     compile_turn_cmd.add_argument("--report-out")
     compile_turn_cmd.set_defaults(func=_handle_codex_compile_turn)
+
+    hook_cmd = codex_subparsers.add_parser(
+        "hook",
+        help="Codex CLI hook handlers",
+    )
+    hook_subparsers = hook_cmd.add_subparsers(dest="codex_hook_command")
+    user_prompt_hook_cmd = hook_subparsers.add_parser(
+        "user-prompt-submit",
+        help="Inject a Codex UserPromptSubmit recognition brief",
+    )
+    user_prompt_hook_cmd.add_argument("--cwd")
+    user_prompt_hook_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    user_prompt_hook_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    user_prompt_hook_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    user_prompt_hook_cmd.add_argument("--max-items", type=int, default=6)
+    user_prompt_hook_cmd.add_argument("--max-chars", type=int, default=1800)
+    user_prompt_hook_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print hook diagnostic failures to stderr.",
+    )
+    user_prompt_hook_cmd.set_defaults(func=_handle_codex_hook_user_prompt_submit)
 
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()
