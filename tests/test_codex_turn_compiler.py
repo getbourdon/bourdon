@@ -137,6 +137,75 @@ def test_compile_turn_uses_cwd_repo_identity_when_prompt_is_vague(tmp_path):
     assert "repo" in brief.items[0].reason.lower()
 
 
+def test_compile_turn_does_not_treat_home_directory_as_repo_identity(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "cumul"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    library = tmp_path / "agent-library"
+    _write_manifest(
+        library,
+        "codex",
+        entities=[
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition orchestration substrate.",
+                "visibility": "team",
+            }
+        ],
+    )
+
+    brief = compile_codex_turn(
+        "Do you know what Bourdon is?",
+        cwd=home,
+        library_path=library,
+        codex_home=_codex_home_with_stage1(tmp_path),
+    )
+
+    assert brief.repo.name is None
+    assert brief.items[0].name == "Bourdon"
+    assert "cwd matched" not in brief.items[0].reason
+    assert "Repo: cumul" not in brief.delivery["explicit_text"]
+
+
+def test_compile_turn_home_directory_generic_prompt_stays_quiet(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "cumul"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    library = tmp_path / "agent-library"
+    _write_manifest(
+        library,
+        "claude-code",
+        sessions=[
+            {
+                "date": "2026-05-27",
+                "project_focus": ["ShipStable"],
+                "key_actions": [
+                    "Branch feat/launch-bonus-timeboxed was squashed to main."
+                ],
+                "visibility": "team",
+            }
+        ],
+    )
+
+    brief = compile_codex_turn(
+        "make a branch pr",
+        cwd=home,
+        library_path=library,
+        codex_home=_codex_home_with_stage1(tmp_path),
+    )
+
+    assert brief.items == []
+    assert brief.routing["mode"] == "observe"
+    assert "No high-confidence recognition anchors" in brief.delivery["explicit_text"]
+
+
 def test_compile_turn_does_not_inject_repo_context_for_unrelated_prompt(tmp_path):
     repo = tmp_path / "bourdon"
     (repo / ".git").mkdir(parents=True)
