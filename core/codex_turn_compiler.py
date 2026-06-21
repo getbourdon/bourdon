@@ -455,6 +455,8 @@ def _gather_candidates(
         thread_name = str(record.get("thread_name") or "").strip()
         if not thread_name or thread_name == "(untitled)":
             continue
+        if _is_prompt_echo_thread(thread_name, prompt):
+            continue
         source = "codex_rollout" if record.get("has_rollout") else "codex_state"
         candidates.append(
             _Candidate(
@@ -564,6 +566,18 @@ def _collect_lightweight_session_records(
             }
         )
     return records
+
+
+def _is_prompt_echo_thread(thread_name: str, prompt: str) -> bool:
+    title_terms = _meaningful_prompt_terms(thread_name)
+    prompt_terms = _meaningful_prompt_terms(prompt)
+    if not prompt_terms:
+        return False
+    if title_terms == prompt_terms:
+        return True
+    if len(title_terms) <= len(prompt_terms) + 3:
+        return title_terms[-len(prompt_terms) :] == prompt_terms
+    return False
 
 
 def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:

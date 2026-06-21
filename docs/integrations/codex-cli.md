@@ -2,11 +2,12 @@
 
 Codex CLI has two useful Bourdon surfaces:
 
-- A `UserPromptSubmit` hook that injects a bounded recognition brief into the live
-  turn before the model answers.
+- A `UserPromptSubmit` hook that injects one compact recognition cue into the
+  live turn before the model answers.
 - An optional MCP server entry that lets Codex query the L6 federation library.
 
-The hook is the live-loop path. The MCP server is a read surface.
+The hook is the live-loop cue. The MCP server is the Claude Code-like background
+read surface.
 
 ## UserPromptSubmit hook
 
@@ -71,7 +72,9 @@ Expected shape:
 
 If the prompt has no matching anchors, the hook exits `0` and prints nothing. If
 the hook receives malformed JSON or the turn compiler fails, it also exits `0`
-and prints nothing so Codex can continue normally.
+and prints nothing so Codex can continue normally. The live hook strips debug
+metadata (`score`, `Why:`, routing trace) by default; use
+`bourdon codex compile-turn` when you need the full diagnostic brief.
 
 ## Optional MCP entry
 

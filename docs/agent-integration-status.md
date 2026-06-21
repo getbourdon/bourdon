@@ -23,8 +23,8 @@ hook available.
 - `bourdon codex prepare-turn` refreshes Codex fallback memory surfaces and emits
   prompt-ready recognition context.
 - `bourdon codex hook user-prompt-submit` implements the Codex CLI
-  `UserPromptSubmit` hook contract and injects `additionalContext` for
-  high-confidence recognition turns. See
+  `UserPromptSubmit` hook contract and injects compact `additionalContext`
+  for high-confidence recognition turns. See
   [`integrations/codex-cli.md`](integrations/codex-cli.md).
 - `bourdon codex sync-native --from-library` sources `bourdon_fallback.md` from
   the federation library (`~/agent-library/agents/*.l5.yaml`) instead of local

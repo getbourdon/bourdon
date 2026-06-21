@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -1755,7 +1756,10 @@ def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
         return 0
 
     brief_data = brief.to_dict()
-    explicit_text = str(brief_data["delivery"].get("explicit_text") or "").strip()
+    explicit_text = _build_codex_hook_context(
+        brief_data,
+        max_chars=args.max_chars,
+    )
     if brief_data["routing"].get("mode") != "inject" or not explicit_text:
         return 0
     if brief_data["routing"].get("confidence") == "low":
@@ -1769,6 +1773,128 @@ def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
     }
     print(json.dumps(hook_response, indent=2, sort_keys=False))
     return 0
+
+
+def _build_codex_hook_context(
+    brief_data: dict[str, Any],
+    *,
+    max_chars: int,
+) -> str:
+    """Render the live Codex hook context without debug metadata.
+
+    The full compiler text is useful in `compile-turn`, but a live
+    UserPromptSubmit hook is injected directly into the conversation. Keep it
+    recognition-shaped: one anchor, no scores, no trace reasons.
+    """
+    items = brief_data.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+
+    first_item = items[0]
+    if not isinstance(first_item, dict):
+        return ""
+
+    anchor = _condense_codex_hook_anchor(
+        str(first_item.get("name") or "anchor"),
+        str(first_item.get("summary") or "Recognition anchor."),
+    )
+    source_agents = first_item.get("source_agents")
+    source_text = ""
+    if isinstance(source_agents, list) and source_agents:
+        agent_names = [
+            str(agent)
+            for agent in source_agents[:2]
+            if isinstance(agent, str) and agent.strip()
+        ]
+        if agent_names:
+            source_text = f" Source: {', '.join(agent_names)}."
+
+    context = (
+        f"Bourdon recognition: {anchor}.{source_text}\n"
+        "Use as context only; answer the user directly."
+    )
+    char_limit = max(200, min(int(max_chars), 1_000))
+    if len(context) <= char_limit:
+        return context
+    return context[: char_limit - 3].rstrip() + "..."
+
+
+def _condense_codex_hook_anchor(name: str, summary: str) -> str:
+    name_text = _clean_hook_anchor_text(name)
+    summary_text = _clean_hook_anchor_text(summary)
+    combined_text = name_text
+    if summary_text and summary_text != name_text:
+        combined_text = f"{name_text}. {summary_text}" if name_text else summary_text
+
+    subject = _hook_anchor_subject(combined_text, name_text)
+    detail = _hook_anchor_detail(combined_text, name_text, summary_text)
+    if subject and detail:
+        return f"{subject}: {detail}"
+    if subject and not detail:
+        return subject
+    if detail:
+        return detail
+    return _safe_native_memory_text(name_text or summary_text or "Recognition anchor", limit=180)
+
+
+def _clean_hook_anchor_text(value: str) -> str:
+    text = value.replace("**", "")
+    text = text.replace("`", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _hook_anchor_subject(combined_text: str, name_text: str) -> str:
+    if name_text and len(name_text) <= 60 and not _looks_like_sentence(name_text):
+        return _safe_native_memory_text(name_text, limit=60)
+
+    ignored_subjects = {
+        "Picked",
+        "Recognition",
+        "Recent",
+        "Source",
+        "Ry",
+    }
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]{2,}\b", combined_text):
+        candidate = match.group(0)
+        if candidate not in ignored_subjects and not re.fullmatch(r"C\d+[A-Za-z]?", candidate):
+            return _safe_native_memory_text(candidate, limit=60)
+    return ""
+
+
+def _looks_like_sentence(value: str) -> bool:
+    return "." in value or ";" in value or len(value.split()) > 6
+
+
+def _hook_anchor_detail(combined_text: str, name_text: str, summary_text: str) -> str:
+    details: list[str] = []
+
+    wiring_match = re.search(r"\b(C\d+[A-Za-z]?\s+wiring)\b", combined_text)
+    if wiring_match:
+        details.append(f"{wiring_match.group(1)} chosen")
+
+    if "make_servers" in combined_text and "env-gated" in combined_text:
+        details.append("make_servers env-gated per service")
+
+    if not details:
+        fallback = summary_text if summary_text and summary_text != name_text else name_text
+        fallback = _first_informative_hook_clause(fallback)
+        if fallback:
+            details.append(fallback)
+
+    return _safe_native_memory_text("; ".join(details), limit=170)
+
+
+def _first_informative_hook_clause(value: str) -> str:
+    for clause in re.split(r"(?:\. |- |; )", value):
+        text = clause.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("picked ") or lowered.startswith("ry chose"):
+            continue
+        return text
+    return ""
 
 
 def _fixture_participant() -> CodexParticipant:
@@ -3433,8 +3559,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("public", "team", "private"),
         default="team",
     )
-    user_prompt_hook_cmd.add_argument("--max-items", type=int, default=6)
-    user_prompt_hook_cmd.add_argument("--max-chars", type=int, default=1800)
+    user_prompt_hook_cmd.add_argument("--max-items", type=int, default=1)
+    user_prompt_hook_cmd.add_argument("--max-chars", type=int, default=500)
     user_prompt_hook_cmd.add_argument(
         "--verbose",
         action="store_true",

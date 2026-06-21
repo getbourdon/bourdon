@@ -65,6 +65,39 @@ def _codex_home_with_stage1(tmp_path: Path, *, degraded: bool = False) -> Path:
     return codex_home
 
 
+def _codex_home_with_prompt_echo_thread(tmp_path: Path, title: str) -> Path:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    with sqlite3.connect(codex_home / "state_5.sqlite") as conn:
+        conn.execute(
+            "CREATE TABLE threads "
+            "(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT, "
+            "updated_at_ms INTEGER, memory_mode TEXT, archived INTEGER)"
+        )
+        conn.execute("CREATE TABLE stage1_outputs (thread_id TEXT PRIMARY KEY, raw_memory TEXT)")
+        conn.execute(
+            "CREATE TABLE jobs "
+            "(kind TEXT, job_key TEXT, status TEXT, retry_remaining INTEGER, last_error TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "thread-echo",
+                title,
+                str(tmp_path),
+                str(tmp_path / "rollout.jsonl"),
+                1_780_000_000_000,
+                "enabled",
+                0,
+            ),
+        )
+        conn.execute("INSERT INTO stage1_outputs VALUES ('thread-echo', 'raw')")
+        conn.execute(
+            "INSERT INTO jobs VALUES ('memory_stage1', 'thread-echo', 'done', 0, NULL)"
+        )
+    return codex_home
+
+
 def test_compile_turn_ranks_prompt_entity_match_above_recency_only(tmp_path):
     library = tmp_path / "agent-library"
     _write_manifest(
@@ -102,6 +135,37 @@ def test_compile_turn_ranks_prompt_entity_match_above_recency_only(tmp_path):
 
     assert brief.items[0].name == "Bourdon"
     assert {item.name for item in brief.items} == {"Bourdon"}
+
+
+def test_compile_turn_suppresses_codex_thread_prompt_echo(tmp_path):
+    prompt = "How is Marvin going?"
+    library = tmp_path / "agent-library"
+    _write_manifest(
+        library,
+        "claude-code",
+        sessions=[
+            {
+                "date": "2026-06-19",
+                "project_focus": ["Marvin"],
+                "key_actions": [
+                    "Picked Marvin back up; C1b wiring is done and C2 is next."
+                ],
+                "visibility": "team",
+            }
+        ],
+    )
+
+    brief = compile_codex_turn(
+        prompt,
+        library_path=library,
+        codex_home=_codex_home_with_prompt_echo_thread(tmp_path, prompt),
+        max_items=2,
+    )
+
+    item_names = {item.name for item in brief.items}
+    assert prompt not in item_names
+    assert brief.items[0].source_agents == ["claude-code"]
+    assert "Marvin" in brief.items[0].summary
 
 
 def test_compile_turn_uses_cwd_repo_identity_when_prompt_is_vague(tmp_path):

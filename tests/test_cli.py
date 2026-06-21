@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 import cli.main as cli_main
-from cli.main import main
+from cli.main import _build_codex_hook_context, main
 
 
 @pytest.fixture(autouse=True)
@@ -1090,8 +1090,79 @@ def test_cli_codex_hook_user_prompt_submit_injects_additional_context(
     assert exit_code == 0
     hook_output = response["hookSpecificOutput"]
     assert hook_output["hookEventName"] == "UserPromptSubmit"
-    assert "Bourdon turn recognition brief" in hook_output["additionalContext"]
-    assert "Bourdon" in hook_output["additionalContext"]
+    additional_context = hook_output["additionalContext"]
+    assert "Bourdon recognition:" in additional_context
+    assert "Bourdon" in additional_context
+    assert "Bourdon turn recognition brief" not in additional_context
+    assert "Why:" not in additional_context
+    assert "score" not in additional_context
+    assert len(additional_context) <= 500
+
+
+def test_cli_compile_turn_keeps_verbose_debug_brief(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+
+    exit_code = main(
+        [
+            "codex",
+            "compile-turn",
+            "Do you know what Bourdon is?",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    explicit_text = report["delivery"]["explicit_text"]
+    assert "Bourdon turn recognition brief" in explicit_text
+    assert "Why:" in explicit_text
+
+
+def test_codex_hook_context_condenses_long_session_anchor():
+    long_marvin_anchor = (
+        'Picked Marvin back up (brain was built+validated; remaining all hands-on). '
+        'Ry chose "C1b wiring (no keys needed)". - **`make_servers()`** now '
+        '**env-gated per service** (`code/pipecat_app.py`): Mercury (stdio '
+        '`npx @toolsdk.ai/mcp-mercury`, read-only key).'
+    )
+
+    context = _build_codex_hook_context(
+        {
+            "items": [
+                {
+                    "name": long_marvin_anchor,
+                    "summary": long_marvin_anchor,
+                    "source_agents": ["claude-code"],
+                }
+            ]
+        },
+        max_chars=500,
+    )
+
+    assert context.startswith("Bourdon recognition: Marvin:")
+    assert "C1b wiring" in context
+    assert "make_servers" in context
+    assert "Source: claude-code." in context
+    assert "Picked Marvin back up" not in context
+    assert context.count("C1b wiring") == 1
+    assert len(context) <= 260
 
 
 def test_cli_codex_hook_user_prompt_submit_skips_when_no_anchor(
