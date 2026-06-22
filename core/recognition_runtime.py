@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Optional
 
 from core.codex_context import filter_manifest_for_access
 from core.inference_protocol import InferenceBackend
-from core.recognition_contract import TOKEN_RE
+from core.recognition_contract import MatchTier, match_tier
 
 logger = logging.getLogger(__name__)
 
@@ -98,23 +98,9 @@ class RecognitionResult:
 # -- Entity detection (mirrors core.orchestrator but reads a manifest) --------
 
 
-_TOKEN_RE = TOKEN_RE  # shared recognition-contract tokenizer (single source)
-
-
-def _tokenize(s: str) -> list[str]:
-    """Lowercase alphanumeric tokens. Punctuation and whitespace are split-points."""
-    return [m.group(0).lower() for m in _TOKEN_RE.finditer(s)]
-
-
-def _contains_token_subsequence(haystack: list[str], needle: list[str]) -> bool:
-    """Return True iff ``needle`` appears as a contiguous run within ``haystack``."""
-    if not needle or len(needle) > len(haystack):
-        return False
-    n = len(needle)
-    for i in range(len(haystack) - n + 1):
-        if haystack[i : i + n] == needle:
-            return True
-    return False
+# Tokenizer + token-subsequence matching now come from the shared recognition
+# contract (match_tier), so all surfaces share one match decision + short-name
+# guard. See detect_entities below.
 
 
 def detect_entities(user_msg: str, manifest: dict) -> list[dict]:
@@ -137,9 +123,6 @@ def detect_entities(user_msg: str, manifest: dict) -> list[dict]:
     """
     if not isinstance(manifest, dict):
         return []
-    msg_tokens = _tokenize(user_msg)
-    if not msg_tokens:
-        return []
     matches: list[dict] = []
     for entity in manifest.get("known_entities") or []:
         if not isinstance(entity, dict):
@@ -152,11 +135,13 @@ def detect_entities(user_msg: str, manifest: dict) -> list[dict]:
         for alias in aliases:
             if isinstance(alias, str):
                 candidates.append(alias)
-        for c in candidates:
-            cand_tokens = _tokenize(c)
-            if cand_tokens and _contains_token_subsequence(msg_tokens, cand_tokens):
-                matches.append(entity)
-                break  # don't double-count an entity matched by name + alias
+        # Shared match decision: a candidate must appear as a contiguous token
+        # subsequence (or stronger tier) in the prompt — the contract's ladder,
+        # which carries the short-name guard ("ILTTed" never matches "ILTT").
+        if any(
+            match_tier(user_msg, c) >= MatchTier.TOKEN_SUBSEQUENCE for c in candidates
+        ):
+            matches.append(entity)
     return matches
 
 

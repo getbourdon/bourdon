@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
-from core.recognition_contract import meaningful_terms
+from core.recognition_contract import meaningful_terms, tokenize
 from participants.codex import _safe_native_memory_text
 
 SCHEMA_VERSION = "cursor-turn-brief/v1"
@@ -83,14 +83,22 @@ def _score_entity(
 ) -> float:
     score = 0.0
     name = str(entity.get("name", "")).lower()
-    summary = str(entity.get("summary", "")).lower()
     aliases = [str(a).lower() for a in entity.get("aliases", [])]
-    searchable = f"{name} {summary} {' '.join(aliases)}"
+
+    # Match DECISION on NAME + ALIASES only — NOT the summary. Scoring against a
+    # summary haystack surfaced unrelated entities (a prompt about "memory"
+    # matched anything whose summary mentioned memory, and out-ranked the named
+    # "memory" entity). Whole-token (not substring) match, mirroring the shared
+    # recognition contract (3-Star tests-P1-1).
+    name_alias_tokens = set(tokenize(name))
+    for alias in aliases:
+        name_alias_tokens.update(tokenize(alias))
+    name_alias_text = f"{name} {' '.join(aliases)}"
 
     for token in prompt_tokens:
-        if token in searchable:
+        if token in name_alias_tokens:
             score += 2.0
-    if cwd_project and cwd_project.lower() in searchable:
+    if cwd_project and cwd_project.lower() in name_alias_text:
         score += 3.0
 
     last_touched = str(entity.get("last_touched", ""))

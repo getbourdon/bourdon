@@ -24,6 +24,8 @@ from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_contract import (
     DOMAIN_STOPWORDS_CODEX,
     TOKEN_RE,
+    MatchTier,
+    match_tier,
     meaningful_terms,
 )
 from participants.codex import (
@@ -755,30 +757,36 @@ def _is_vague_continuation_prompt(prompt: str) -> bool:
     return normalized in {"what should i do", "what should i do next"}
 
 
+# codex's score weight per shared match tier (the tier DECISION is the
+# contract's; codex keeps its own weighting). The TOKEN_OVERLAP weight is
+# computed from the overlap count below.
+_TIER_PROMPT_SCORE = {
+    MatchTier.EXACT: 40.0,
+    MatchTier.NAME_SUBSTRING: 36.0,
+    MatchTier.TOKEN_SUBSEQUENCE: 30.0,
+}
+
+
 def _prompt_match_score(candidate: _Candidate, prompt: str) -> tuple[float, str]:
-    prompt_lower = prompt.lower()
-    prompt_tokens = _tokens(prompt)
     prompt_terms = _meaningful_prompt_terms(prompt)
     names = [candidate.name] + candidate.aliases + candidate.project_focus
     best = 0.0
     best_name = ""
     for name in names:
-        name_lower = name.lower().strip()
-        if not name_lower:
+        if not name.strip():
             continue
-        name_tokens = _tokens(name)
-        if prompt_lower == name_lower:
-            score = 40.0
-        elif name_lower in prompt_lower:
-            score = 36.0
-        elif _contains_subsequence(prompt_tokens, name_tokens):
-            score = 30.0
-        else:
-            # Symmetric filter on the name side too (contract fixes the prior
-            # asymmetry where the name side skipped the len>=3 filter).
+        # The shared contract decides HOW (and whether) this name matched, so the
+        # token-boundary guard is consistent across engines — e.g. "iltt" no
+        # longer matches inside "iltted" via a raw substring (3-Star tests-P1-1).
+        tier = match_tier(prompt, name, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
+        if tier in _TIER_PROMPT_SCORE:
+            score = _TIER_PROMPT_SCORE[tier]
+        elif tier == MatchTier.TOKEN_OVERLAP:
             name_terms = meaningful_terms(name, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
             overlap = len(set(prompt_terms) & set(name_terms))
             score = min(24.0, overlap * 12.0)
+        else:
+            score = 0.0
         if score > best:
             best = score
             best_name = name
