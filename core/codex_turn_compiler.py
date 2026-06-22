@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+from core.recognition_contract import TOKEN_RE
 from participants.codex import (
     _inspect_codex_state_db,
     _resolve_codex_home,
@@ -41,7 +42,7 @@ EXHAUSTED_PATHS = [
     "sync_native_only",
 ]
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_TOKEN_RE = TOKEN_RE  # shared recognition-contract tokenizer (single source)
 _GENERIC_NAMES = {
     "memory",
     "memories",

@@ -8,7 +8,6 @@ system prompt or by a Bourdon MCP tool response.
 
 from __future__ import annotations
 
-import re
 import time as _time
 from dataclasses import dataclass, field
 from datetime import date
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+from core.recognition_contract import TOKEN_RE
 from participants.codex import _safe_native_memory_text
 
 SCHEMA_VERSION = "cursor-turn-brief/v1"
@@ -28,7 +28,7 @@ DEFAULT_MAX_CHARS = 1_800
 MAX_ITEMS_CEILING = 20
 MAX_PROMPT_CHARS = 8_000
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_TOKEN_RE = TOKEN_RE  # shared recognition-contract tokenizer (single source)
 _PROMPT_STOPWORDS = {
     "a", "about", "again", "am", "an", "and", "anything", "are", "as", "at",
     "be", "can", "do", "for", "from", "how", "i", "is", "it", "keep", "like",
