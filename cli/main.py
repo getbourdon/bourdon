@@ -1827,7 +1827,7 @@ def _condense_codex_hook_anchor(name: str, summary: str) -> str:
         combined_text = f"{name_text}. {summary_text}" if name_text else summary_text
 
     subject = _hook_anchor_subject(combined_text, name_text)
-    detail = _hook_anchor_detail(combined_text, name_text, summary_text)
+    detail = _hook_anchor_detail(name_text, summary_text)
     if subject and detail:
         return f"{subject}: {detail}"
     if subject and not detail:
@@ -1866,23 +1866,10 @@ def _looks_like_sentence(value: str) -> bool:
     return "." in value or ";" in value or len(value.split()) > 6
 
 
-def _hook_anchor_detail(combined_text: str, name_text: str, summary_text: str) -> str:
-    details: list[str] = []
-
-    wiring_match = re.search(r"\b(C\d+[A-Za-z]?\s+wiring)\b", combined_text)
-    if wiring_match:
-        details.append(f"{wiring_match.group(1)} chosen")
-
-    if "make_servers" in combined_text and "env-gated" in combined_text:
-        details.append("make_servers env-gated per service")
-
-    if not details:
-        fallback = summary_text if summary_text and summary_text != name_text else name_text
-        fallback = _first_informative_hook_clause(fallback)
-        if fallback:
-            details.append(fallback)
-
-    return _safe_native_memory_text("; ".join(details), limit=170)
+def _hook_anchor_detail(name_text: str, summary_text: str) -> str:
+    fallback = summary_text if summary_text and summary_text != name_text else name_text
+    detail = _first_informative_hook_clause(fallback)
+    return _safe_native_memory_text(detail, limit=170)
 
 
 def _first_informative_hook_clause(value: str) -> str:

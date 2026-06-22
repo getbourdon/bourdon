@@ -1156,12 +1156,13 @@ def test_codex_hook_context_condenses_long_session_anchor():
         max_chars=500,
     )
 
+    # General condensation contract (no content-specific heuristics):
+    # extract a subject anchor, attach a source line, drop the low-value
+    # "Picked ..." lead clause, and stay within the live-cue length bound.
     assert context.startswith("Bourdon recognition: Marvin:")
-    assert "C1b wiring" in context
-    assert "make_servers" in context
     assert "Source: claude-code." in context
     assert "Picked Marvin back up" not in context
-    assert context.count("C1b wiring") == 1
+    assert context.rstrip().endswith("Use as context only; answer the user directly.")
     assert len(context) <= 260
 
 
