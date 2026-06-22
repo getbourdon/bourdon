@@ -125,25 +125,26 @@ CASES = [
         "confidence_agree": False,
     },
     {
-        # SHORT-NAME GUARD divergence: codex's substring tier matches "iltt"
-        # inside "iltted"; cursor + runtime (token-level) do not. The contract's
-        # match_tier closes this — when wired, codex should also yield no match.
+        # SHORT-NAME GUARD: codex used to substring-match "iltt" inside "iltted";
+        # cursor + runtime (token-level) did not. CLOSED in stage 3 (match_tier):
+        # codex now also yields no match — all three agree on no-match.
         "prompt": "we ILTTed the build",
-        "codex": _record(["ILTT"], "ILTT", "medium"),
+        "codex": _record([], None, "none"),
         "cursor": _record([], None, "none"),
         "runtime": _record([], None, None),
-        "anchor_agree": False,  # KNOWN-DIVERGENCE -> flip when match_tier wired (stage 3)
+        "anchor_agree": True,  # CONVERGED (was the substring divergence)
         "confidence_agree": False,
     },
     {
-        # SUMMARY-MATCH divergence: cursor scores against the summary haystack so
-        # "memory" surfaces Bourdon (summary contains "memory") and ranks it
-        # TOP; codex/runtime anchor on the named entity "memory".
+        # SUMMARY-MATCH: cursor used to score against the summary haystack so
+        # "memory" surfaced Bourdon (summary contains "memory") and ranked it
+        # TOP. CLOSED in stage 3 (match on name+aliases only): all three now
+        # anchor on the named entity "memory".
         "prompt": "pick a category for memory",
         "codex": _record(["memory"], "memory", "medium"),
-        "cursor": _record(["Bourdon", "memory"], "Bourdon", "medium"),
+        "cursor": _record(["memory"], "memory", "medium"),
         "runtime": _record(["memory"], "memory", None),
-        "anchor_agree": False,  # KNOWN-DIVERGENCE (top anchor differs)
+        "anchor_agree": True,  # CONVERGED (was the summary-match divergence)
         "confidence_agree": False,
     },
     {
@@ -178,18 +179,24 @@ def test_top_anchor_parity_where_unified(case, seeded):
     assert len(tops) == 1, f"top-anchor parity broke for {case['prompt']!r}: {tops}"
 
 
-def test_known_divergences_are_still_divergent(seeded):
-    """Guards the ledger itself: the KNOWN-DIVERGENCE rows must STILL diverge
-    until their contract dimension is wired. When you close one, this test tells
-    you to move it to the must-agree set (delete its entry here)."""
-    divergent = {c["prompt"] for c in CASES if not c["anchor_agree"]}
-    for prompt in divergent:
-        got = _run_all(prompt, seeded)
-        tops = {got[e]["top"] for e in ("codex", "cursor", "runtime")}
-        assert len(tops) > 1, (
-            f"{prompt!r} now AGREES across engines — a contract dimension closed "
-            f"it. Move it to the must-agree set and update CASES."
-        )
+def test_anchor_divergences_all_closed_after_stage_3():
+    """Stages 1-3 closed every top-anchor divergence: all CASES now agree on the
+    selected anchor. If a future change re-opens one, mark that row
+    anchor_agree=False and this assertion tells you the ledger moved."""
+    assert all(c["anchor_agree"] for c in CASES), (
+        "an anchor divergence re-opened — recognition drift; review the diff"
+    )
+
+
+def test_confidence_dimension_not_yet_unified(seeded):
+    """Stage 4 ledger: confidence is the remaining un-unified dimension. runtime
+    emits no bucket while codex/cursor do, so a matched prompt still disagrees
+    on confidence. When normalized_confidence is wired so all three agree, flip
+    confidence_agree=True on the CASES and update this test."""
+    assert not any(c["confidence_agree"] for c in CASES)  # ledger still pre-stage-4
+    got = _run_all("tell me about Bourdon", seeded)
+    buckets = {got[e]["confidence"] for e in ("codex", "cursor", "runtime")}
+    assert len(buckets) > 1, "confidence converged — wire the stage-4 ledger flip"
 
 
 def test_private_never_surfaces_at_team_access_on_any_engine(seeded):
