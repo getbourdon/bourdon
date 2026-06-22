@@ -198,3 +198,38 @@ def test_private_never_surfaces_at_team_access_on_any_engine(seeded):
     got = _run_all("private-thing secret roadmap", seeded)
     for engine in ("codex", "cursor", "runtime"):
         assert "private-thing" not in got[engine]["names"], f"{engine} leaked private entity"
+
+
+# -- stage 2: stopword-set convergence (codex/cursor list drift removed) -------
+
+# Words that USED to differ between the engines' private stopword lists:
+# cursor-only stopwords (codex kept them as real terms) ...
+_WAS_CURSOR_ONLY = ["want", "this", "when", "where", "which", "would", "you", "our", "some", "us"]
+# ... and codex-only stopwords (cursor kept them as real terms).
+_WAS_CODEX_ONLY = ["did", "should", "tell", "then", "there", "whats"]
+
+
+@pytest.mark.parametrize("word", _WAS_CURSOR_ONLY + _WAS_CODEX_ONLY)
+def test_codex_and_cursor_agree_on_stopwords_now(word):
+    """Stage 2: both engines now derive meaningful terms from the ONE canonical
+    stopword set, so a word that used to be filtered by only one of them is now
+    treated identically. (Both should drop all of these as stopwords.)"""
+    from core.codex_turn_compiler import _meaningful_prompt_terms
+    from core.cursor_turn_compiler import _extract_prompt_tokens
+
+    prompt = f"the {word} thing here"
+    codex_keeps = word in _meaningful_prompt_terms(prompt)
+    cursor_keeps = word in _extract_prompt_tokens(prompt)
+    assert codex_keeps == cursor_keeps, f"engines still disagree on stopword {word!r}"
+    assert not codex_keeps, f"{word!r} should be a canonical stopword on both engines"
+
+
+def test_codex_domain_stopwords_stay_codex_only():
+    """The codex-prompt-shaped words (branch/pr/codex/...) remain stopwords on
+    codex (it opts in) but NOT on cursor — they can be real anchor terms
+    elsewhere, so they must not be globally suppressed."""
+    from core.codex_turn_compiler import _meaningful_prompt_terms
+    from core.cursor_turn_compiler import _extract_prompt_tokens
+
+    assert "branch" not in _meaningful_prompt_terms("the release branch")
+    assert "branch" in _extract_prompt_tokens("the release branch")

@@ -21,7 +21,11 @@ from typing import Any
 import yaml
 
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
-from core.recognition_contract import TOKEN_RE
+from core.recognition_contract import (
+    DOMAIN_STOPWORDS_CODEX,
+    TOKEN_RE,
+    meaningful_terms,
+)
 from participants.codex import (
     _inspect_codex_state_db,
     _resolve_codex_home,
@@ -54,66 +58,8 @@ _GENERIC_NAMES = {
     "repo",
     "repository",
 }
-_PROMPT_STOPWORDS = {
-    "a",
-    "about",
-    "again",
-    "am",
-    "an",
-    "and",
-    "anything",
-    "are",
-    "as",
-    "at",
-    "active",
-    "approved",
-    "be",
-    "branch",
-    "can",
-    "codex",
-    "did",
-    "do",
-    "for",
-    "from",
-    "how",
-    "i",
-    "is",
-    "it",
-    "its",
-    "keep",
-    "like",
-    "make",
-    "made",
-    "me",
-    "new",
-    "no",
-    "now",
-    "of",
-    "ok",
-    "okay",
-    "on",
-    "or",
-    "please",
-    "pr",
-    "remind",
-    "restart",
-    "should",
-    "tell",
-    "that",
-    "the",
-    "there",
-    "then",
-    "to",
-    "was",
-    "we",
-    "what",
-    "whats",
-    "with",
-    "work",
-    "worked",
-    "working",
-    "yes",
-}
+# Stopwords now live in the shared recognition contract (canonical STOPWORDS +
+# codex's opt-in DOMAIN_STOPWORDS_CODEX), consumed via meaningful_terms().
 
 
 @dataclass(frozen=True)
@@ -828,7 +774,9 @@ def _prompt_match_score(candidate: _Candidate, prompt: str) -> tuple[float, str]
         elif _contains_subsequence(prompt_tokens, name_tokens):
             score = 30.0
         else:
-            name_terms = [token for token in name_tokens if token not in _PROMPT_STOPWORDS]
+            # Symmetric filter on the name side too (contract fixes the prior
+            # asymmetry where the name side skipped the len>=3 filter).
+            name_terms = meaningful_terms(name, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
             overlap = len(set(prompt_terms) & set(name_terms))
             score = min(24.0, overlap * 12.0)
         if score > best:
@@ -840,11 +788,9 @@ def _prompt_match_score(candidate: _Candidate, prompt: str) -> tuple[float, str]
 
 
 def _meaningful_prompt_terms(prompt: str) -> list[str]:
-    return [
-        token
-        for token in _tokens(prompt)
-        if token not in _PROMPT_STOPWORDS and len(token) > 2
-    ]
+    # Canonical stopwords + codex's opt-in domain words (branch/pr/codex/...),
+    # symmetric len>=3 filter — all from the shared recognition contract.
+    return meaningful_terms(prompt, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
 
 
 def _cwd_score(
