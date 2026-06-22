@@ -719,8 +719,15 @@ def create_l6_server(
         from core.agents_export import export_local_agents, resolve_local_name
 
         caller = _resolve_caller()
+        # Egress visibility clamp (3-Star audit P0-1): PRIVATE session content
+        # must never cross the federation wire. A trusted peer may see team;
+        # a quarantined caller only public. The local tray reads private via
+        # export_agents_federated (default access), not through this tool.
+        egress_access = "team" if caller.is_trusted else "public"
         envelope = export_local_agents(
-            store.library_path / "agents", resolve_local_name()
+            store.library_path / "agents",
+            resolve_local_name(),
+            access_level=egress_access,
         )
         if not caller.is_trusted:
             envelope["agents"] = [

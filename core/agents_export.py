@@ -70,13 +70,37 @@ def _redact_str_list(values: Any) -> list[str]:
     return [_safe_native_memory_text(str(item)) for item in values]
 
 
+_VISIBILITY_RANK = {"public": 0, "team": 1, "private": 2}
+
+
+def _session_visible(session: Any, access_level: str) -> bool:
+    """True if a session at its declared visibility is allowed at ``access_level``.
+
+    Unmarked sessions default to ``team`` (matching the label this function
+    stamps), so an unmarked session never escapes to a ``public``/untrusted
+    caller. ``access_level="private"`` (the local default) admits everything.
+    """
+    vis = "team"
+    if isinstance(session, dict):
+        declared = str(session.get("visibility") or "team").strip().lower()
+        if declared in _VISIBILITY_RANK:
+            vis = declared
+    return _VISIBILITY_RANK[vis] <= _VISIBILITY_RANK.get(access_level, 2)
+
+
 def summarize_agent_manifest(
     manifest: dict[str, Any],
     *,
     source: str,
     source_kind: str = "local",
+    access_level: str = "private",
 ) -> dict[str, Any]:
     """Build one redacted, source-attributed summary from a parsed L5 manifest.
+
+    ``access_level`` gates which sessions are emitted (3-Star audit P0-1): the
+    peer-facing export path passes ``team``/``public`` so PRIVATE session
+    content never crosses the federation wire. The default ``private`` admits
+    everything for the operator's own local tray view.
 
     Output is the canonical per-agent shape consumed by the tray plus the two
     source-attribution fields. ``source`` / ``source_kind`` are stamped by the
@@ -94,6 +118,10 @@ def summarize_agent_manifest(
         return ""
 
     sorted_sessions = sorted(sessions, key=_session_date, reverse=True)
+    # Egress visibility gate: drop sessions above the caller's access level so
+    # PRIVATE/TEAM content cannot leak to a peer (3-Star audit P0-1). Default
+    # access_level="private" admits everything for the local view.
+    visible_sessions = [s for s in sorted_sessions if _session_visible(s, access_level)]
     recent_activity = [
         {
             "date": _session_date(session),
@@ -109,9 +137,9 @@ def summarize_agent_manifest(
                 else "team"
             ),
         }
-        for session in sorted_sessions[:MAX_RECENT_SESSIONS]
+        for session in visible_sessions[:MAX_RECENT_SESSIONS]
     ]
-    freshest = _session_date(sorted_sessions[0]) if sorted_sessions else None
+    freshest = _session_date(visible_sessions[0]) if visible_sessions else None
 
     capabilities = manifest.get("capabilities") or []
 
@@ -128,7 +156,7 @@ def summarize_agent_manifest(
         "capability_count": (
             len(capabilities) if isinstance(capabilities, list) else 0
         ),
-        "session_count": len(sessions),
+        "session_count": len(visible_sessions),
         "freshest_session_date": freshest or None,
         "recent_activity": recent_activity,
         "parse_error": None,
@@ -165,7 +193,9 @@ def error_agent_entry(
     }
 
 
-def export_local_agents(agents_dir: Path, local_name: str) -> dict[str, Any]:
+def export_local_agents(
+    agents_dir: Path, local_name: str, access_level: str = "private"
+) -> dict[str, Any]:
     """Summarize every local ``*.l5.yaml`` manifest into the tray envelope.
 
     Parameters
@@ -213,7 +243,9 @@ def export_local_agents(agents_dir: Path, local_name: str) -> dict[str, Any]:
                 continue
             try:
                 agents.append(
-                    summarize_agent_manifest(loaded, source=local_name)
+                    summarize_agent_manifest(
+                        loaded, source=local_name, access_level=access_level
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 -- partial failure must be representable
                 agents.append(
