@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -311,6 +312,10 @@ class L6Store:
         self.peers: list["RemoteL6Client"] = list(peers or [])
         self._manifests: dict[str, dict] = {}
         self._entity_index: dict[str, set[str]] = defaultdict(set)
+        # Serializes commit_l5's read-modify-write-reload. The L6 server runs
+        # sync MCP tools in a threadpool, so concurrent commits to the same
+        # agent would otherwise race and drop contributions (3-Star audit P1-3).
+        self._write_lock = threading.RLock()
         self.reload_all()
 
     # -- Load / reload ---------------------------------------------------------
@@ -1179,6 +1184,37 @@ class L6Store:
         )
 
     def commit_l5(
+        self,
+        agent_id: str,
+        *,
+        agent_type: str | None = None,
+        instance: str | None = None,
+        role_narrative: str | None = None,
+        entities: list[dict] | None = None,
+        sessions: list[dict] | None = None,
+        mode: str = "merge",
+    ) -> dict[str, Any]:
+        """Serialize the read-modify-write-reload (3-Star audit P1-3).
+
+        The L6 server runs sync MCP tools in a threadpool, so two concurrent
+        commits to the same agent would otherwise both read the same cached
+        manifest, each build a merge missing the other's rows, and the second
+        write would silently drop the first's contribution (and could corrupt
+        the shared in-memory entity index). The per-store lock makes the whole
+        operation atomic; the logic lives in :meth:`_commit_l5_impl`.
+        """
+        with self._write_lock:
+            return self._commit_l5_impl(
+                agent_id,
+                agent_type=agent_type,
+                instance=instance,
+                role_narrative=role_narrative,
+                entities=entities,
+                sessions=sessions,
+                mode=mode,
+            )
+
+    def _commit_l5_impl(
         self,
         agent_id: str,
         *,
