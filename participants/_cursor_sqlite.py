@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
-import re
 import shutil
 import sqlite3
 import tempfile
@@ -12,28 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-    re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
-    re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
-)
+from core.redaction import SENSITIVE_PATTERNS, redact_text
+
+logger = logging.getLogger(__name__)
+
+_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS  # back-compat alias for the SSOT
 
 
 def _scrub_text(value: str, limit: int = 256) -> str:
-    """Redact credential-like content and cap length."""
-    text = value.strip()
-    if not text:
-        return text
-    if any(p.search(text) for p in _SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    """Redact credential-like content and cap length (redaction SSOT)."""
+    return redact_text(value, limit=limit)
 
 
 @dataclass(frozen=True)
@@ -187,16 +175,34 @@ def _iter_state_dbs(root: Path) -> tuple[Path, ...]:
 def _read_item_table(db_path: Path) -> tuple[list[tuple[str, Any]], int]:
     records: list[tuple[str, Any]] = []
     malformed_records = 0
-    with tempfile.TemporaryDirectory() as temp_dir:
-        db_copy = Path(temp_dir) / "state.vscdb"
-        shutil.copy2(db_path, db_copy)
-        connection = sqlite3.connect(f"file:{db_copy}?mode=ro", uri=True)
-        try:
-            if not _has_item_table(connection):
-                return records, malformed_records
-            rows = connection.execute("SELECT key, value FROM ItemTable").fetchall()
-        finally:
-            connection.close()
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_copy = Path(temp_dir) / "state.vscdb"
+            shutil.copy2(db_path, db_copy)
+            # Copy the WAL/SHM companions too so a LIVE (WAL-mode) Cursor DB is
+            # read as a consistent snapshot, not a stale/torn view that misses
+            # the most recent writes (3-Star audit part-P1-2). Companions are
+            # absent for a cleanly-closed DB. Open the private copy read-write
+            # (not ro) so SQLite folds the WAL into it on connect.
+            for suffix in ("-wal", "-shm"):
+                companion = db_path.with_name(db_path.name + suffix)
+                if companion.is_file():
+                    shutil.copy2(companion, db_copy.with_name(db_copy.name + suffix))
+            connection = sqlite3.connect(str(db_copy))
+            try:
+                if not _has_item_table(connection):
+                    return records, malformed_records
+                rows = connection.execute(
+                    "SELECT key, value FROM ItemTable"
+                ).fetchall()
+            finally:
+                connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        # Locked (Windows holds a write lock on a live DB), corrupt, or
+        # otherwise unreadable — skip this DB, never crash the whole export
+        # (3-Star audit part-P1-1). The caller still records it as scanned.
+        logger.warning("cursor: cannot read %s (%s); skipping", db_path, exc)
+        return records, malformed_records
 
     for key, raw_value in rows:
         try:

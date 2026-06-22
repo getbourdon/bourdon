@@ -57,7 +57,6 @@ import hmac
 import ipaddress
 import logging
 import os
-import re
 import time as time_module
 from datetime import datetime
 from pathlib import Path
@@ -77,18 +76,50 @@ from core.federation_registry import (
 from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
+from core.redaction import SENSITIVE_PATTERNS, redact_text
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from core.l6_remote import RemoteL6Client
 
-_CONTEXT_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-)
+# Back-compat alias: the MCP recognition path previously carried only 4 keyword
+# patterns and shipped JWTs / AWS / GitHub tokens in the clear to MCP callers
+# (P0-4). It now shares the core.redaction SSOT with every other surface.
+_CONTEXT_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS
+
+
+def _normalized_legacy_token() -> str | None:
+    """The legacy shared peer token, with empty/whitespace normalized to None.
+
+    A set-but-empty ``BOURDON_PEER_TOKEN_SERVER`` (a routine .env slip) must be
+    treated as "no token" EVERYWHERE — both the startup gate and the per-request
+    auth (3-Star audit P1-1). Otherwise the dispatch sees a truthy-but-empty
+    token, skips the fail-closed 503, and ``hmac.compare_digest(b"", b"")`` makes
+    any caller presenting an empty ``Bearer`` token the trusted OPERATOR.
+    """
+    value = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    if value is not None and not value.strip():
+        return None
+    return value
+
+
+_ACCESS_RANK = {"public": 0, "team": 1, "private": 2}
+
+
+def _clamp_peer_access(access_level: str, include_private: bool) -> tuple[str, bool]:
+    """Clamp a peer-originated request so it can never extract PRIVATE memory.
+
+    A request arriving over federation (federation_hop > 0) must never pull this
+    machine's private entities/sessions regardless of what it asks for (3-Star
+    audit P1-2): force include_private off and cap access_level at "team". The
+    invariant is now enforced by code at the ingress boundary, not by trusting
+    the peer to ask politely.
+    """
+    capped = access_level
+    if _ACCESS_RANK.get(access_level, _ACCESS_RANK["private"]) > _ACCESS_RANK["team"]:
+        capped = "team"
+    return capped, False
 
 
 def _require_fastmcp():
@@ -107,13 +138,8 @@ def _require_fastmcp():
 
 
 def _safe_context_text(value: str, limit: int = 240) -> str:
-    text = re.sub(r"\s+", " ", value.strip())
-    if any(pattern.search(text) for pattern in _CONTEXT_SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    """Thin wrapper over the redaction SSOT (MCP recognition context budget)."""
+    return redact_text(value, limit=limit)
 
 
 def _recognition_prompt_context(result: Any) -> str:
@@ -584,6 +610,10 @@ def create_l6_server(
                     cutoff = datetime.combine(parsed, _time.min)
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
+        if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
         try:
             if store.peers and not cursor and federation_hop <= 0:
                 # Federated path: merge local + peer sessions. Cursoring across
@@ -665,6 +695,9 @@ def create_l6_server(
         caller = _resolve_caller()
         _audit(caller, "find_entity")
         if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
             matches = store.find_entity(
                 name,
                 include_private=include_private,
@@ -726,8 +759,15 @@ def create_l6_server(
         from core.agents_export import export_local_agents, resolve_local_name
 
         caller = _resolve_caller()
+        # Egress visibility clamp (3-Star audit P0-1): PRIVATE session content
+        # must never cross the federation wire. A trusted peer may see team;
+        # a quarantined caller only public. The local tray reads private via
+        # export_agents_federated (default access), not through this tool.
+        egress_access = "team" if caller.is_trusted else "public"
         envelope = export_local_agents(
-            store.library_path / "agents", resolve_local_name()
+            store.library_path / "agents",
+            resolve_local_name(),
+            access_level=egress_access,
         )
         if not caller.is_trusted:
             envelope["agents"] = [
@@ -893,6 +933,9 @@ def create_l6_server(
             return _denied("get_cross_agent_summary", caller)
         _audit(caller, "get_cross_agent_summary")
         if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
             summary = store.get_cross_agent_summary(
                 project,
                 include_private=include_private,
@@ -1149,7 +1192,7 @@ def _build_auth_middleware(registry: FederationRegistry):
     ``--allow-unauthenticated``, every request gets 503 — fail closed.
     Token material never appears in any log or response body.
     """
-    legacy = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    legacy = _normalized_legacy_token()
 
     try:
         from starlette.middleware.base import BaseHTTPMiddleware
@@ -1175,7 +1218,10 @@ def _build_auth_middleware(registry: FederationRegistry):
                 return JSONResponse({"error": "missing Bearer token"}, status_code=401)
             token = header.split(" ", 1)[1].strip()
             identity: AgentIdentity | None = None
-            if legacy is not None and hmac.compare_digest(
+            # Require BOTH a configured legacy token and a non-empty presented
+            # token before the constant-time compare, so an empty Bearer can
+            # never match (defense in depth alongside the normalization above).
+            if legacy and token and hmac.compare_digest(
                 token.encode("utf-8"), legacy.encode("utf-8")
             ):
                 identity = OPERATOR
@@ -1272,7 +1318,7 @@ def run_l6_server(
 
     if registry is None:
         registry = FederationRegistry()
-    auth_configured = bool(os.environ.get("BOURDON_PEER_TOKEN_SERVER")) or (
+    auth_configured = _normalized_legacy_token() is not None or (
         registry.has_active_agents()
     )
     if not _is_loopback_host(host):

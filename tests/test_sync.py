@@ -208,14 +208,27 @@ def test_stage_filtered_library_rejects_bad_access_level(tmp_path):
         stage_filtered_library(src, "leaky", tmp_path / "staging")
 
 
-def test_stage_filtered_library_keeps_malformed_yaml_unchanged(tmp_path):
+def test_stage_filtered_library_skips_malformed_yaml(tmp_path):
+    # Fail closed (3-Star audit P1-1): a manifest that can't be visibility-
+    # filtered must NOT be copied raw into the push staging dir — copying it
+    # unchanged would leak its PRIVATE entries past the filter. It is skipped.
     src = tmp_path / "src"
     (src / "agents").mkdir(parents=True)
     bad = src / "agents" / "broken.l5.yaml"
     bad.write_text("[unclosed yaml\n", encoding="utf-8")
 
     staged = stage_filtered_library(src, "public", tmp_path / "staging")
-    assert (staged / "agents" / "broken.l5.yaml").read_text(encoding="utf-8") == "[unclosed yaml\n"
+    assert not (staged / "agents" / "broken.l5.yaml").exists()
+
+
+def test_stage_filtered_library_skips_non_mapping_manifest(tmp_path):
+    src = tmp_path / "src"
+    (src / "agents").mkdir(parents=True)
+    # Valid YAML, but a list — not a manifest mapping; cannot be filtered.
+    (src / "agents" / "list.l5.yaml").write_text("- a\n- b\n", encoding="utf-8")
+
+    staged = stage_filtered_library(src, "public", tmp_path / "staging")
+    assert not (staged / "agents" / "list.l5.yaml").exists()
 
 
 # ---------------------------------------------------------------------------

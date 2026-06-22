@@ -25,25 +25,26 @@ import logging
 import os
 import re
 import socket
+from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING
 
 import yaml
 
+from core.redaction import SENSITIVE_PATTERNS, contains_secret
 from participants.base import (
-    ParticipantDiscoveryError,
+    SPEC_VERSION,
     AgentInfo,
     AgentStore,
     BourdonParticipant,
     Entity,
     HealthStatus,
     L5Manifest,
+    ParticipantDiscoveryError,
     Session,
-    SPEC_VERSION,
     Visibility,
     VisibilityPolicy,
-    apply_visibility,
     filter_for_federation,
 )
 
@@ -81,19 +82,9 @@ PRIVATE_BY_DEFAULT_TYPES: frozenset[str] = frozenset(
 # Patterns in observation text that trigger credential scrubbing.
 # Matches are case-insensitive. Any match causes the observation to be redacted
 # in the outgoing summary (the raw observation remains in personal memory).
-CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:api[_-]?key|api_token)\b", re.IGNORECASE),
-    re.compile(r"\b(?:service[_-]?role|access[_-]?token)\b", re.IGNORECASE),
-    re.compile(r"\bstripe\s+(?:key|secret|token)", re.IGNORECASE),
-    re.compile(r"\b(?:keystore|private[_-]?key|ssh[_-]?key)\b", re.IGNORECASE),
-    re.compile(r"\.env\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
-    # Stripe / RevenueCat / Apple-style tokens with underscore-separated prefixes
-    re.compile(r"\b(?:sk|pk)_(?:live|test)_\w+", re.IGNORECASE),
-    re.compile(r"\bappl_\w+", re.IGNORECASE),
-    re.compile(r"\bhf_\w{10,}", re.IGNORECASE),  # HuggingFace tokens
-)
+# Back-compat alias: the patterns now live in the core.redaction SSOT (which is
+# a strict superset of this former set, plus keyword-less token shapes).
+CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = SENSITIVE_PATTERNS
 
 MAX_SUMMARY_CHARS = 500
 MAX_OBSERVATIONS_IN_SUMMARY = 2
@@ -102,7 +93,7 @@ MAX_OBSERVATIONS_IN_SUMMARY = 2
 # -- Path resolution -----------------------------------------------------------
 
 
-def _resolve_claude_brain_path() -> Optional[Path]:
+def _resolve_claude_brain_path() -> Path | None:
     """Locate claude-brain repo using the documented precedence order."""
     env_override = os.environ.get("CLAUDE_BRAIN")
     if env_override:
@@ -121,7 +112,7 @@ def _resolve_claude_brain_path() -> Optional[Path]:
     return None
 
 
-def _resolve_auto_memory_path() -> Optional[Path]:
+def _resolve_auto_memory_path() -> Path | None:
     """Claude Code auto-memory usually lives at ~/.claude/projects/<workspace>/memory/.
 
     Returns None on PermissionError / OSError reading the directory tree --
@@ -140,7 +131,7 @@ def _resolve_auto_memory_path() -> Optional[Path]:
     return None
 
 
-def _resolve_knowledge_graph_path() -> Optional[Path]:
+def _resolve_knowledge_graph_path() -> Path | None:
     """MCP knowledge graph lives at ~/claude-memory/memory.jsonl by convention."""
     candidate = Path.home() / "claude-memory" / "memory.jsonl"
     if candidate.is_file():
@@ -152,11 +143,11 @@ def _resolve_knowledge_graph_path() -> Optional[Path]:
 
 
 def _contains_credential_pattern(text: str) -> bool:
-    """Return True if any credential regex matches the text."""
-    return any(pat.search(text) for pat in CREDENTIAL_PATTERNS)
+    """Return True if any credential regex matches the text (redaction SSOT)."""
+    return contains_secret(text)
 
 
-def _is_private_type(entity_type: Optional[str]) -> bool:
+def _is_private_type(entity_type: str | None) -> bool:
     """Return True if the entity_type slug indicates the entity is PRIVATE by default."""
     if not entity_type:
         return False
@@ -173,7 +164,7 @@ _FRONTMATTER_CLOSE = "\n---\n"
 
 
 def _parse_frontmatter(
-    text: str, source: Optional[Path] = None
+    text: str, source: Path | None = None
 ) -> tuple[dict, str]:
     """
     Split YAML frontmatter from body.
@@ -219,7 +210,7 @@ _STATUS_SECTION_RE = re.compile(
 )
 
 
-def _extract_h1_title(body: str) -> Optional[str]:
+def _extract_h1_title(body: str) -> str | None:
     """Return the first H1 heading's text, or None if no H1 found."""
     match = _H1_RE.search(body)
     if not match:
@@ -279,7 +270,7 @@ _END_OF_LIFE_TAGS = frozenset({"archived", "canceled"})
 _STATUS_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 
-def _extract_status_date(body: str) -> Optional[str]:
+def _extract_status_date(body: str) -> str | None:
     """
     Pull the ISO 8601 date that appears inside the ``## Status`` section,
     if any. Used for valid_to dating of archived / canceled entities.
@@ -293,7 +284,7 @@ def _extract_status_date(body: str) -> Optional[str]:
     return date_match.group(1) if date_match else None
 
 
-def _parse_project_overview(overview_path: Path) -> Optional[Entity]:
+def _parse_project_overview(overview_path: Path) -> Entity | None:
     """Parse a single PROJECTS/<NAME>/OVERVIEW.md into an Entity."""
     try:
         text = overview_path.read_text(encoding="utf-8")
@@ -307,7 +298,7 @@ def _parse_project_overview(overview_path: Path) -> Optional[Entity]:
     # Temporal validity: if the entity is end-of-life (archived/canceled),
     # try to recover a valid_to date from the status section. Falls back to
     # the file mtime when the status section doesn't carry an explicit date.
-    valid_to: Optional[str] = None
+    valid_to: str | None = None
     if any(t in _END_OF_LIFE_TAGS for t in tags):
         valid_to = _extract_status_date(body)
         if valid_to is None:
@@ -349,7 +340,7 @@ _LOG_FILENAME_RE = re.compile(
 )
 
 
-def _parse_log_file(log_path: Path) -> Optional[Session]:
+def _parse_log_file(log_path: Path) -> Session | None:
     """Parse one LOG/YYYY-MM-DD-<machine>(-sessionN)?.md into a Session."""
     m = _LOG_FILENAME_RE.match(log_path.name)
     if not m:
@@ -374,7 +365,7 @@ def _parse_log_file(log_path: Path) -> Optional[Session]:
 
 
 def _parse_logs_dir(
-    brain_path: Path, since: Optional[datetime] = None, limit: int = 100
+    brain_path: Path, since: datetime | None = None, limit: int = 100
 ) -> list[Session]:
     """Return Session rows for recent LOG entries (newest first, up to ``limit``)."""
     log_dir = brain_path / "LOG"
@@ -407,7 +398,7 @@ def _parse_logs_dir(
 # -- Parser: auto-memory -------------------------------------------------------
 
 
-def _parse_auto_memory_entity(md_path: Path) -> Optional[Entity]:
+def _parse_auto_memory_entity(md_path: Path) -> Entity | None:
     """Parse a single auto-memory entity file (YAML frontmatter + markdown body)."""
     try:
         text = md_path.read_text(encoding="utf-8")
@@ -450,7 +441,7 @@ def _parse_auto_memory(memory_path: Path) -> list[Entity]:
 # -- Parser: knowledge graph JSONL ---------------------------------------------
 
 
-def _graph_entity_to_bourdon_entity(record: dict) -> Optional[Entity]:
+def _graph_entity_to_bourdon_entity(record: dict) -> Entity | None:
     """Convert one MCP graph entity record to a Bourdon Entity."""
     name = record.get("name")
     if not name or not isinstance(name, str):
@@ -471,11 +462,7 @@ def _graph_entity_to_bourdon_entity(record: dict) -> Optional[Entity]:
     summary = " | ".join(safe_obs)[:MAX_SUMMARY_CHARS].strip() or None
 
     visibility = None
-    if _is_private_type(entity_type_slug):
-        visibility = Visibility.PRIVATE
-    # If any observation in the FULL list contains a credential, play it safe:
-    # mark the entity PRIVATE even if we scrubbed the summary.
-    elif any(isinstance(o, str) and _contains_credential_pattern(o) for o in observations):
+    if _is_private_type(entity_type_slug) or any(isinstance(o, str) and _contains_credential_pattern(o) for o in observations):
         visibility = Visibility.PRIVATE
 
     tags = [normalized_type] if normalized_type and normalized_type != name.lower() else []
@@ -495,7 +482,7 @@ def _parse_knowledge_graph(graph_path: Path) -> list[Entity]:
         return []
     entities: list[Entity] = []
     try:
-        with open(graph_path, "r", encoding="utf-8") as f:
+        with open(graph_path, encoding="utf-8") as f:
             for line_num, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
@@ -633,7 +620,7 @@ class ClaudeCodeParticipant:
             metadata={"sources": sources},
         )
 
-    def export_l5(self, since: Optional[datetime] = None) -> L5Manifest:
+    def export_l5(self, since: datetime | None = None) -> L5Manifest:
         """Build L5 manifest from all three sources, deduped and visibility-filtered."""
         store = self.discover()  # re-raises on missing
         capabilities = sorted(k for k, v in store.metadata["sources"].items() if v)

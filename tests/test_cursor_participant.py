@@ -207,6 +207,47 @@ def test_health_check_does_not_raise_on_corrupt_db(tmp_path):
     assert health.status in {"ok", "degraded", "blocked"}
 
 
+def test_export_l5_skips_corrupt_db_without_crashing(tmp_path):
+    # 3-Star audit part-P1-1: a corrupt/locked Cursor DB must be skipped, not
+    # crash the whole export. A second healthy DB still exports.
+    cursor_dir = _make_cursor_dir(tmp_path)
+    (cursor_dir / "state.vscdb").write_bytes(b"not a real sqlite database")
+    _seed_state_db(
+        cursor_dir / "User" / "workspaceStorage" / "abc123" / "state.vscdb",
+        [("composer.composerData", {"allComposers": [{"name": "Ship Bourdon tray"}]})],
+    )
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()  # must not raise
+    assert isinstance(manifest, L5Manifest)
+
+
+def test_export_l5_reads_wal_resident_rows(tmp_path):
+    # 3-Star audit part-P1-2: rows still in the -wal of a live (WAL-mode) DB
+    # must be visible — the reader copies the WAL companion before opening.
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+            (
+                "composer.composerData",
+                json.dumps({"allComposers": [{"name": "WAL-resident project"}]}),
+            ),
+        )
+        conn.commit()  # stays in -wal until a checkpoint
+        assert (db.parent / "state.vscdb-wal").is_file()  # precondition
+        # Do NOT close (close would checkpoint); read while the WAL is live.
+        participant = CursorParticipant(cursor_dir=cursor_dir)
+        manifest = participant.export_l5()
+        assert isinstance(manifest, L5Manifest)
+    finally:
+        conn.close()
+
+
 # ---- Protocol conformance ---------------------------------------------------
 
 

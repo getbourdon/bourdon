@@ -428,17 +428,39 @@ fn read_and_apply(app: &AppHandle, federated: bool) -> AgentsResult {
     result
 }
 
+/// Build the Red/error result used when the background read task itself fails
+/// to join (panic / cancellation) — distinct from a CLI error, which run_cli
+/// already maps to a Red AgentsResult.
+fn read_task_failed(scope: &str, err: impl std::fmt::Display) -> AgentsResult {
+    AgentsResult {
+        health: Health::Red,
+        report: None,
+        error: Some(format!("Bourdon {scope} read task failed: {err}")),
+        command: String::new(),
+    }
+}
+
 /// Frontend-facing local read (fast — this machine only). Default on load.
+///
+/// async + spawn_blocking (3-Star audit rust-P1-2): a synchronous
+/// `#[tauri::command]` runs on the MAIN thread, so the blocking subprocess (and,
+/// for the federated read, the network fan-out) would freeze the window and the
+/// tray. Running it on the blocking pool keeps the UI responsive.
 #[tauri::command]
-fn get_agents(app: AppHandle) -> AgentsResult {
-    read_and_apply(&app, false)
+async fn get_agents(app: AppHandle) -> AgentsResult {
+    tauri::async_runtime::spawn_blocking(move || read_and_apply(&app, false))
+        .await
+        .unwrap_or_else(|e| read_task_failed("local", e))
 }
 
 /// Frontend-facing federated read (this machine + peers, source-tagged). Slower
 /// (network fan-out) — invoked only when the user switches to the Federated scope.
+/// Runs off the main thread (see `get_agents`) so peers can't freeze the tray.
 #[tauri::command]
-fn get_agents_federated(app: AppHandle) -> AgentsResult {
-    read_and_apply(&app, true)
+async fn get_agents_federated(app: AppHandle) -> AgentsResult {
+    tauri::async_runtime::spawn_blocking(move || read_and_apply(&app, true))
+        .await
+        .unwrap_or_else(|e| read_task_failed("federated", e))
 }
 
 /// Show + focus the main window (used by tray "Open Bourdon" and left-click).

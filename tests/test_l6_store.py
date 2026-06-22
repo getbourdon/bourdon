@@ -1295,3 +1295,41 @@ def test_commit_l5_add_normalizes_string_list_fields(library):
     assert session["project_focus"] == ["solo-string"]
     (entity,) = manifest["known_entities"]
     assert entity["tags"] == ["memory"]
+
+
+def test_commit_l5_concurrent_merges_do_not_drop_contributions(tmp_path):
+    """3-Star audit P1-3: concurrent commits to the same agent (the server runs
+    sync tools in a threadpool) must not drop each other's rows. Without the
+    per-store lock the read-modify-write-reload races and loses contributions."""
+    import threading
+
+    store = L6Store(tmp_path / "lib")
+    store.commit_l5("codex", agent_type="code-assistant", entities=[{"name": "seed"}])
+
+    n = 16
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            barrier.wait()  # maximize contention
+            store.commit_l5(
+                "codex",
+                entities=[{"name": f"ent{i}"}],
+                sessions=[{"date": f"2026-06-{(i % 28) + 1:02d}", "cwd": f"/p/{i}"}],
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"commit raised under concurrency: {errors[:3]}"
+    store.reload_agent("codex")
+    names = {e["name"] for e in store._manifests["codex"]["known_entities"]}
+    missing = [f"ent{i}" for i in range(n) if f"ent{i}" not in names]
+    assert not missing, f"lost contributions under concurrency: {missing}"
+    assert "seed" in names

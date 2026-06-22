@@ -1312,6 +1312,57 @@ def test_cli_codex_hook_user_prompt_submit_compiler_error_fails_open(
     assert captured.err == ""
 
 
+class _BytesStdin:
+    """Stand-in for a real console stdin: exposes a ``.buffer`` byte stream
+    (unlike io.StringIO) so the handler exercises its bytes-decode path."""
+
+    def __init__(self, data: bytes):
+        self.buffer = io.BytesIO(data)
+
+
+def test_cli_codex_hook_user_prompt_submit_non_utf8_stdin_fails_open(
+    tmp_path, monkeypatch, capsys
+):
+    # Non-UTF-8 bytes (e.g. a Windows code-page console) must NOT raise a
+    # UnicodeDecodeError traceback into the live turn (3-Star audit P0/P1).
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr("sys.stdin", _BytesStdin(b'\xff\xfe{"prompt":"caf\xe9"}'))
+
+    exit_code = main(
+        ["codex", "hook", "user-prompt-submit", "--codex-home", str(codex_home)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_post_processing_error_fails_open(
+    tmp_path, monkeypatch, capsys
+):
+    # A raise AFTER the compiler (to_dict / routing / print) must also degrade
+    # to exit 0 — the whole handler is now wrapped (the tail previously ran
+    # outside the guard).
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps({"prompt": "Do you know Bourdon?"}))
+    )
+
+    class _Boom:
+        def to_dict(self):
+            raise RuntimeError("post-processing blew up")
+
+    monkeypatch.setattr("cli.main.compile_codex_turn", lambda *a, **k: _Boom())
+
+    exit_code = main(
+        ["codex", "hook", "user-prompt-submit", "--codex-home", str(codex_home)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
     report_path = tmp_path / "report.yaml"
 

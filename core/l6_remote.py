@@ -179,8 +179,10 @@ class RemoteL6Client:
             "find_entity",
             {
                 "name": name,
-                "access_level": access_level,
-                "include_private": include_private,
+                # Never ask a peer for PRIVATE (3-Star audit P1-2); the peer also
+                # clamps on ingress, this is defense in depth.
+                "access_level": access_level if access_level in ("public", "team") else "team",
+                "include_private": False,
                 "federation_hop": 1,
             },
         )
@@ -201,8 +203,8 @@ class RemoteL6Client:
         summary: bool = False,
     ) -> dict:
         args: dict[str, Any] = {
-            "access_level": access_level,
-            "include_private": include_private,
+            "access_level": access_level if access_level in ("public", "team") else "team",
+            "include_private": False,  # never ask a peer for PRIVATE (P1-2)
             "summary": summary,
             "federation_hop": 1,
         }
@@ -229,8 +231,8 @@ class RemoteL6Client:
             "get_cross_agent_summary",
             {
                 "project": project,
-                "access_level": access_level,
-                "include_private": include_private,
+                "access_level": access_level if access_level in ("public", "team") else "team",
+                "include_private": False,  # never ask a peer for PRIVATE (P1-2)
                 "federation_hop": 1,
             },
         )

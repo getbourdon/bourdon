@@ -188,3 +188,57 @@ def test_resolve_local_name_falls_back_to_hostname(monkeypatch):
     monkeypatch.delenv("BOURDON_LOCAL_NAME", raising=False)
     monkeypatch.setattr("core.agents_export.socket.gethostname", lambda: "host-xyz")
     assert resolve_local_name() == "host-xyz"
+
+
+# -- access_level egress clamp (3-Star audit P0-1) -----------------------------
+
+_MIXED_VISIBILITY = {
+    "spec_version": "0.1",
+    "agent": {"id": "codex", "type": "code-assistant", "role_narrative": "Lead."},
+    "last_updated": "2026-06-01T00:00:00+00:00",
+    "recent_sessions": [
+        {"date": "2026-06-03", "project_focus": ["PubWork"], "visibility": "public"},
+        {"date": "2026-06-02", "project_focus": ["TeamWork"], "visibility": "team"},
+        {"date": "2026-06-01", "project_focus": ["SecretWork"], "visibility": "private"},
+        {"date": "2026-05-30", "project_focus": ["Unmarked"]},  # defaults to team
+    ],
+}
+
+
+def _focus_blob(summary: dict) -> str:
+    return " ".join(
+        " ".join(s.get("project_focus") or []) for s in summary["recent_activity"]
+    )
+
+
+def test_export_access_public_emits_only_public_sessions():
+    s = summarize_agent_manifest(_MIXED_VISIBILITY, source="pc", access_level="public")
+    blob = _focus_blob(s)
+    assert "PubWork" in blob
+    for leaked in ("TeamWork", "SecretWork", "Unmarked"):
+        assert leaked not in blob, f"{leaked} leaked to a public caller"
+    assert s["session_count"] == 1
+
+
+def test_export_access_team_emits_public_and_team_but_never_private():
+    s = summarize_agent_manifest(_MIXED_VISIBILITY, source="pc", access_level="team")
+    blob = _focus_blob(s)
+    assert "PubWork" in blob and "TeamWork" in blob and "Unmarked" in blob
+    assert "SecretWork" not in blob, "PRIVATE session crossed to a team caller"
+    assert s["session_count"] == 3
+
+
+def test_export_default_access_is_full_local_view():
+    # Default (private) preserves the operator's own complete local view.
+    s = summarize_agent_manifest(_MIXED_VISIBILITY, source="pc")
+    blob = _focus_blob(s)
+    assert all(x in blob for x in ("PubWork", "TeamWork", "SecretWork", "Unmarked"))
+    assert s["session_count"] == 4
+
+
+def test_export_local_agents_threads_access_level(agents_dir: Path):
+    _write(agents_dir, "codex", _MIXED_VISIBILITY)
+    report = export_local_agents(agents_dir, "pc", access_level="public")
+    blob = _focus_blob(report["agents"][0])
+    assert "PubWork" in blob
+    assert "SecretWork" not in blob and "TeamWork" not in blob
