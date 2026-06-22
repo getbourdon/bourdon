@@ -198,6 +198,7 @@ def prepare_recognition_context_from_store(
         "access_level": access_level,
         "include_private": include_private,
         "recognition": result.recognition,
+        "confidence": result.confidence,
         "matched_entities": [
             {
                 "name": str(entity.get("name") or ""),

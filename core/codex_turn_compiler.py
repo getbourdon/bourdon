@@ -27,6 +27,7 @@ from core.recognition_contract import (
     MatchTier,
     match_tier,
     meaningful_terms,
+    recognition_confidence,
 )
 from participants.codex import (
     _inspect_codex_state_db,
@@ -202,7 +203,7 @@ def compile_codex_turn(
     )
     scored = _score_candidates(candidates, prompt_text, scoring_cwd, repo)
     items = _rank_items(scored, item_limit)
-    routing = _routing_decision(items, scored, repo, native_stage1)
+    routing = _routing_decision(items, scored, repo, native_stage1, prompt)
     trace = _recognition_trace(items, scored, repo, native_stage1, routing)
 
     explicit_text = _render_explicit_text(items, repo, native_stage1, char_limit)
@@ -958,6 +959,7 @@ def _routing_decision(
     scored: list[tuple[_Candidate, float, dict[str, float], str]],
     repo: RepoIdentity,
     native_stage1: str,
+    prompt: str,
 ) -> dict[str, Any]:
     if not items:
         return {
@@ -971,7 +973,12 @@ def _routing_decision(
         }
 
     top_item = items[0]
-    confidence = _confidence(top_item.score)
+    # Confidence is the shared tier-driven bucket (parity stage 4): same bucket
+    # on every surface for the same (prompt, anchor). codex's richer score still
+    # drives RANKING + surface selection below; it no longer moves the bucket.
+    top_candidate = scored[0][0]
+    anchor_names = [top_candidate.name, *top_candidate.aliases, *top_candidate.project_focus]
+    confidence = recognition_confidence(prompt, anchor_names)
     surfaces = _recommended_surfaces(top_item, repo, native_stage1)
     suppressed = _suppressed_surfaces(native_stage1, confidence)
     return {
@@ -985,12 +992,6 @@ def _routing_decision(
     }
 
 
-def _confidence(score: float) -> str:
-    if score >= 50:
-        return "high"
-    if score >= 25:
-        return "medium"
-    return "low"
 
 
 def _recommended_surfaces(

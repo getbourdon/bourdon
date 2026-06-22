@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
-from core.recognition_contract import meaningful_terms, tokenize
+from core.recognition_contract import meaningful_terms, recognition_confidence, tokenize
 from participants.codex import _safe_native_memory_text
 
 SCHEMA_VERSION = "cursor-turn-brief/v1"
@@ -168,12 +168,14 @@ def compile_cursor_turn(
 
     if not matched:
         confidence = "none"
-    elif top[0][0] >= 4.0:
-        confidence = "high"
-    elif top[0][0] >= 2.0:
-        confidence = "medium"
     else:
-        confidence = "low"
+        # Shared tier-driven bucket (parity stage 4) — same as codex/runtime for
+        # the same (prompt, anchor); cursor's raw score still drives ranking.
+        top_entity = top[0][2]
+        anchor_names = [str(top_entity.get("name", ""))] + [
+            str(a) for a in top_entity.get("aliases", []) or []
+        ]
+        confidence = recognition_confidence(prompt, anchor_names)
 
     elapsed_us = (_time.perf_counter() - t0) * 1_000_000
 

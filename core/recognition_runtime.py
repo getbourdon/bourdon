@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Optional
 
 from core.codex_context import filter_manifest_for_access
 from core.inference_protocol import InferenceBackend
-from core.recognition_contract import MatchTier, match_tier
+from core.recognition_contract import MatchTier, match_tier, recognition_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,11 @@ class RecognitionResult:
     matched_entities: list[dict[str, Any]] = field(default_factory=list)
     """The entity dicts that triggered recognition. Lets the caller decide
     whether to follow up with hydrated detail."""
+
+    confidence: str = "none"
+    """The shared recognition-contract confidence bucket (none/low/medium/high)
+    for the top match — tier-driven, so it AGREES with the codex/cursor surfaces
+    for the same (prompt, anchor) (parity stage 4). "none" when nothing matched."""
 
     hydration: Optional[Awaitable[str]] = None
     """An awaitable that resolves to the L1-hydrated detail string. The caller
@@ -304,7 +309,16 @@ def recognition_first(
             recognition=recognition,
             matched_entities=[],
             hydration=None,
+            confidence="none",
         )
+
+    # Shared tier-driven confidence (parity stage 4): the same bucket the
+    # codex/cursor surfaces emit for the same (prompt, top anchor).
+    _top = matches[0]
+    _anchor_names = [str(_top.get("name", ""))] + [
+        str(a) for a in _top.get("aliases", []) or []
+    ]
+    confidence = recognition_confidence(user_msg, _anchor_names)
 
     async def _hydration_with_timeout() -> str:
         try:
@@ -324,6 +338,7 @@ def recognition_first(
         recognition=recognition,
         matched_entities=matches,
         hydration=_hydration_with_timeout(),
+        confidence=confidence,
     )
 
 

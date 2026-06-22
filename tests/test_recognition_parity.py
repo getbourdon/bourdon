@@ -93,7 +93,7 @@ def _run_all(prompt: str, seeded) -> dict[str, dict]:
     return {
         "codex": rec(cz_names, cz.routing.get("confidence")),
         "cursor": rec(cu_names, cu.routing.get("confidence")),
-        "runtime": rec(rt_names, None),  # runtime emits no confidence today
+        "runtime": rec(rt_names, rt.confidence),  # runtime now emits a bucket too
     }
 
 
@@ -101,59 +101,58 @@ def _run_all(prompt: str, seeded) -> dict[str, dict]:
 # / `confidence_agree` mark whether that dimension is unified yet (the ledger).
 CASES = [
     {
+        # Stage 4: codex dropped high->medium here (its recency boost no longer
+        # moves the emitted bucket — it can't be seen by the other surfaces).
         "prompt": "tell me about Bourdon",
-        "codex": _record(["Bourdon"], "Bourdon", "high"),
+        "codex": _record(["Bourdon"], "Bourdon", "medium"),
         "cursor": _record(["Bourdon"], "Bourdon", "medium"),
-        "runtime": _record(["Bourdon"], "Bourdon", None),
-        "anchor_agree": True,       # all pick Bourdon — locked in
-        "confidence_agree": False,  # high/medium/none — closes when buckets unify (stage 4)
+        "runtime": _record(["Bourdon"], "Bourdon", "medium"),
+        "anchor_agree": True,
+        "confidence_agree": True,  # CONVERGED (tier-driven bucket)
     },
     {
         "prompt": "how is ILTT going",
         "codex": _record(["ILTT"], "ILTT", "medium"),
         "cursor": _record(["ILTT"], "ILTT", "medium"),
-        "runtime": _record(["ILTT"], "ILTT", None),
+        "runtime": _record(["ILTT"], "ILTT", "medium"),
         "anchor_agree": True,
-        "confidence_agree": False,
+        "confidence_agree": True,
     },
     {
         "prompt": "checkers tonight",
         "codex": _record(["DINOs Chess"], "DINOs Chess", "medium"),
         "cursor": _record(["DINOs Chess"], "DINOs Chess", "medium"),
-        "runtime": _record(["DINOs Chess"], "DINOs Chess", None),
+        "runtime": _record(["DINOs Chess"], "DINOs Chess", "medium"),
         "anchor_agree": True,
-        "confidence_agree": False,
+        "confidence_agree": True,
     },
     {
         # SHORT-NAME GUARD: codex used to substring-match "iltt" inside "iltted";
-        # cursor + runtime (token-level) did not. CLOSED in stage 3 (match_tier):
-        # codex now also yields no match — all three agree on no-match.
+        # cursor + runtime (token-level) did not. Closed in stage 3 (match_tier).
         "prompt": "we ILTTed the build",
         "codex": _record([], None, "none"),
         "cursor": _record([], None, "none"),
-        "runtime": _record([], None, None),
-        "anchor_agree": True,  # CONVERGED (was the substring divergence)
-        "confidence_agree": False,
+        "runtime": _record([], None, "none"),
+        "anchor_agree": True,
+        "confidence_agree": True,  # all "none" — runtime now emits the bucket too
     },
     {
-        # SUMMARY-MATCH: cursor used to score against the summary haystack so
-        # "memory" surfaced Bourdon (summary contains "memory") and ranked it
-        # TOP. CLOSED in stage 3 (match on name+aliases only): all three now
-        # anchor on the named entity "memory".
+        # SUMMARY-MATCH: cursor used to rank Bourdon (summary mentions "memory")
+        # over the named "memory" entity. Closed in stage 3 (name+aliases only).
         "prompt": "pick a category for memory",
         "codex": _record(["memory"], "memory", "medium"),
         "cursor": _record(["memory"], "memory", "medium"),
-        "runtime": _record(["memory"], "memory", None),
-        "anchor_agree": True,  # CONVERGED (was the summary-match divergence)
-        "confidence_agree": False,
+        "runtime": _record(["memory"], "memory", "medium"),
+        "anchor_agree": True,
+        "confidence_agree": True,
     },
     {
         "prompt": "codex branch pr",
         "codex": _record([], None, "none"),
         "cursor": _record([], None, "none"),
-        "runtime": _record([], None, None),
-        "anchor_agree": True,   # all none — agree
-        "confidence_agree": False,
+        "runtime": _record([], None, "none"),
+        "anchor_agree": True,
+        "confidence_agree": True,
     },
 ]
 
@@ -188,15 +187,21 @@ def test_anchor_divergences_all_closed_after_stage_3():
     )
 
 
-def test_confidence_dimension_not_yet_unified(seeded):
-    """Stage 4 ledger: confidence is the remaining un-unified dimension. runtime
-    emits no bucket while codex/cursor do, so a matched prompt still disagrees
-    on confidence. When normalized_confidence is wired so all three agree, flip
-    confidence_agree=True on the CASES and update this test."""
-    assert not any(c["confidence_agree"] for c in CASES)  # ledger still pre-stage-4
-    got = _run_all("tell me about Bourdon", seeded)
-    buckets = {got[e]["confidence"] for e in ("codex", "cursor", "runtime")}
-    assert len(buckets) > 1, "confidence converged — wire the stage-4 ledger flip"
+def test_confidence_fully_unified_after_stage_4():
+    """Stage 4 closed the last dimension: every row now agrees on confidence,
+    so the contract's anchor + confidence parity is fully enforced."""
+    assert all(c["confidence_agree"] for c in CASES)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["prompt"] for c in CASES])
+def test_full_parity_anchor_and_confidence(case, seeded):
+    """The headline promise, now enforced: for every prompt all three engines
+    agree on BOTH the selected top anchor AND the confidence bucket."""
+    got = _run_all(case["prompt"], seeded)
+    tops = {got[e]["top"] for e in ("codex", "cursor", "runtime")}
+    confs = {got[e]["confidence"] for e in ("codex", "cursor", "runtime")}
+    assert len(tops) == 1, f"top-anchor parity broke for {case['prompt']!r}: {tops}"
+    assert len(confs) == 1, f"confidence parity broke for {case['prompt']!r}: {confs}"
 
 
 def test_private_never_surfaces_at_team_access_on_any_engine(seeded):
