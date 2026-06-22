@@ -470,6 +470,16 @@ def test_normalized_legacy_token_treats_empty_as_unset(monkeypatch):
     assert server_module._normalized_legacy_token() is None
 
 
+def test_clamp_peer_access_never_yields_private():
+    """3-Star audit P1-2: a peer-originated request can never extract PRIVATE —
+    access caps at team and include_private is forced off, whatever was asked."""
+    assert server_module._clamp_peer_access("private", True) == ("team", False)
+    assert server_module._clamp_peer_access("private", False) == ("team", False)
+    assert server_module._clamp_peer_access("team", True) == ("team", False)
+    assert server_module._clamp_peer_access("public", True) == ("public", False)
+    assert server_module._clamp_peer_access("public", False) == ("public", False)
+
+
 def test_run_l6_server_http_nonloopback_empty_token_refuses_to_start(monkeypatch):
     """An empty BOURDON_PEER_TOKEN_SERVER on a non-loopback bind must NOT count
     as configured auth — the server refuses to start (P1-1)."""

@@ -104,6 +104,24 @@ def _normalized_legacy_token() -> str | None:
     return value
 
 
+_ACCESS_RANK = {"public": 0, "team": 1, "private": 2}
+
+
+def _clamp_peer_access(access_level: str, include_private: bool) -> tuple[str, bool]:
+    """Clamp a peer-originated request so it can never extract PRIVATE memory.
+
+    A request arriving over federation (federation_hop > 0) must never pull this
+    machine's private entities/sessions regardless of what it asks for (3-Star
+    audit P1-2): force include_private off and cap access_level at "team". The
+    invariant is now enforced by code at the ingress boundary, not by trusting
+    the peer to ask politely.
+    """
+    capped = access_level
+    if _ACCESS_RANK.get(access_level, _ACCESS_RANK["private"]) > _ACCESS_RANK["team"]:
+        capped = "team"
+    return capped, False
+
+
 def _require_fastmcp():
     """Import fastmcp lazily so importing this module doesn't require it."""
     try:
@@ -592,6 +610,10 @@ def create_l6_server(
                     cutoff = datetime.combine(parsed, _time.min)
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
+        if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
         try:
             if store.peers and not cursor and federation_hop <= 0:
                 # Federated path: merge local + peer sessions. Cursoring across
@@ -673,6 +695,9 @@ def create_l6_server(
         caller = _resolve_caller()
         _audit(caller, "find_entity")
         if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
             matches = store.find_entity(
                 name,
                 include_private=include_private,
@@ -908,6 +933,9 @@ def create_l6_server(
             return _denied("get_cross_agent_summary", caller)
         _audit(caller, "get_cross_agent_summary")
         if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
             summary = store.get_cross_agent_summary(
                 project,
                 include_private=include_private,
