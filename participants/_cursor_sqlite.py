@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import shutil
 import sqlite3
 import tempfile
@@ -12,28 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bbearer\s+token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-    re.compile(r"\bsk_live_[A-Za-z0-9_]+\b"),
-    re.compile(r"\bhf_[A-Za-z0-9_]{10,}\b", re.IGNORECASE),
-)
+from core.redaction import SENSITIVE_PATTERNS, redact_text
+
+_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS  # back-compat alias for the SSOT
 
 
 def _scrub_text(value: str, limit: int = 256) -> str:
-    """Redact credential-like content and cap length."""
-    text = value.strip()
-    if not text:
-        return text
-    if any(p.search(text) for p in _SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    """Redact credential-like content and cap length (redaction SSOT)."""
+    return redact_text(value, limit=limit)
 
 
 @dataclass(frozen=True)

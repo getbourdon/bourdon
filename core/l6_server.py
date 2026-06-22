@@ -57,7 +57,6 @@ import hmac
 import ipaddress
 import logging
 import os
-import re
 import time as time_module
 from datetime import datetime
 from pathlib import Path
@@ -77,18 +76,17 @@ from core.federation_registry import (
 from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
+from core.redaction import SENSITIVE_PATTERNS, redact_text
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from core.l6_remote import RemoteL6Client
 
-_CONTEXT_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-)
+# Back-compat alias: the MCP recognition path previously carried only 4 keyword
+# patterns and shipped JWTs / AWS / GitHub tokens in the clear to MCP callers
+# (P0-4). It now shares the core.redaction SSOT with every other surface.
+_CONTEXT_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS
 
 
 def _require_fastmcp():
@@ -107,13 +105,8 @@ def _require_fastmcp():
 
 
 def _safe_context_text(value: str, limit: int = 240) -> str:
-    text = re.sub(r"\s+", " ", value.strip())
-    if any(pattern.search(text) for pattern in _CONTEXT_SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    """Thin wrapper over the redaction SSOT (MCP recognition context budget)."""
+    return redact_text(value, limit=limit)
 
 
 def _recognition_prompt_context(result: Any) -> str:
