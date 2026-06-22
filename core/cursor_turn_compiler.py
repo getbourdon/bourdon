@@ -22,6 +22,11 @@ SCHEMA_VERSION = "cursor-turn-brief/v1"
 STRATEGY = "turn_compiled"
 DEFAULT_MAX_ITEMS = 6
 DEFAULT_MAX_CHARS = 1_800
+# Input bounds (3-Star audit tests-P1-2): a negative max_items silently dropped
+# the top-ranked entity via scored_entities[:negative]; an unbounded prompt let
+# a multi-MB input drive O(tokens*entities) scanning. Mirror the codex compiler.
+MAX_ITEMS_CEILING = 20
+MAX_PROMPT_CHARS = 8_000
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
 _PROMPT_STOPWORDS = {
@@ -123,6 +128,15 @@ def compile_cursor_turn(
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> CursorTurnBrief:
     t0 = _time.perf_counter()
+
+    # Clamp inputs before use (tests-P1-2): a negative/zero max_items would
+    # mis-slice the ranked list; an oversized prompt would scan unbounded.
+    try:
+        max_items = max(1, min(int(max_items), MAX_ITEMS_CEILING))
+    except (TypeError, ValueError):
+        max_items = DEFAULT_MAX_ITEMS
+    if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+        prompt = prompt[:MAX_PROMPT_CHARS]
 
     prompt_tokens = _extract_prompt_tokens(prompt)
     cwd_project = _project_from_cwd(cwd)
