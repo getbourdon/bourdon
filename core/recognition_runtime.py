@@ -43,13 +43,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Optional
 
 from core.codex_context import filter_manifest_for_access
 from core.inference_protocol import InferenceBackend
+from core.recognition_contract import TOKEN_RE
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class RecognitionResult:
 # -- Entity detection (mirrors core.orchestrator but reads a manifest) --------
 
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_TOKEN_RE = TOKEN_RE  # shared recognition-contract tokenizer (single source)
 
 
 def _tokenize(s: str) -> list[str]:
