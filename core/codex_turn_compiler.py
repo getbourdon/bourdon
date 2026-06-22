@@ -20,12 +20,12 @@ from typing import Any
 
 import yaml
 
+from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from participants.codex import (
     _inspect_codex_state_db,
     _resolve_codex_home,
     _safe_native_memory_text,
 )
-from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 
 SCHEMA_VERSION = "codex-turn-brief/v1"
 STRATEGY = "turn_compiled"
@@ -64,8 +64,13 @@ _PROMPT_STOPWORDS = {
     "are",
     "as",
     "at",
+    "active",
+    "approved",
     "be",
+    "branch",
     "can",
+    "codex",
+    "did",
     "do",
     "for",
     "from",
@@ -73,26 +78,40 @@ _PROMPT_STOPWORDS = {
     "i",
     "is",
     "it",
+    "its",
     "keep",
     "like",
+    "make",
+    "made",
     "me",
     "new",
+    "no",
+    "now",
     "of",
+    "ok",
+    "okay",
     "on",
     "or",
     "please",
+    "pr",
     "remind",
+    "restart",
     "should",
     "tell",
+    "that",
     "the",
     "there",
+    "then",
     "to",
     "was",
     "we",
     "what",
     "whats",
     "with",
+    "work",
+    "worked",
     "working",
+    "yes",
 }
 
 
@@ -218,6 +237,7 @@ def compile_codex_turn(
     cwd_path = _resolve_cwd(cwd)
     cwd_text = str(cwd_path) if cwd_path else None
     repo = _detect_repo(cwd_path)
+    scoring_cwd = None if cwd_path and _is_home_like_cwd(cwd_path) else cwd_path
     resolved_codex_home = Path(codex_home) if codex_home else _resolve_codex_home()
     resolved_library = Path(library_path) if library_path else DEFAULT_LIBRARY_PATH
 
@@ -231,7 +251,7 @@ def compile_codex_turn(
         manifest,
         resolved_codex_home,
     )
-    scored = _score_candidates(candidates, prompt_text, cwd_path, repo)
+    scored = _score_candidates(candidates, prompt_text, scoring_cwd, repo)
     items = _rank_items(scored, item_limit)
     routing = _routing_decision(items, scored, repo, native_stage1)
     trace = _recognition_trace(items, scored, repo, native_stage1, routing)
@@ -305,9 +325,20 @@ def _detect_repo(cwd: Path | None) -> RepoIdentity:
         return RepoIdentity()
     root = _find_git_root(cwd)
     if root is None:
+        if _is_home_like_cwd(cwd):
+            return RepoIdentity()
         return RepoIdentity(name=cwd.name or None, root=None, remote=None)
     remote = _read_git_origin(root)
     return RepoIdentity(name=root.name, root=str(root), remote=remote)
+
+
+def _is_home_like_cwd(cwd: Path) -> bool:
+    try:
+        cwd_resolved = cwd.resolve(strict=False)
+        home_resolved = Path.home().resolve(strict=False)
+    except OSError:
+        return False
+    return cwd_resolved == home_resolved
 
 
 def _find_git_root(path: Path) -> Path | None:
@@ -424,6 +455,8 @@ def _gather_candidates(
         thread_name = str(record.get("thread_name") or "").strip()
         if not thread_name or thread_name == "(untitled)":
             continue
+        if _is_prompt_echo_thread(thread_name, prompt):
+            continue
         source = "codex_rollout" if record.get("has_rollout") else "codex_state"
         candidates.append(
             _Candidate(
@@ -533,6 +566,18 @@ def _collect_lightweight_session_records(
             }
         )
     return records
+
+
+def _is_prompt_echo_thread(thread_name: str, prompt: str) -> bool:
+    title_terms = _meaningful_prompt_terms(thread_name)
+    prompt_terms = _meaningful_prompt_terms(prompt)
+    if not prompt_terms:
+        return False
+    if title_terms == prompt_terms:
+        return True
+    if len(title_terms) <= len(prompt_terms) + 3:
+        return title_terms[-len(prompt_terms) :] == prompt_terms
+    return False
 
 
 def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:

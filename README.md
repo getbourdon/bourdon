@@ -146,10 +146,13 @@ This loads the L0 hot cache and any matching L1 synopses, then prints the fully-
 bourdon codex export --access-level team
 bourdon codex build-context --out-dir ./build/codex-context
 bourdon codex prepare-turn --memory-md "Can we keep working on Bourdon?"
+bourdon codex hook user-prompt-submit < hook-input.json
 bourdon codex eval --fixtures
 ```
 
 This generic Codex path is designed for org-wide distribution: local Codex memories stay `team` by default, public federation requires explicit promotion, and generated L0/L1 artifacts live separately from the repo's static Clyde examples.
+For live Codex CLI turns, wire the `UserPromptSubmit` hook from
+[`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md).
 
 ## Quick Start (Cross-Agent Recognition)
 
@@ -251,7 +254,7 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 | Clyde          | Native            | Planned   |
 | Clair          | Native            | Planned   |
 | Claude Code    | Native + Participant  | Export hook available |
-| Codex          | Moderate          | Fallback + prepare-turn available |
+| Codex          | Moderate          | Fallback + prepare-turn + CLI hook available |
 | Cursor         | SQLite            | Participant available; `bourdon cursor export` |
 | Cline          | Unknown           | Blocked pending native store path/schema |
 | Copilot        | Convention file   | Participant available; `bourdon copilot export` |

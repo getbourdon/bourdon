@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -1710,6 +1711,179 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
+    """Codex UserPromptSubmit hook: inject a bounded turn brief.
+
+    Hook handlers run inside the user's live turn. They must fail open: if the
+    hook input is malformed or Bourdon cannot compile a useful brief, Codex
+    should continue without recognition context.
+    """
+    raw_input = sys.stdin.read()
+    if not raw_input.strip():
+        return 0
+
+    try:
+        hook_payload = json.loads(raw_input)
+    except json.JSONDecodeError as exc:
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: invalid JSON: {exc}", file=sys.stderr)
+        return 0
+
+    if not isinstance(hook_payload, dict):
+        return 0
+
+    prompt = hook_payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return 0
+
+    hook_cwd = hook_payload.get("cwd")
+    cwd = hook_cwd if isinstance(hook_cwd, str) and hook_cwd.strip() else args.cwd
+
+    try:
+        brief = compile_codex_turn(
+            prompt,
+            cwd=cwd,
+            codex_home=getattr(args, "codex_home", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery="explicit",
+        )
+    except Exception as exc:  # noqa: BLE001 -- hook contract: degrade, never block
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: {exc}", file=sys.stderr)
+        return 0
+
+    brief_data = brief.to_dict()
+    explicit_text = _build_codex_hook_context(
+        brief_data,
+        max_chars=args.max_chars,
+    )
+    if brief_data["routing"].get("mode") != "inject" or not explicit_text:
+        return 0
+    if brief_data["routing"].get("confidence") == "low":
+        return 0
+
+    hook_response = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": explicit_text,
+        }
+    }
+    print(json.dumps(hook_response, indent=2, sort_keys=False))
+    return 0
+
+
+def _build_codex_hook_context(
+    brief_data: dict[str, Any],
+    *,
+    max_chars: int,
+) -> str:
+    """Render the live Codex hook context without debug metadata.
+
+    The full compiler text is useful in `compile-turn`, but a live
+    UserPromptSubmit hook is injected directly into the conversation. Keep it
+    recognition-shaped: one anchor, no scores, no trace reasons.
+    """
+    items = brief_data.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+
+    first_item = items[0]
+    if not isinstance(first_item, dict):
+        return ""
+
+    anchor = _condense_codex_hook_anchor(
+        str(first_item.get("name") or "anchor"),
+        str(first_item.get("summary") or "Recognition anchor."),
+    )
+    source_agents = first_item.get("source_agents")
+    source_text = ""
+    if isinstance(source_agents, list) and source_agents:
+        agent_names = [
+            str(agent)
+            for agent in source_agents[:2]
+            if isinstance(agent, str) and agent.strip()
+        ]
+        if agent_names:
+            source_text = f" Source: {', '.join(agent_names)}."
+
+    context = (
+        f"Bourdon recognition: {anchor}.{source_text}\n"
+        "Use as context only; answer the user directly."
+    )
+    char_limit = max(200, min(int(max_chars), 1_000))
+    if len(context) <= char_limit:
+        return context
+    return context[: char_limit - 3].rstrip() + "..."
+
+
+def _condense_codex_hook_anchor(name: str, summary: str) -> str:
+    name_text = _clean_hook_anchor_text(name)
+    summary_text = _clean_hook_anchor_text(summary)
+    combined_text = name_text
+    if summary_text and summary_text != name_text:
+        combined_text = f"{name_text}. {summary_text}" if name_text else summary_text
+
+    subject = _hook_anchor_subject(combined_text, name_text)
+    detail = _hook_anchor_detail(name_text, summary_text)
+    if subject and detail:
+        return f"{subject}: {detail}"
+    if subject and not detail:
+        return subject
+    if detail:
+        return detail
+    return _safe_native_memory_text(name_text or summary_text or "Recognition anchor", limit=180)
+
+
+def _clean_hook_anchor_text(value: str) -> str:
+    text = value.replace("**", "")
+    text = text.replace("`", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _hook_anchor_subject(combined_text: str, name_text: str) -> str:
+    if name_text and len(name_text) <= 60 and not _looks_like_sentence(name_text):
+        return _safe_native_memory_text(name_text, limit=60)
+
+    ignored_subjects = {
+        "Picked",
+        "Recognition",
+        "Recent",
+        "Source",
+        "Ry",
+    }
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]{2,}\b", combined_text):
+        candidate = match.group(0)
+        if candidate not in ignored_subjects and not re.fullmatch(r"C\d+[A-Za-z]?", candidate):
+            return _safe_native_memory_text(candidate, limit=60)
+    return ""
+
+
+def _looks_like_sentence(value: str) -> bool:
+    return "." in value or ";" in value or len(value.split()) > 6
+
+
+def _hook_anchor_detail(name_text: str, summary_text: str) -> str:
+    fallback = summary_text if summary_text and summary_text != name_text else name_text
+    detail = _first_informative_hook_clause(fallback)
+    return _safe_native_memory_text(detail, limit=170)
+
+
+def _first_informative_hook_clause(value: str) -> str:
+    for clause in re.split(r"(?:\. |- |; )", value):
+        text = clause.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("picked ") or lowered.startswith("ry chose"):
+            continue
+        return text
+    return ""
+
+
 def _fixture_participant() -> CodexParticipant:
     tmpdir = tempfile.TemporaryDirectory()
     sources = create_sample_codex_sources(Path(tmpdir.name) / "home")
@@ -3351,6 +3525,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     compile_turn_cmd.add_argument("--report-out")
     compile_turn_cmd.set_defaults(func=_handle_codex_compile_turn)
+
+    hook_cmd = codex_subparsers.add_parser(
+        "hook",
+        help="Codex CLI hook handlers",
+    )
+    hook_subparsers = hook_cmd.add_subparsers(dest="codex_hook_command")
+    user_prompt_hook_cmd = hook_subparsers.add_parser(
+        "user-prompt-submit",
+        help="Inject a Codex UserPromptSubmit recognition brief",
+    )
+    user_prompt_hook_cmd.add_argument("--cwd")
+    user_prompt_hook_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    user_prompt_hook_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    user_prompt_hook_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    user_prompt_hook_cmd.add_argument("--max-items", type=int, default=1)
+    user_prompt_hook_cmd.add_argument("--max-chars", type=int, default=500)
+    user_prompt_hook_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print hook diagnostic failures to stderr.",
+    )
+    user_prompt_hook_cmd.set_defaults(func=_handle_codex_hook_user_prompt_submit)
 
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()

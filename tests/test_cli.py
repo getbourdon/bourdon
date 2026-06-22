@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import sqlite3
@@ -11,7 +12,7 @@ import pytest
 import yaml
 
 import cli.main as cli_main
-from cli.main import main
+from cli.main import _build_codex_hook_context, main
 
 
 @pytest.fixture(autouse=True)
@@ -1044,6 +1045,271 @@ def test_cli_compile_turn_report_out_writes_requested_report(tmp_path, capsys):
     assert stdout_report["schema_version"] == "codex-turn-brief/v1"
     assert written_report["schema_version"] == "codex-turn-brief/v1"
     assert written_report["items"][0]["name"] == "Bourdon"
+
+
+def test_cli_codex_hook_user_prompt_submit_injects_additional_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    hook_output = response["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "UserPromptSubmit"
+    additional_context = hook_output["additionalContext"]
+    assert "Bourdon recognition:" in additional_context
+    assert "Bourdon" in additional_context
+    assert "Bourdon turn recognition brief" not in additional_context
+    assert "Why:" not in additional_context
+    assert "score" not in additional_context
+    assert len(additional_context) <= 500
+
+
+def test_cli_compile_turn_keeps_verbose_debug_brief(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+
+    exit_code = main(
+        [
+            "codex",
+            "compile-turn",
+            "Do you know what Bourdon is?",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    explicit_text = report["delivery"]["explicit_text"]
+    assert "Bourdon turn recognition brief" in explicit_text
+    assert "Why:" in explicit_text
+
+
+def test_codex_hook_context_condenses_long_session_anchor():
+    long_marvin_anchor = (
+        'Picked Marvin back up (brain was built+validated; remaining all hands-on). '
+        'Ry chose "C1b wiring (no keys needed)". - **`make_servers()`** now '
+        '**env-gated per service** (`code/pipecat_app.py`): Mercury (stdio '
+        '`npx @toolsdk.ai/mcp-mercury`, read-only key).'
+    )
+
+    context = _build_codex_hook_context(
+        {
+            "items": [
+                {
+                    "name": long_marvin_anchor,
+                    "summary": long_marvin_anchor,
+                    "source_agents": ["claude-code"],
+                }
+            ]
+        },
+        max_chars=500,
+    )
+
+    # General condensation contract (no content-specific heuristics):
+    # extract a subject anchor, attach a source line, drop the low-value
+    # "Picked ..." lead clause, and stay within the live-cue length bound.
+    assert context.startswith("Bourdon recognition: Marvin:")
+    assert "Source: claude-code." in context
+    assert "Picked Marvin back up" not in context
+    assert context.rstrip().endswith("Use as context only; answer the user directly.")
+    assert len(context) <= 260
+
+
+def test_cli_codex_hook_user_prompt_submit_skips_when_no_anchor(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "What is the weather in Seattle?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_skips_low_confidence_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Platform Launch",
+                "type": "project",
+                "summary": "Low-confidence single-token overlap.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "launch",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_malformed_json_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_compiler_error_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+            "--max-chars",
+            "10",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
