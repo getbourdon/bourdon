@@ -511,8 +511,11 @@ def test_compile_turn_routes_high_confidence_brief_to_explicit_and_mcp(tmp_path)
         ],
     )
 
+    # Exact-name prompt -> EXACT match tier -> "high" under the shared tier-driven
+    # confidence (parity stage 4). A named mention inside a longer prompt is
+    # NAME_SUBSTRING -> "medium"; only a bare exact match is "high" now.
     brief = compile_codex_turn(
-        "Bourdon recognition orchestration",
+        "Bourdon",
         library_path=library,
         codex_home=_codex_home_with_stage1(tmp_path, degraded=True),
     )

@@ -231,6 +231,21 @@ def normalized_confidence(
 # ---------------------------------------------------------------------------
 
 
+def recognition_confidence(prompt: str, names: list[str]) -> ConfidenceBucket:
+    """The shared confidence bucket for a recognized anchor.
+
+    Driven SOLELY by the strongest match tier across the anchor's name + aliases
+    — the one signal every engine computes identically (post match_tier wiring).
+    So all surfaces emit the SAME bucket for the same (prompt, anchor), which is
+    what closes the last cross-engine divergence (codex/cursor/runtime previously
+    bucketed on three different raw scales; runtime emitted none at all). Engine-
+    specific signals (recency, cross-agent, cwd) still drive RANKING; they do not
+    move the emitted bucket, because the other surfaces can't see them and parity
+    requires equality.
+    """
+    return normalized_confidence(best_match_tier(prompt, names))
+
+
 def top_anchor_key(tier: MatchTier, recency_ordinal: int, name: str, source: str) -> tuple:
     """Sort key for selecting the top anchor: strongest tier, then most recent,
     then name ascending, then source ascending. Negate the descending fields so
