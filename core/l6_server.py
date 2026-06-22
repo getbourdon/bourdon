@@ -89,6 +89,21 @@ if TYPE_CHECKING:
 _CONTEXT_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS
 
 
+def _normalized_legacy_token() -> str | None:
+    """The legacy shared peer token, with empty/whitespace normalized to None.
+
+    A set-but-empty ``BOURDON_PEER_TOKEN_SERVER`` (a routine .env slip) must be
+    treated as "no token" EVERYWHERE — both the startup gate and the per-request
+    auth (3-Star audit P1-1). Otherwise the dispatch sees a truthy-but-empty
+    token, skips the fail-closed 503, and ``hmac.compare_digest(b"", b"")`` makes
+    any caller presenting an empty ``Bearer`` token the trusted OPERATOR.
+    """
+    value = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    if value is not None and not value.strip():
+        return None
+    return value
+
+
 def _require_fastmcp():
     """Import fastmcp lazily so importing this module doesn't require it."""
     try:
@@ -1149,7 +1164,7 @@ def _build_auth_middleware(registry: FederationRegistry):
     ``--allow-unauthenticated``, every request gets 503 — fail closed.
     Token material never appears in any log or response body.
     """
-    legacy = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    legacy = _normalized_legacy_token()
 
     try:
         from starlette.middleware.base import BaseHTTPMiddleware
@@ -1175,7 +1190,10 @@ def _build_auth_middleware(registry: FederationRegistry):
                 return JSONResponse({"error": "missing Bearer token"}, status_code=401)
             token = header.split(" ", 1)[1].strip()
             identity: AgentIdentity | None = None
-            if legacy is not None and hmac.compare_digest(
+            # Require BOTH a configured legacy token and a non-empty presented
+            # token before the constant-time compare, so an empty Bearer can
+            # never match (defense in depth alongside the normalization above).
+            if legacy and token and hmac.compare_digest(
                 token.encode("utf-8"), legacy.encode("utf-8")
             ):
                 identity = OPERATOR
@@ -1272,7 +1290,7 @@ def run_l6_server(
 
     if registry is None:
         registry = FederationRegistry()
-    auth_configured = bool(os.environ.get("BOURDON_PEER_TOKEN_SERVER")) or (
+    auth_configured = _normalized_legacy_token() is not None or (
         registry.has_active_agents()
     )
     if not _is_loopback_host(host):

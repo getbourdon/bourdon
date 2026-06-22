@@ -1714,11 +1714,37 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
 def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
     """Codex UserPromptSubmit hook: inject a bounded turn brief.
 
-    Hook handlers run inside the user's live turn. They must fail open: if the
-    hook input is malformed or Bourdon cannot compile a useful brief, Codex
-    should continue without recognition context.
+    Hook handlers run inside the user's live turn. They MUST fail open: any
+    failure — malformed input, non-UTF-8 stdin (common on Windows code pages),
+    a compiler error, or a post-processing raise — degrades to "no recognition
+    context", never a traceback into the user's turn. The entire body is wrapped
+    so the contract holds end to end (3-Star audit P0/P1: the stdin read and the
+    to_dict()/routing/print tail previously ran outside the guard).
     """
-    raw_input = sys.stdin.read()
+    try:
+        return _codex_hook_user_prompt_submit_impl(args)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: degrade, never block
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: {exc}", file=sys.stderr)
+        return 0
+
+
+def _read_hook_stdin() -> str:
+    """Read hook stdin without ever raising on encoding.
+
+    Real consoles hand us a byte stream whose code page may not be UTF-8
+    (cp932/cp936/cp1252 on Windows); decode with errors='replace' so a non-ASCII
+    prompt can never raise UnicodeDecodeError into the live turn. Test harnesses
+    inject an ``io.StringIO`` (no ``.buffer``); fall back to a text read there.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        return buffer.read().decode("utf-8", "replace")
+    return sys.stdin.read()
+
+
+def _codex_hook_user_prompt_submit_impl(args: argparse.Namespace) -> int:
+    raw_input = _read_hook_stdin()
     if not raw_input.strip():
         return 0
 

@@ -457,6 +457,34 @@ def test_run_l6_server_http_default_binds_loopback_only(monkeypatch):
     assert server.calls == []  # never falls back to server.run(transport=http)
 
 
+def test_normalized_legacy_token_treats_empty_as_unset(monkeypatch):
+    """3-Star audit P1-1: a set-but-empty BOURDON_PEER_TOKEN_SERVER must be
+    treated as 'no token' so it cannot authenticate an empty Bearer as OPERATOR
+    nor make the server believe auth is configured."""
+    for empty in ("", "   ", "\t\n"):
+        monkeypatch.setenv("BOURDON_PEER_TOKEN_SERVER", empty)
+        assert server_module._normalized_legacy_token() is None
+    monkeypatch.setenv("BOURDON_PEER_TOKEN_SERVER", "shh-real-token")
+    assert server_module._normalized_legacy_token() == "shh-real-token"
+    monkeypatch.delenv("BOURDON_PEER_TOKEN_SERVER", raising=False)
+    assert server_module._normalized_legacy_token() is None
+
+
+def test_run_l6_server_http_nonloopback_empty_token_refuses_to_start(monkeypatch):
+    """An empty BOURDON_PEER_TOKEN_SERVER on a non-loopback bind must NOT count
+    as configured auth — the server refuses to start (P1-1)."""
+    pytest.importorskip("uvicorn")
+    monkeypatch.setenv("BOURDON_PEER_TOKEN_SERVER", "")
+    called: dict = {}
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: called.update(ran=True))
+    server = _RecordingServer()
+    with pytest.raises(SystemExit):
+        server_module.run_l6_server(
+            server, transport="http", host="0.0.0.0", allow_unauthenticated=False
+        )
+    assert "ran" not in called
+
+
 def test_run_l6_server_http_nonloopback_without_auth_refuses_to_start(monkeypatch):
     """v0.9.0 negative test: 0.0.0.0 with no auth configured must exit
     non-zero at startup — not serve and 503 per request."""
