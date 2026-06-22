@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import shutil
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from core.redaction import SENSITIVE_PATTERNS, redact_text
+
+logger = logging.getLogger(__name__)
 
 _SENSITIVE_PATTERNS = SENSITIVE_PATTERNS  # back-compat alias for the SSOT
 
@@ -172,16 +175,34 @@ def _iter_state_dbs(root: Path) -> tuple[Path, ...]:
 def _read_item_table(db_path: Path) -> tuple[list[tuple[str, Any]], int]:
     records: list[tuple[str, Any]] = []
     malformed_records = 0
-    with tempfile.TemporaryDirectory() as temp_dir:
-        db_copy = Path(temp_dir) / "state.vscdb"
-        shutil.copy2(db_path, db_copy)
-        connection = sqlite3.connect(f"file:{db_copy}?mode=ro", uri=True)
-        try:
-            if not _has_item_table(connection):
-                return records, malformed_records
-            rows = connection.execute("SELECT key, value FROM ItemTable").fetchall()
-        finally:
-            connection.close()
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_copy = Path(temp_dir) / "state.vscdb"
+            shutil.copy2(db_path, db_copy)
+            # Copy the WAL/SHM companions too so a LIVE (WAL-mode) Cursor DB is
+            # read as a consistent snapshot, not a stale/torn view that misses
+            # the most recent writes (3-Star audit part-P1-2). Companions are
+            # absent for a cleanly-closed DB. Open the private copy read-write
+            # (not ro) so SQLite folds the WAL into it on connect.
+            for suffix in ("-wal", "-shm"):
+                companion = db_path.with_name(db_path.name + suffix)
+                if companion.is_file():
+                    shutil.copy2(companion, db_copy.with_name(db_copy.name + suffix))
+            connection = sqlite3.connect(str(db_copy))
+            try:
+                if not _has_item_table(connection):
+                    return records, malformed_records
+                rows = connection.execute(
+                    "SELECT key, value FROM ItemTable"
+                ).fetchall()
+            finally:
+                connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        # Locked (Windows holds a write lock on a live DB), corrupt, or
+        # otherwise unreadable — skip this DB, never crash the whole export
+        # (3-Star audit part-P1-1). The caller still records it as scanned.
+        logger.warning("cursor: cannot read %s (%s); skipping", db_path, exc)
+        return records, malformed_records
 
     for key, raw_value in rows:
         try:
