@@ -1101,7 +1101,7 @@ def test_find_entity_and_recognition_manifest_agree_on_row_count(library):
 
 def test_resolve_access_level_env_var_flips_default(monkeypatch):
     """BOURDON_DEFAULT_ACCESS_LEVEL=team flips the default for single-user
-    federations so adapters that tag entities `team` aren't silently
+    federations so participants that tag entities `team` aren't silently
     filtered from naive queries."""
     from core.l6_store import _resolve_access_level
 
@@ -1185,3 +1185,151 @@ def test_commit_l5_sessions_sorted_newest_first_after_write(library):
     manifest = store.get_agent_manifest("agent-x", access_level="team")
     dates = [s["date"] for s in manifest["recent_sessions"]]
     assert dates == sorted(dates, reverse=True)
+
+
+# -- Issue #134: merge vs scalar-typed list fields -------------------------------
+
+
+def test_commit_l5_merge_coerces_existing_string_list_field(library):
+    """Repro for #134: a reader-exported manifest carries ``project_focus``
+    as a bare string; a commit colliding on (date, cwd) must merge, not
+    crash with 'str' object has no attribute 'append'."""
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-09T00:00:00+00:00",
+            "recent_sessions": [
+                {
+                    "date": "2026-06-09",
+                    "cwd": "/repo",
+                    "project_focus": "Bourdon",  # scalar, not a list
+                }
+            ],
+            "known_entities": [],
+        },
+    )
+    store = L6Store(library["path"])
+    result = store.commit_l5(
+        "claude-code",
+        sessions=[
+            {
+                "date": "2026-06-09",
+                "cwd": "/repo",
+                "project_focus": ["Phase 3"],
+                "key_actions": ["closed the loop"],
+            }
+        ],
+    )
+    assert result["sessions_updated"] == 1
+    manifest = store.get_agent_manifest("claude-code", include_private=True)
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["Bourdon", "Phase 3"]
+    assert session["key_actions"] == ["closed the loop"]
+
+
+def test_commit_l5_merge_coerces_incoming_string_list_field(library):
+    """The incoming side of the union must coerce too — iterating a bare
+    string would otherwise union its CHARACTERS (silent corruption)."""
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop-chat",
+        agent_type="other",
+        sessions=[{"date": "2026-06-09", "cwd": "/x", "project_focus": ["A"]}],
+    )
+    store.commit_l5(
+        "claude-desktop-chat",
+        sessions=[{"date": "2026-06-09", "cwd": "/x", "project_focus": "Bourdon"}],
+    )
+    manifest = store.get_agent_manifest("claude-desktop-chat", include_private=True)
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["A", "Bourdon"]  # not [..., "B","o","u",...]
+
+
+def test_commit_l5_merge_coerces_entity_string_tags(library):
+    """Same coercion for entity list fields (tags / aliases)."""
+    library["write"](
+        "claude-code",
+        {
+            "spec_version": "0.1",
+            "agent": {"id": "claude-code", "type": "code-assistant"},
+            "last_updated": "2026-06-09T00:00:00+00:00",
+            "recent_sessions": [],
+            "known_entities": [
+                {"name": "Bourdon", "type": "project", "tags": "federation"}
+            ],
+        },
+    )
+    store = L6Store(library["path"])
+    result = store.commit_l5(
+        "claude-code",
+        entities=[{"name": "Bourdon", "tags": ["phase-3"]}],
+    )
+    assert result["entities_updated"] == 1
+    manifest = store.get_agent_manifest("claude-code", include_private=True)
+    (entity,) = manifest["known_entities"]
+    assert entity["tags"] == ["federation", "phase-3"]
+
+
+def test_commit_l5_add_normalizes_string_list_fields(library):
+    """Freshly ADDED rows (no dedupe collision) store list fields as lists
+    even when the caller passed a scalar, so manifests land schema-clean
+    for every consumer — not just the merge union (#134 follow-up)."""
+    store = L6Store(library["path"])
+    store.commit_l5(
+        "claude-desktop",
+        agent_type="code-assistant",
+        sessions=[
+            {
+                "date": "2026-06-09",
+                "cwd": "/tmp/foo",
+                "project_focus": "solo-string",  # scalar in, list out
+            }
+        ],
+        entities=[{"name": "Bourdon", "tags": "memory"}],
+    )
+
+    manifest = store.get_agent_manifest("claude-desktop", access_level="team")
+    (session,) = manifest["recent_sessions"]
+    assert session["project_focus"] == ["solo-string"]
+    (entity,) = manifest["known_entities"]
+    assert entity["tags"] == ["memory"]
+
+
+def test_commit_l5_concurrent_merges_do_not_drop_contributions(tmp_path):
+    """3-Star audit P1-3: concurrent commits to the same agent (the server runs
+    sync tools in a threadpool) must not drop each other's rows. Without the
+    per-store lock the read-modify-write-reload races and loses contributions."""
+    import threading
+
+    store = L6Store(tmp_path / "lib")
+    store.commit_l5("codex", agent_type="code-assistant", entities=[{"name": "seed"}])
+
+    n = 16
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            barrier.wait()  # maximize contention
+            store.commit_l5(
+                "codex",
+                entities=[{"name": f"ent{i}"}],
+                sessions=[{"date": f"2026-06-{(i % 28) + 1:02d}", "cwd": f"/p/{i}"}],
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"commit raised under concurrency: {errors[:3]}"
+    store.reload_agent("codex")
+    names = {e["name"] for e in store._manifests["codex"]["known_entities"]}
+    missing = [f"ent{i}" for i in range(n) if f"ent{i}" not in names]
+    assert not missing, f"lost contributions under concurrency: {missing}"
+    assert "seed" in names

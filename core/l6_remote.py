@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _PEER_TOOL_NAMES = {
     "list_agents",
+    "export_agents",
     "query_agent_memory",
     "list_recent_work",
     "find_entity",
@@ -139,14 +140,34 @@ class RemoteL6Client:
         return None
 
     # ----------------------------------------------------- mirrored query API
+    #
+    # Every fan-out-capable query sends ``federation_hop: 1`` so the peer
+    # answers from its LOCAL store only. Federation is depth-1 by contract:
+    # without this, bidirectional peering (A lists B, B lists A) recurses
+    # until fd exhaustion — see issue #139.
 
     async def list_agents(self) -> list[str]:
-        result = await self._call_tool("list_agents", {})
+        result = await self._call_tool("list_agents", {"federation_hop": 1})
         if isinstance(result, list):
             return [str(a) for a in result if isinstance(a, str)]
         if isinstance(result, dict) and isinstance(result.get("agents"), list):
             return [str(a) for a in result["agents"] if isinstance(a, str)]
         return []
+
+    async def export_agents(self) -> dict | None:
+        """Fetch this peer's LOCAL agent export (``bourdon.agents/v1``).
+
+        Returns the peer's raw ``{"schema", "machine", "agents": [...]}`` dict.
+        On any failure -- network, peer down, or a peer too old to expose the
+        ``export_agents`` tool -- returns ``None`` so the caller can mark the
+        peer unreachable instead of crashing. The caller is responsible for
+        re-tagging each returned agent's ``source`` with this peer's name; the
+        peer's self-reported ``machine`` / per-agent ``source`` is never trusted
+        (prevents a peer from spoofing another machine's attribution or echoing
+        agents back as its own).
+        """
+        result = await self._call_tool("export_agents", {})
+        return result if isinstance(result, dict) else None
 
     async def find_entity(
         self,
@@ -158,8 +179,11 @@ class RemoteL6Client:
             "find_entity",
             {
                 "name": name,
-                "access_level": access_level,
-                "include_private": include_private,
+                # Never ask a peer for PRIVATE (3-Star audit P1-2); the peer also
+                # clamps on ingress, this is defense in depth.
+                "access_level": access_level if access_level in ("public", "team") else "team",
+                "include_private": False,
+                "federation_hop": 1,
             },
         )
         if isinstance(result, list):
@@ -179,9 +203,10 @@ class RemoteL6Client:
         summary: bool = False,
     ) -> dict:
         args: dict[str, Any] = {
-            "access_level": access_level,
-            "include_private": include_private,
+            "access_level": access_level if access_level in ("public", "team") else "team",
+            "include_private": False,  # never ask a peer for PRIVATE (P1-2)
             "summary": summary,
+            "federation_hop": 1,
         }
         if since is not None:
             args["since"] = since
@@ -206,8 +231,9 @@ class RemoteL6Client:
             "get_cross_agent_summary",
             {
                 "project": project,
-                "access_level": access_level,
-                "include_private": include_private,
+                "access_level": access_level if access_level in ("public", "team") else "team",
+                "include_private": False,  # never ask a peer for PRIVATE (P1-2)
+                "federation_hop": 1,
             },
         )
         return result if isinstance(result, dict) else {}
@@ -224,6 +250,7 @@ class RemoteL6Client:
                 "prompt": prompt,
                 "access_level": access_level,
                 "include_private": include_private,
+                "federation_hop": 1,
             },
         )
         return result if isinstance(result, dict) else {}

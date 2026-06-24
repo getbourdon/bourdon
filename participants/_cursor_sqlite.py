@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import platform
+import shutil
+import sqlite3
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from core.redaction import SENSITIVE_PATTERNS, redact_text
+
+logger = logging.getLogger(__name__)
+
+_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS  # back-compat alias for the SSOT
+
+
+def _scrub_text(value: str, limit: int = 256) -> str:
+    """Redact credential-like content and cap length (redaction SSOT)."""
+    return redact_text(value, limit=limit)
+
+
+@dataclass(frozen=True)
+class CursorSessionMemory:
+    date: str
+    cwd: str
+    key_actions: tuple[str, ...]
+    files_touched: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CursorEntityMemory:
+    name: str
+    entity_type: str
+    aliases: tuple[str, ...]
+    summary: str
+    tags: tuple[str, ...]
+    last_updated: str = ""
+
+
+@dataclass(frozen=True)
+class CursorSQLiteMemories:
+    sessions: tuple[CursorSessionMemory, ...]
+    entities: tuple[CursorEntityMemory, ...]
+    databases_scanned: tuple[str, ...]
+    malformed_records: int
+
+
+def default_cursor_dir() -> Path | None:
+    env_override = os.environ.get("CURSOR_DIR")
+    if env_override:
+        return Path(env_override)
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "Cursor"
+    if system == "Linux":
+        return Path.home() / ".config" / "Cursor"
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        return Path(appdata) / "Cursor" if appdata else None
+    return None
+
+
+def extract_cursor_memories(cursor_dir: Path | None = None) -> CursorSQLiteMemories:
+    root = cursor_dir or default_cursor_dir()
+    if root is None or not root.is_dir():
+        return CursorSQLiteMemories((), (), (), 0)
+
+    sessions: list[CursorSessionMemory] = []
+    entities_by_name: dict[str, CursorEntityMemory] = {}
+    databases_scanned: list[str] = []
+    malformed_records = 0
+    project_latest: dict[str, str] = {}
+
+    for db_path in _iter_state_dbs(root):
+        databases_scanned.append(str(db_path))
+        records, bad_records = _read_item_table(db_path)
+        malformed_records += bad_records
+        for key, value in records:
+            parsed_session = _record_to_session(key, value)
+            if parsed_session is None:
+                continue
+            sessions.append(parsed_session)
+            project_name = _project_name(parsed_session.cwd)
+            if project_name:
+                prev = project_latest.get(project_name, "")
+                if project_name not in project_latest or (
+                    parsed_session.date and parsed_session.date > prev
+                ):
+                    project_latest[project_name] = parsed_session.date
+                existing = entities_by_name.get(project_name)
+                aliases = {parsed_session.cwd} if parsed_session.cwd else set()
+                if existing:
+                    aliases = set(existing.aliases) | aliases
+                entities_by_name[project_name] = CursorEntityMemory(
+                    name=_scrub_text(project_name, limit=120),
+                    entity_type="project",
+                    aliases=tuple(sorted(aliases)),
+                    summary=_scrub_text(
+                        f"Cursor workspace inferred from {parsed_session.cwd}.",
+                    ),
+                    tags=("cursor", "workspace", "sqlite"),
+                    last_updated=project_latest.get(project_name, ""),
+                )
+
+    _add_topic_entities(sessions, entities_by_name)
+    sessions.sort(key=lambda session: session.date, reverse=True)
+    return CursorSQLiteMemories(
+        sessions=tuple(sessions),
+        entities=tuple(entities_by_name.values()),
+        databases_scanned=tuple(databases_scanned),
+        malformed_records=malformed_records,
+    )
+
+
+_TOPIC_MIN_MENTIONS = 3
+
+
+def _add_topic_entities(
+    sessions: list[CursorSessionMemory],
+    entities: dict[str, CursorEntityMemory],
+) -> None:
+    """Extract recurring topic entities from session key_actions."""
+    word_counts: dict[str, int] = {}
+    word_latest: dict[str, str] = {}
+    stopwords = {
+        "the", "and", "for", "with", "this", "that", "from", "have", "will",
+        "are", "was", "been", "not", "but", "all", "can", "has", "its",
+        "add", "use", "set", "get", "new", "fix", "run", "now", "also",
+        "into", "make", "just", "like", "need", "want", "work", "code",
+        "file", "test", "data", "type", "should", "would", "could",
+    }
+    for session in sessions:
+        for action in session.key_actions:
+            words = set()
+            for token in action.lower().split():
+                cleaned = token.strip(".,;:!?\"'`()[]{}#-/")
+                if len(cleaned) >= 4 and cleaned not in stopwords and cleaned.isalpha():
+                    words.add(cleaned)
+            for word in words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+                if session.date and (
+                    word not in word_latest or session.date > word_latest[word]
+                ):
+                    word_latest[word] = session.date
+
+    for word, count in word_counts.items():
+        if count >= _TOPIC_MIN_MENTIONS and word not in entities:
+            entities[word] = CursorEntityMemory(
+                name=word,
+                entity_type="topic",
+                aliases=(),
+                summary=f"Recurring topic across {count} Cursor sessions.",
+                tags=("cursor", "topic", "inferred"),
+                last_updated=word_latest.get(word, ""),
+            )
+
+
+def _iter_state_dbs(root: Path) -> tuple[Path, ...]:
+    candidates = [
+        root / "state.vscdb",
+        root / "User" / "globalStorage" / "state.vscdb",
+    ]
+    workspace_storage = root / "User" / "workspaceStorage"
+    if workspace_storage.is_dir():
+        for child in sorted(workspace_storage.iterdir()):
+            candidates.append(child / "state.vscdb")
+    return tuple(path for path in candidates if path.is_file())
+
+
+def _read_item_table(db_path: Path) -> tuple[list[tuple[str, Any]], int]:
+    records: list[tuple[str, Any]] = []
+    malformed_records = 0
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_copy = Path(temp_dir) / "state.vscdb"
+            shutil.copy2(db_path, db_copy)
+            # Copy the WAL/SHM companions too so a LIVE (WAL-mode) Cursor DB is
+            # read as a consistent snapshot, not a stale/torn view that misses
+            # the most recent writes (3-Star audit part-P1-2). Companions are
+            # absent for a cleanly-closed DB. Open the private copy read-write
+            # (not ro) so SQLite folds the WAL into it on connect.
+            for suffix in ("-wal", "-shm"):
+                companion = db_path.with_name(db_path.name + suffix)
+                if companion.is_file():
+                    shutil.copy2(companion, db_copy.with_name(db_copy.name + suffix))
+            connection = sqlite3.connect(str(db_copy))
+            try:
+                if not _has_item_table(connection):
+                    return records, malformed_records
+                rows = connection.execute(
+                    "SELECT key, value FROM ItemTable"
+                ).fetchall()
+            finally:
+                connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        # Locked (Windows holds a write lock on a live DB), corrupt, or
+        # otherwise unreadable — skip this DB, never crash the whole export
+        # (3-Star audit part-P1-1). The caller still records it as scanned.
+        logger.warning("cursor: cannot read %s (%s); skipping", db_path, exc)
+        return records, malformed_records
+
+    for key, raw_value in rows:
+        try:
+            value = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            malformed_records += 1
+            continue
+        records.append((str(key), value))
+    return records, malformed_records
+
+
+def _has_item_table(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ItemTable'"
+    ).fetchone()
+    return row is not None
+
+
+def _record_to_session(key: str, value: Any) -> CursorSessionMemory | None:
+    if not _looks_like_composer_record(key, value):
+        return None
+    if not isinstance(value, dict):
+        return None
+
+    cwd = _first_string(value, ("workspacePath", "workspace", "cwd", "folder", "rootPath"))
+    if not cwd and isinstance(value.get("workspace"), dict):
+        cwd = _first_string(value["workspace"], ("path", "folder", "cwd"))
+    if not cwd:
+        cwd = ""
+
+    action = _first_string(value, ("title", "text", "prompt", "summary", "name"))
+    if not action:
+        action = _first_message_text(value.get("messages"))
+    if not action:
+        return None
+
+    date = _date_from_record(value)
+    files_touched = tuple(_extract_files(value))
+    return CursorSessionMemory(
+        date=date,
+        cwd=cwd,
+        key_actions=(_scrub_text(action),),
+        files_touched=files_touched,
+    )
+
+
+def _looks_like_composer_record(key: str, value: Any) -> bool:
+    lowered_key = key.lower()
+    if "composer" in lowered_key or "aichat" in lowered_key or "chat" in lowered_key:
+        return True
+    if isinstance(value, dict):
+        joined_keys = " ".join(value.keys()).lower()
+        return "message" in joined_keys and ("workspace" in joined_keys or "file" in joined_keys)
+    return False
+
+
+def _first_string(value: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _first_message_text(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content") or message.get("text")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return ""
+
+
+def _date_from_record(value: dict[str, Any]) -> str:
+    for key in ("createdAt", "timestamp", "updatedAt", "lastUpdatedAt", "time"):
+        candidate = value.get(key)
+        parsed = _parse_date(candidate)
+        if parsed:
+            return parsed
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _parse_date(value: Any) -> str:
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).date().isoformat()
+        except ValueError:
+            return ""
+    if isinstance(value, int | float):
+        timestamp = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return ""
+
+
+def _extract_files(value: dict[str, Any]) -> list[str]:
+    files: list[str] = []
+    for key in ("files", "filePaths", "filesTouched", "references"):
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            files.extend(_strings_from_list(candidate))
+    for message in value.get("messages", []):
+        if isinstance(message, dict):
+            files.extend(_extract_files(message))
+    return _dedupe(files)
+
+
+def _strings_from_list(values: list[Any]) -> list[str]:
+    strings: list[str] = []
+    for item in values:
+        if isinstance(item, str) and item.strip():
+            strings.append(item.strip())
+        elif isinstance(item, dict):
+            path = _first_string(item, ("path", "file", "uri", "relativePath"))
+            if path:
+                strings.append(path)
+    return strings
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            deduped.append(value)
+    return deduped
+
+
+def _project_name(cwd: str) -> str:
+    if not cwd:
+        return ""
+    name = Path(cwd).name.strip()
+    return name if name and name not in {".", "/"} else ""

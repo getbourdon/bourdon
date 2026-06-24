@@ -8,7 +8,7 @@ The flow:
 2. Ensure ``~/agent-library/`` exists.
 3. For Claude Code specifically, offer to wire a SessionEnd hook that runs
    ``bourdon claude-code export`` so manifests stay fresh automatically.
-4. For Copilot / Cascade convention-file adapters, offer to initialize the
+4. For Copilot / Cascade convention-file participants, offer to initialize the
    memory file template.
 5. For Codex specifically, offer to run ``sync-native --from-library --memory-md --write``
    immediately so the user can see federation content in Codex on their next turn.
@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from participants import discover_participants
+
 
 # ---------------------------------------------------------------------------
 # Agent detection
@@ -48,25 +50,40 @@ class AgentDetection:
     hint_path: Path  # where we looked; useful when present=False
 
 
+def _humanize(agent_id: str) -> str:
+    """Derive a display label from an agent id (``"claude-code" -> "Claude Code"``)."""
+    return agent_id.replace("-", " ").replace("_", " ").title()
+
+
 def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
     """Inspect the user's home directory for known agent paths.
 
-    Returns a list ordered so the "most common to wire" agents appear first.
-    Detection is filesystem-only (no shelling out, no PATH lookups), which
-    keeps the wizard fast and predictable.
+    The agent set is derived from :func:`participants.discover_participants` (a
+    scan of the ``participants/`` package), so dropping in a new top-level
+    participant module makes it appear here with no edits. ``-automations``
+    sub-surfaces are excluded: the wizard wires the *parent* agent and the
+    automations export/observe surface comes with it.
+
+    Each agent's label comes from its optional ``display_name`` class attribute,
+    falling back to a humanized id. Its detection path comes from the
+    participant's ``default_native_path(home)``. The result is sorted by agent
+    id, which is deterministic and stable across machines.
+
+    Detection is filesystem-only (no shelling out, no PATH lookups), which keeps
+    the wizard fast and predictable.
     """
     h = home or Path.home()
-    candidates = [
-        ("claude-code", "Claude Code", h / ".claude"),
-        ("codex", "Codex", h / ".codex"),
-        ("cursor", "Cursor", h / ".cursor"),
-        ("copilot", "GitHub Copilot", h / ".copilot-bourdon"),
-        ("cascade", "Cascade (Windsurf)", h / ".cascade-bourdon"),
-    ]
-    return [
-        AgentDetection(id=aid, label=label, present=path.exists(), hint_path=path)
-        for aid, label, path in candidates
-    ]
+    detections: list[AgentDetection] = []
+    for agent_id, cls in discover_participants():
+        if agent_id.endswith("-automations"):
+            continue
+        label = getattr(cls, "display_name", None) or _humanize(agent_id)
+        native = getattr(cls, "default_native_path", None)
+        path = native(h) if native is not None else h / f".{agent_id}"
+        detections.append(
+            AgentDetection(id=agent_id, label=label, present=path.exists(), hint_path=path)
+        )
+    return detections
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +239,7 @@ def init_copilot_memory_if_missing(
 
     Returns the file path if created, None if already present.
     """
-    from adapters.copilot import default_copilot_bourdon_dir, init_memory_file
+    from participants.copilot import default_copilot_bourdon_dir, init_memory_file
 
     h = home or Path.home()
     target_dir = default_copilot_bourdon_dir() if not home else h / ".copilot-bourdon"
@@ -240,7 +257,7 @@ def init_cascade_memory_if_missing(
     home: Optional[Path] = None,
 ) -> Optional[Path]:
     """Create ``~/.cascade-bourdon/memory.md`` template if missing."""
-    from adapters.cascade import default_cascade_dir, init_memory_file as cascade_init
+    from participants.cascade import default_cascade_dir, init_memory_file as cascade_init
 
     h = home or Path.home()
     target_dir = default_cascade_dir() if not home else h / ".cascade-bourdon"
@@ -250,6 +267,27 @@ def init_cascade_memory_if_missing(
     if dry_run:
         return target
     return cascade_init(cascade_dir=target_dir, force=False)
+
+
+def init_cursor_automations_if_missing(
+    *,
+    dry_run: bool = False,
+    home: Path | None = None,
+) -> Path | None:
+    """Create ``~/.cursor/automations/cursor-cloud-agent/`` starter if missing."""
+    from participants.cursor_automations import (
+        default_cursor_automations_dir,
+        init_automations_dir,
+    )
+
+    h = home or Path.home()
+    base = default_cursor_automations_dir() if not home else h / ".cursor" / "automations"
+    target = base / "cursor-cloud-agent"
+    if target.is_dir():
+        return None
+    if dry_run:
+        return target
+    return init_automations_dir(automations_dir=base, automation_id="cursor-cloud-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +302,7 @@ class SetupChoices:
     wire_claude_code_hook: bool = True
     init_copilot: bool = False
     init_cascade: bool = False
+    init_cursor_automations: bool = True
     run_codex_sync: bool = True
     run_initial_export: bool = True
 
@@ -273,11 +312,12 @@ class SetupOutcome:
     """What the wizard actually did. Each field is a one-line summary."""
     detected: list[AgentDetection]
     library_created: bool
-    claude_code_hook_wired: Optional[bool] = None  # None = skipped
-    copilot_init: Optional[Path] = None
-    cascade_init: Optional[Path] = None
-    codex_sync_ran: Optional[bool] = None  # None = skipped, True/False = ran with success/fail
-    initial_export_ran: Optional[bool] = None
+    claude_code_hook_wired: bool | None = None
+    copilot_init: Path | None = None
+    cascade_init: Path | None = None
+    cursor_automations_init: Path | None = None
+    codex_sync_ran: bool | None = None
+    initial_export_ran: bool | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -320,6 +360,13 @@ def apply_choices(
     cas_present = any(a.id == "cascade" and a.present for a in detected)
     if choices.init_cascade and not cas_present:
         outcome.cascade_init = init_cascade_memory_if_missing(dry_run=dry_run, home=home)
+
+    # 4b. Cursor automations init
+    cur_present = any(a.id == "cursor" and a.present for a in detected)
+    if choices.init_cursor_automations and cur_present:
+        outcome.cursor_automations_init = init_cursor_automations_if_missing(
+            dry_run=dry_run, home=home,
+        )
 
     # 5. Initial export-all
     if choices.run_initial_export and not dry_run:
@@ -391,6 +438,11 @@ def render_outcome(
         print(f"  copilot memory: initialized at {outcome.copilot_init}", file=stream)
     if outcome.cascade_init:
         print(f"  cascade memory: initialized at {outcome.cascade_init}", file=stream)
+    if outcome.cursor_automations_init:
+        print(
+            f"  cursor automations: initialized at {outcome.cursor_automations_init}",
+            file=stream,
+        )
     if outcome.initial_export_ran is True:
         print("  initial export-all: ok", file=stream)
     elif outcome.initial_export_ran is False:
@@ -403,7 +455,7 @@ def render_outcome(
         print(f"  note: {note}", file=stream)
 
     print("\nNext steps:", file=stream)
-    print("  - `bourdon doctor`            -- check current adapter health", file=stream)
+    print("  - `bourdon doctor`            -- check current participant health", file=stream)
     print("  - `bourdon export-all`        -- refresh all manifests anytime", file=stream)
     print(
         "  - `bourdon sync push <dest>`  -- distribute the library to another machine",
@@ -538,6 +590,7 @@ def handle_setup(args: argparse.Namespace) -> int:
             wire_claude_code_hook=any(a.id == "claude-code" and a.present for a in detected),
             init_copilot=False,
             init_cascade=False,
+            init_cursor_automations=any(a.id == "cursor" and a.present for a in detected),
             run_codex_sync=any(a.id == "codex" and a.present for a in detected),
             run_initial_export=True,
         )

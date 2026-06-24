@@ -34,7 +34,7 @@ This isn't retrieval-augmented generation. This is **recognition-augmented cogni
 ### Get Started
 
 ```bash
-pip install -e .              # Core — L0 + L1 + adapters
+pip install -e .              # Core — L0 + L1 + participants
 pip install -e '.[dev]'       # + pytest, ruff, mypy, jsonschema
 pip install -e '.[ultrarag]'  # + L2 async episodic memory
 pip install -e '.[server]'    # + L6 MCP federation server
@@ -44,31 +44,31 @@ pip install -e '.[server]'    # + L6 MCP federation server
 
 ## 📦 The Story So Far
 
-Twelve releases. Six in one day (the foundational architecture), then the recognition-first runtime, the backend-neutral inference layer, end-to-end validation + Layer B, the Cursor adapter graduation, token-based recognition, and Layer C:
+Twelve releases. Six in one day (the foundational architecture), then the recognition-first runtime, the backend-neutral inference layer, end-to-end validation + Layer B, the Cursor participant graduation, token-based recognition, and Layer C:
 
 ### v0.0.11 — Token-Based Recognition
 
 Recognition matching switched from substring to **token-based**: both user message and entity candidate are tokenized into alphanumeric runs; the candidate must appear as a contiguous token subsequence. Fixes "ba**NAS**"-matches-"NAS" type false-positives caught live during dogfood. Multi-word entities still match across punctuation; aliases handle shorter forms when intended. **340 tests passing.**
 
-### v0.0.10 — Cursor Adapter Graduates from cursor-spot
+### v0.0.10 — Cursor Participant Graduates from cursor-spot
 
-**The deferred-from-day-1 Cursor adapter ships.** `adapters/cursor.py` reads Cursor's SQLite `state.vscdb` files at the platform-specific data directory, copies read-only to a tmp file before parsing, and emits a normalized Bourdon L5 manifest. Cursor agent-as-author preserved on the SQLite extraction (`_cursor_sqlite.py`). All four headline IDE adapters (Claude Code, Codex, Cursor, native Clyde/Clair) are now in tree. CONTRIBUTORS.md gains a stacked-PR cursor[bot] caveat. **335 tests passing.**
+**The deferred-from-day-1 Cursor participant ships.** `participants/cursor.py` reads Cursor's SQLite `state.vscdb` files at the platform-specific data directory, copies read-only to a tmp file before parsing, and emits a normalized Bourdon L5 manifest. Cursor agent-as-author preserved on the SQLite extraction (`_cursor_sqlite.py`). All four headline IDE participants (Claude Code, Codex, Cursor, native Clyde/Clair) are now in tree. CONTRIBUTORS.md gains a stacked-PR cursor[bot] caveat. **335 tests passing.**
 
 ### v0.0.9 — Layer A Validated + Layer B (`interrupt_first`)
 
-**Layer A goes from theoretical to measured.** New `tests/integration/test_llama_cpp_live.py` exercises the adapter against an actual running `llama-server`; cancel-mid-stream actually stops generation within budget. **Layer B / `interrupt_first`** is the symmetric speaker-still-talking primitive — mid-stream interrupt + new recognition + restart, with KV-cache reuse coming free from the underlying backend. Adapter gains another `httpx` exception (`StreamClosed`) in the cancel-aware clause (Cursor agent-as-author). Headline measurement on real hardware: recognition emitted in 0.0ms; Gemma 27B Q6_K's first token at ~1000ms; recognition runs a full second ahead. **323 tests passing.**
+**Layer A goes from theoretical to measured.** New `tests/integration/test_llama_cpp_live.py` exercises the participant against an actual running `llama-server`; cancel-mid-stream actually stops generation within budget. **Layer B / `interrupt_first`** is the symmetric speaker-still-talking primitive — mid-stream interrupt + new recognition + restart, with KV-cache reuse coming free from the underlying backend. Participant gains another `httpx` exception (`StreamClosed`) in the cancel-aware clause (Cursor agent-as-author). Headline measurement on real hardware: recognition emitted in 0.0ms; Gemma 27B Q6_K's first token at ~1000ms; recognition runs a full second ahead. **323 tests passing.**
 
 ### v0.0.8 — Backend-Neutral Inference Layer (Layer A)
 
-**The contract that makes Bourdon's runtime backend-agnostic.** `core/inference_protocol.py` defines `InferenceBackend` as a `@runtime_checkable Protocol` with four methods: `capabilities()`, `slots()`, `stream_completion()`, `cancel()`. `adapters/llama_cpp_backend.py` implements it against `llama-server` SSE — first concrete adapter; httpx is gated behind the `[llama-cpp]` extra so the Protocol surface stays dependency-free. `register_backend()` checks capability requirements at registration time so missing primitives raise `BackendUnsupported` loudly rather than silently degrading. First release to formally exercise the agent-as-author + agent-as-reviewer pattern: Claude authored, Cursor reviewed and hardened. **310 tests passing.**
+**The contract that makes Bourdon's runtime backend-agnostic.** `core/inference_protocol.py` defines `InferenceBackend` as a `@runtime_checkable Protocol` with four methods: `capabilities()`, `slots()`, `stream_completion()`, `cancel()`. `participants/llama_cpp_backend.py` implements it against `llama-server` SSE — first concrete participant; httpx is gated behind the `[llama-cpp]` extra so the Protocol surface stays dependency-free. `register_backend()` checks capability requirements at registration time so missing primitives raise `BackendUnsupported` loudly rather than silently degrading. First release to formally exercise the agent-as-author + agent-as-reviewer pattern: Claude authored, Cursor reviewed and hardened. **310 tests passing.**
 
 ### v0.0.7 — Recognition Runtime + Temporal Validity + Role Narratives
 
 **The headline behavior fix.** `core/recognition_runtime.py` ships the first concrete implementation of the recognition-first runtime: synchronous template-based recognition string + concurrent L1 hydration awaitable, ≤3s timeout budget, never raises. Plus `agent.role_narrative` (differentiates agents sharing the same `type` slug — Inspired by [Intrinsic Memory Agents](https://hf.co/papers/2508.08997)). Plus temporal validity windows on entities (Zep-Graphiti-inspired `valid_from`/`valid_to`). Plus `bourdon codex export | build-context | eval` and `bourdon claude-code export` SessionEnd hook target. Plus `spec/POSITIONING.md` and `spec/RELATED_WORK.md`. **250 tests passing.** Deployed at [bourdon.ai](https://bourdon.ai).
 
-### v0.0.6 — Codex Adapter + Atomic L5 Write
+### v0.0.6 — Codex Participant + Atomic L5 Write
 
-**OpenAI Codex joins the federation, and L5 writes are never observed half-written.** `adapters/codex.py` parses `~/.codex/session_index.jsonl` newest-first, resolves rollout files to extract working directories and timestamps, and dedupes thread names into topic entities. Registered under the `bourdon.adapters` entry point. `core/l5_io.py` introduces `write_l5()` / `write_l5_dict()` with tmp + rename atomic semantics — safe on POSIX and NTFS, no more race conditions between adapters writing and L6 reading. **188 tests passing.**
+**OpenAI Codex joins the federation, and L5 writes are never observed half-written.** `participants/codex.py` parses `~/.codex/session_index.jsonl` newest-first, resolves rollout files to extract working directories and timestamps, and dedupes thread names into topic entities. Registered under the `bourdon.participants` entry point. `core/l5_io.py` introduces `write_l5()` / `write_l5_dict()` with tmp + rename atomic semantics — safe on POSIX and NTFS, no more race conditions between participants writing and L6 reading. **188 tests passing.**
 
 ### v0.0.5 — L6 Federation MCP Server *(the big one)*
 
@@ -78,13 +78,13 @@ Recognition matching switched from substring to **token-based**: both user messa
 
 **Memory retrieval that doesn't make you wait.** L2 fires concurrently with the AI's first response and completes while you're still reading. It *never* blocks. It *never* raises. If the retrieval backend is down, you still get a response — you just don't get the deep context. Opt in via `BOURDON_L2_ENABLED=true` or `core/l2_config.yaml`. **116 tests passing.**
 
-### v0.0.3 — Claude Code Adapter Full Parsing
+### v0.0.3 — Claude Code Participant Full Parsing
 
 **Your Claude Code brain, federated.** Parses `PROJECTS/*/OVERVIEW.md` → project entities, `LOG/*.md` → sessions, auto-memory frontmatter → entities, and `memory.jsonl` knowledge graph → entities. Person-type entities and credential patterns are automatically marked `PRIVATE` — zero secrets leak into federation. Entity dedupe across all sources with priority ordering and merge rules. Tested against a real Claude Code brain: 55 entities, 46 sessions, 0 credential leaks. **80 tests passing.**
 
-### v0.0.2 — L5 Schema + Adapter Contract + CI
+### v0.0.2 — L5 Schema + Participant Contract + CI
 
-**The spec that holds everything together.** `spec/L5_schema.json` defines the normative JSON Schema for L5 manifests. `spec/ADAPTER_CONTRACT.md` defines the rules every adapter must follow. `adapters/base.py` provides the Protocol, dataclasses, and visibility helpers. CI matrix: Ubuntu + Windows + macOS × Python 3.10–3.12. **49 tests passing.**
+**The spec that holds everything together.** `spec/L5_schema.json` defines the normative JSON Schema for L5 manifests. `spec/PARTICIPANT_CONTRACT.md` defines the rules every participant must follow. `participants/base.py` provides the Protocol, dataclasses, and visibility helpers. CI matrix: Ubuntu + Windows + macOS × Python 3.10–3.12. **49 tests passing.**
 
 ### v0.0.1 — Initial Scaffold
 
@@ -98,8 +98,8 @@ Recognition matching switched from substring to **token-based**: both user messa
 |-----------|----------------|
 | **v0.3.0** | `pip install bourdon` + `bourdon init / up / query` CLI — one command to federate |
 | **v0.4.0** | Clyde + Clair native L5 publishers — agents that *write* to the federation, not just get read |
-| **v1.0.0** | Docs site, community adapters, **public launch** |
-| **v1.x** | Cursor adapter (SQLite reverse-engineering), Copilot adapter, LangChain / CrewAI / AutoGen integrations |
+| **v1.0.0** | Docs site, community participants, **public launch** |
+| **v1.x** | Cursor participant (SQLite reverse-engineering), Copilot participant, LangChain / CrewAI / AutoGen integrations |
 
 ---
 
@@ -141,6 +141,6 @@ Cross-agent federation:
 
 ---
 
-> ⚠️ **Pre-Alpha (v0.0.12).** Not production-ready — but the architecture is real, 348 tests pass, the federation loop works end-to-end, the recognition-first runtime is implemented (with both `recognition_first` and `interrupt_first` primitives, token-boundary entity matching, and a `build_splice_prompt` helper for narrative continuation across interrupts), the inference layer it drives is backend-neutral and KV-cache-reuse-aware, the timing thesis is proven as measured behavior on real hardware (recognition emitted in 0ms; the model's first token a full second behind), and the four headline IDE adapters (Claude Code, Codex, Cursor, native Clyde/Clair) are all in tree. Built in the open as a spec-and-reference-implementation for a convention we hope the ecosystem adopts.
+> ⚠️ **Pre-Alpha (v0.0.12).** Not production-ready — but the architecture is real, 348 tests pass, the federation loop works end-to-end, the recognition-first runtime is implemented (with both `recognition_first` and `interrupt_first` primitives, token-boundary entity matching, and a `build_splice_prompt` helper for narrative continuation across interrupts), the inference layer it drives is backend-neutral and KV-cache-reuse-aware, the timing thesis is proven as measured behavior on real hardware (recognition emitted in 0ms; the model's first token a full second behind), and the four headline IDE participants (Claude Code, Codex, Cursor, native Clyde/Clair) are all in tree. Built in the open as a spec-and-reference-implementation for a convention we hope the ecosystem adopts.
 >
 > *We used our minds to make minds that make our minds better.*

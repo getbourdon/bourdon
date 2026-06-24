@@ -190,7 +190,7 @@ L3/L4 only if needed ───────────────────�
 ### P2 — Future / Architectural Insurance
 
 - **Provider abstraction layer** — swap Ollama for vLLM, OpenAI API, Anthropic API via config
-- **Framework adapters** — LangChain, CrewAI, OpenAI Agents SDK, LangGraph
+- **Framework participants** — LangChain, CrewAI, OpenAI Agents SDK, LangGraph
 - **L0 auto-generation** — build L0 payload from L1/L2 automatically, no manual maintenance
 - **Multi-user support** — separate L0/L1 namespaces per user identity
 - **NeuroLayer SDK** — packaged open source release with pip/npm install
@@ -292,7 +292,7 @@ L0 hot cache + L1 entity synopses. Manual file maintenance. Ollama only. Proves 
 L2 UltraRAG integration with async timing. L3 session logging. Auto L1 refresh. CLI tools.
 
 **Phase 3 — NeuroLayer (TBD)**  
-Provider abstraction. Framework adapters. Open source packaging. Documentation site.
+Provider abstraction. Framework participants. Open source packaging. Documentation site.
 
 ---
 

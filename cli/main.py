@@ -5,43 +5,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time as _time
 from collections import Counter
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from adapters.base import AdapterDiscoveryError
-from adapters.cascade import (
-    CascadeAdapter,
-    _inspect_cascade_memory,
-    default_cascade_memory_path,
+from core.agents_export import (
+    export_local_agents,
+    resolve_local_name,
 )
-from adapters.cascade import (
-    init_memory_file as cascade_init_memory_file,
-)
-from adapters.claude_code import ClaudeCodeAdapter
-from adapters.codex import (
-    CodexAdapter,
-    _build_codex_native_memory_payload,
-    _default_codex_memory_md_path,
-    _default_codex_native_memory_path,
-    _inspect_codex_fallback_recall,
-    _inspect_codex_state_db,
-    _merge_bourdon_memory_md_section,
-    _safe_native_memory_text,
-)
-from adapters.copilot import (
-    CopilotAdapter,
-    _inspect_copilot_memory,
-    default_copilot_memory_path,
-    init_memory_file,
-)
-from adapters.cursor import CursorAdapter
 from core.codex_context import (
     filter_manifest_for_access,
     write_codex_context_artifacts,
@@ -53,6 +33,52 @@ from core.l5_io import write_l5_dict
 from core.l6_server import prepare_recognition_context_from_store
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
+from participants import discover_participants
+from participants.base import ParticipantDiscoveryError
+from participants.cascade import (
+    CascadeParticipant,
+    _inspect_cascade_memory,
+    default_cascade_memory_path,
+)
+from participants.cascade import (
+    init_memory_file as cascade_init_memory_file,
+)
+from participants.claude_code import ClaudeCodeParticipant
+from participants.claude_code_automations import (
+    ClaudeCodeAutomationsParticipant,
+    default_claude_code_automations_dir,
+    merge_automation_tree,
+)
+from participants.claude_desktop_code import ClaudeDesktopCodeParticipant
+from participants.claude_desktop_cowork import ClaudeDesktopCoworkParticipant
+from participants.codex import (
+    CodexParticipant,
+    _build_codex_native_memory_payload,
+    _default_codex_memory_md_path,
+    _default_codex_native_memory_path,
+    _inspect_codex_fallback_recall,
+    _inspect_codex_state_db,
+    _merge_bourdon_memory_md_section,
+    _safe_native_memory_text,
+)
+from participants.codex_automations import CodexAutomationsParticipant
+from participants.copilot import (
+    CopilotParticipant,
+    _inspect_copilot_memory,
+    default_copilot_memory_path,
+    init_memory_file,
+)
+from participants.cursor import CursorParticipant
+from participants.cursor_automations import (
+    CursorAutomationsParticipant,
+    default_cursor_automations_dir,
+)
+from participants.cursor_automations import (
+    init_automations_dir as cursor_init_automations_dir,
+)
+from participants.cursor_automations import (
+    merge_automation_tree as cursor_merge_automation_tree,
+)
 
 
 def _default_claude_code_l5_path() -> Path:
@@ -68,8 +94,28 @@ def _default_codex_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "codex.l5.yaml"
 
 
+def _default_claude_code_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
+
+
+def _default_codex_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+
+def _default_claude_desktop_cowork_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-desktop-cowork.l5.yaml"
+
+
+def _default_claude_desktop_code_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "claude-desktop-code.l5.yaml"
+
+
 def _default_cursor_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cursor.l5.yaml"
+
+
+def _default_cursor_automations_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "cursor-automations.l5.yaml"
 
 
 def _default_copilot_l5_path() -> Path:
@@ -78,6 +124,14 @@ def _default_copilot_l5_path() -> Path:
 
 def _default_cascade_l5_path() -> Path:
     return Path.home() / "agent-library" / "agents" / "cascade.l5.yaml"
+
+
+def _default_agents_dir() -> Path:
+    """Resolve ~/agent-library/agents at call time (test-monkeypatch friendly)."""
+    return Path.home() / "agent-library" / "agents"
+
+
+_DEFAULT_PEERS_CONFIG = Path.home() / ".bourdon" / "peers.yaml"
 
 
 def _parse_since(value: str | None) -> datetime | None:
@@ -109,25 +163,25 @@ def _write_text_atomic(text: str, target: Path) -> None:
     tmp_path.replace(target)
 
 
-def _build_adapter(args: argparse.Namespace) -> CodexAdapter:
+def _build_participant(args: argparse.Namespace) -> CodexParticipant:
     codex_home = Path(args.codex_home) if getattr(args, "codex_home", None) else None
     codex_brain = (
         Path(args.codex_brain) if getattr(args, "codex_brain", None) else None
     )
-    return CodexAdapter(codex_home=codex_home, codex_brain=codex_brain)
+    return CodexParticipant(codex_home=codex_home, codex_brain=codex_brain)
 
 
 def _manifest_for_access(
-    adapter: CodexAdapter, since: datetime | None, access_level: str
+    participant: CodexParticipant, since: datetime | None, access_level: str
 ) -> dict[str, Any]:
-    manifest = adapter.export_l5(since=since)
+    manifest = participant.export_l5(since=since)
     return filter_manifest_for_access(manifest, access_level=access_level)
 
 
 def _handle_codex_export(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     data = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -177,21 +231,314 @@ def _handle_deeper_context(args: argparse.Namespace) -> int:
 
 
 def _handle_cursor_export(args: argparse.Namespace) -> int:
-    cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
-    adapter = CursorAdapter(cursor_dir=cursor_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    """Hook-safe: silent on success, returns 0 in all failure modes."""
+    verbose = getattr(args, "verbose", False)
+    try:
+        cursor_dir = Path(args.cursor_dir) if args.cursor_dir else None
+        participant = CursorParticipant(cursor_dir=cursor_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(f"bourdon cursor export: no data ({exc}), skipping", file=sys.stderr)
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: export failed: {exc}", file=sys.stderr)
+        return 0
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_cursor_l5_path()
-    write_l5_dict(data, out_path)
-    if args.print_manifest:
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor export: write failed: {exc}", file=sys.stderr)
+        return 0
+    if getattr(args, "print_manifest", False):
         _print_yaml(data)
+    return 0
+
+
+def _handle_cursor_doctor(args: argparse.Namespace) -> int:
+    cursor_dir = Path(args.cursor_dir) if getattr(args, "cursor_dir", None) else None
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
+    report: dict[str, Any] = {
+        "health": {
+            "status": health.status, "reason": health.reason,
+            "details": health.details,
+        },
+        "cursor_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_compile_turn(args: argparse.Namespace) -> int:
+    from core.cursor_turn_compiler import compile_cursor_turn
+    brief = compile_cursor_turn(
+        args.prompt, cwd=getattr(args, "cwd", None),
+        access_level=getattr(args, "access_level", "team"),
+        library_path=(
+            Path(args.library_path)
+            if getattr(args, "library_path", None) else None
+        ),
+        max_items=getattr(args, "max_items", 6),
+    )
+    report: dict[str, Any] = {
+        "schema_version": brief.schema_version, "strategy": brief.strategy,
+        "cwd_project": brief.cwd_project, "prompt_tokens": brief.prompt_tokens,
+        "matched_entities": brief.matched_entities, "routing": brief.routing,
+        "compile_latency_us": brief.compile_latency_us,
+        "text": brief.to_text(),
+    }
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_sync_native(args: argparse.Namespace) -> int:
+    from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+    library_path = (
+        Path(args.library_path) if getattr(args, "library_path", None)
+        else DEFAULT_LIBRARY_PATH
+    )
+    access_level = getattr(args, "access_level", "team")
+    max_entities = getattr(args, "max_entities", 100)
+    max_sessions = getattr(args, "max_sessions", 20)
+    store = L6Store(library_path)
+    agents = store.list_agents()
+    all_entities: list[tuple[str, dict]] = []
+    all_sessions: list[tuple[str, dict]] = []
+    for agent_id in agents:
+        manifest = store.get_agent_manifest(agent_id, access_level=access_level)
+        if not manifest:
+            continue
+        for entity in manifest.get("known_entities") or []:
+            all_entities.append((agent_id, entity))
+        for session in manifest.get("recent_sessions") or []:
+            all_sessions.append((agent_id, session))
+    all_sessions.sort(key=lambda p: p[1].get("date", ""), reverse=True)
+    lines = [
+        "# Bourdon Federation Context", "",
+        f"_Auto-generated by `bourdon cursor sync-native`. "
+        f"{len(agents)} agents federated._", "",
+    ]
+    if all_entities:
+        lines.append("## Known Entities")
+        lines.append("")
+        for agent_id, entity in all_entities[:max_entities]:
+            name = entity.get("name", "?")
+            etype = entity.get("type", "topic")
+            summary = entity.get("summary", "")
+            line = f"- **{name}** ({etype}, via {agent_id})"
+            if summary:
+                line += f": {summary[:200]}"
+            lines.append(line)
+        lines.append("")
+    if all_sessions:
+        lines.append("## Recent Sessions")
+        lines.append("")
+        for agent_id, session in all_sessions[:max_sessions]:
+            sdate = session.get("date", "?")
+            cwd = session.get("cwd", "")
+            actions = session.get("key_actions", [])
+            action_text = (
+                "; ".join(str(a)[:120] for a in actions[:3]) if actions else ""
+            )
+            line = f"- **{sdate}** ({agent_id})"
+            if cwd:
+                line += f" in `{cwd}`"
+            if action_text:
+                line += f": {action_text}"
+            lines.append(line)
+        lines.append("")
+    text = "\n".join(lines) + "\n"
+    cursor_home = (
+        Path(args.cursor_dir) if getattr(args, "cursor_dir", None) else None
+    )
+    target = (
+        Path(args.out) if getattr(args, "out", None)
+        else (cursor_home or Path.home() / ".cursor") / "memory" / "bourdon_context.md"
+    )
+    if args.write:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    report = {
+        "mode": "write" if args.write else "dry-run",
+        "target": str(target), "agents_federated": len(agents),
+        "entities": len(all_entities), "sessions": len(all_sessions),
+        "bytes": len(text.encode("utf-8")), "written": bool(args.write),
+    }
+    if not args.write:
+        report["preview"] = text
+    _print_yaml(report)
+    return 0
+
+
+def _handle_cursor_init(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None) else None
+    )
+    automation_id = getattr(args, "automation_id", None) or "cursor-cloud-agent"
+    force = getattr(args, "force", False)
+    try:
+        path = cursor_init_automations_dir(
+            automations_dir=automations_dir,
+            automation_id=automation_id, force=force,
+        )
+        print(f"Created {path}")
+        print(
+            f"Edit {path / 'memory.md'} to add run entries, then run "
+            "`bourdon cursor-automations export`."
+        )
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _handle_cursor_automations_export(args: argparse.Namespace) -> int:
+    """Hook-safe: silent on success, returns 0 in all failure modes."""
+    verbose = getattr(args, "verbose", False)
+    try:
+        automations_dir = (
+            Path(args.automations_dir)
+            if getattr(args, "automations_dir", None) else None
+        )
+        participant = CursorAutomationsParticipant(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(
+                f"bourdon cursor-automations export: no data ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: failed: {exc}", file=sys.stderr)
+        return 0
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = (
+        Path(args.out) if args.out
+        else _default_cursor_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon cursor-automations export: write failed: {exc}", file=sys.stderr)
+        return 0
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    return 0
+
+
+def _find_cursor_automations_root(extracted_dir: Path) -> Path | None:
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
+def _handle_cursor_automations_ingest(args: argparse.Namespace) -> int:
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cursor-ingest-")
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(f"cursor-automations ingest: zip not found: {zip_path}", file=sys.stderr)
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_cursor_automations_root(Path(tmp.name))
+        else:
+            print(
+                "cursor-automations ingest: specify --source or --artifact-zip.",
+                file=sys.stderr,
+            )
+            return 2
+        if source is None or not source.is_dir():
+            print(
+                "cursor-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+        dest_dir = (
+            Path(args.dest) if getattr(args, "dest", None)
+            else default_cursor_automations_dir()
+        )
+        result = cursor_merge_automation_tree(
+            source, dest_dir, default_kind=args.default_kind,
+        )
+        report = {
+            "source": str(source), "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
+
+
+def _handle_cursor_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None) else None
+    )
+    participant = CursorAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
+    report = {
+        "health": {
+            "status": health.status, "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
     return 0
 
 
 def _handle_copilot_export(args: argparse.Namespace) -> int:
     copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
-    adapter = CopilotAdapter(copilot_dir=copilot_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CopilotParticipant(copilot_dir=copilot_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_copilot_l5_path()
     write_l5_dict(data, out_path)
@@ -200,10 +547,49 @@ def _handle_copilot_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_codex_automations_export(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    participant = CodexAutomationsParticipant(automations_dir=automations_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_codex_automations_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_codex_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    participant = CodexAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
 def _handle_copilot_doctor(args: argparse.Namespace) -> int:
     copilot_dir = Path(args.copilot_dir) if getattr(args, "copilot_dir", None) else None
-    adapter = CopilotAdapter(copilot_dir=copilot_dir)
-    health = adapter.health_check()
+    participant = CopilotParticipant(copilot_dir=copilot_dir)
+    health = participant.health_check()
     mem_report = _inspect_copilot_memory(copilot_dir)
     report = {
         "health": {
@@ -237,8 +623,8 @@ def _handle_copilot_init(args: argparse.Namespace) -> int:
 
 def _handle_cascade_export(args: argparse.Namespace) -> int:
     cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
-    adapter = CascadeAdapter(cascade_dir=cascade_dir)
-    manifest = adapter.export_l5(since=_parse_since(args.since))
+    participant = CascadeParticipant(cascade_dir=cascade_dir)
+    manifest = participant.export_l5(since=_parse_since(args.since))
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_cascade_l5_path()
     write_l5_dict(data, out_path)
@@ -249,9 +635,9 @@ def _handle_cascade_export(args: argparse.Namespace) -> int:
 
 def _handle_cascade_doctor(args: argparse.Namespace) -> int:
     cascade_dir = Path(args.cascade_dir) if getattr(args, "cascade_dir", None) else None
-    adapter = CascadeAdapter(cascade_dir=cascade_dir)
-    health = adapter.health_check()
-    mem_report = _inspect_cascade_memory(cascade_dir or adapter._dir)
+    participant = CascadeParticipant(cascade_dir=cascade_dir)
+    health = participant.health_check()
+    mem_report = _inspect_cascade_memory(cascade_dir or participant._dir)
     report = {
         "health": {
             "status": health.status,
@@ -281,22 +667,14 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 # -- Top-level doctor / export-all --------------------------------------------
 
-_ADAPTER_REGISTRY: list[tuple[str, type]] = [
-    ("claude-code", ClaudeCodeAdapter),
-    ("codex", CodexAdapter),
-    ("cursor", CursorAdapter),
-    ("copilot", CopilotAdapter),
-    ("cascade", CascadeAdapter),
-]
-
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    """Run health checks across all known adapters."""
+    """Run health checks across all known participants."""
     results: list[dict[str, Any]] = []
-    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+    for agent_id, participant_cls in discover_participants():
         try:
-            adapter = adapter_cls()
-            health = adapter.health_check()
+            participant = participant_cls()
+            health = participant.health_check()
             row: dict[str, Any] = {
                 "agent": agent_id,
                 "status": health.status,
@@ -313,15 +691,165 @@ def _handle_doctor(args: argparse.Namespace) -> int:
                 "reason": str(exc),
                 "details": {},
                 "proposed_fix": (
-                    "Adapter raised during health_check. Run "
+                    "Participant raised during health_check. Run "
                     "`bourdon doctor --report-out doctor.yaml` and file an issue with "
                     "the traceback."
                 ),
             })
 
-    report = {"adapters": results}
+    report = {"participants": results, "federation": _doctor_federation_checks()}
     _write_yaml_if_requested(report, getattr(args, "report_out", None))
     _print_yaml(report)
+    return 0
+
+
+def _doctor_federation_checks() -> list[dict[str, Any]]:
+    """v0.9.0 federation hygiene checks (spec R6).
+
+    - transport/auth posture: legacy shared token vs per-agent registry
+    - members missing a tier (corrupt/hand-edited registry rows)
+    - revoked members whose token hash is still present (prune candidates)
+    - stale staged writes (> 7 days awaiting promote/reject)
+    """
+    import os as _os
+
+    from core.federation_registry import FederationRegistry
+    from core.federation_staging import list_staged
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+
+    checks: list[dict[str, Any]] = []
+
+    registry = FederationRegistry()
+    members = registry.list_agents()
+    legacy = bool(_os.environ.get("BOURDON_PEER_TOKEN_SERVER"))
+    if not members and not legacy:
+        checks.append({
+            "check": "auth",
+            "status": "info",
+            "reason": (
+                "no federation members registered and no legacy token set — "
+                "HTTP transport will refuse non-loopback binds"
+            ),
+        })
+    elif legacy and not members:
+        checks.append({
+            "check": "auth",
+            "status": "warn",
+            "reason": (
+                "running on the legacy shared token only "
+                "(BOURDON_PEER_TOKEN_SERVER) — migrate peers to per-agent "
+                "tokens via `bourdon agent add` for tiered access + revocation"
+            ),
+        })
+    else:
+        checks.append({
+            "check": "auth",
+            "status": "ok",
+            "reason": f"{len(members)} registered member(s)",
+        })
+
+    for agent_id, row in members.items():
+        if row.get("tier") not in ("trusted", "quarantined"):
+            checks.append({
+                "check": "tier",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": f"member has invalid/missing tier {row.get('tier')!r}",
+                "proposed_fix": f"bourdon agent set-tier {agent_id} quarantined",
+            })
+        if row.get("revoked") and row.get("has_token"):
+            checks.append({
+                "check": "revoked-token-present",
+                "status": "warn",
+                "agent": agent_id,
+                "reason": (
+                    "revoked member still has a token hash on file (it cannot "
+                    "authenticate, but consider pruning the row)"
+                ),
+            })
+
+    try:
+        staged = list_staged(DEFAULT_LIBRARY_PATH)
+    except OSError:
+        staged = []
+    for item in staged:
+        if item.age_days > 7:
+            checks.append({
+                "check": "stale-staged-write",
+                "status": "warn",
+                "agent": item.agent_id,
+                "reason": (
+                    f"staged write from {item.caller!r} is {item.age_days:.0f} "
+                    "days old"
+                ),
+                "proposed_fix": (
+                    f"bourdon staging promote {item.agent_id}  # or: "
+                    f"bourdon staging reject {item.agent_id}"
+                ),
+            })
+    if staged and all(item.age_days <= 7 for item in staged):
+        checks.append({
+            "check": "staging",
+            "status": "info",
+            "reason": f"{len(staged)} staged write(s) awaiting review",
+        })
+
+    return checks
+
+
+def _handle_agents(args: argparse.Namespace) -> int:
+    """Enumerate L5 manifests as a stable, redacted, source-attributed JSON object.
+
+    Read foundation for the Phase 0 desktop tray: keeps redaction and
+    access-level handling server-side so the tray never reads raw YAML. The
+    summarization is the single shared implementation in
+    :mod:`core.agents_export`, so the local and federated paths can never drift.
+
+    Without ``--federated`` this enumerates only THIS machine's local agents,
+    each tagged ``source=<local_name>`` / ``source_kind="local"``. Exits nonzero
+    only if the agents dir itself is missing/unreadable; per-manifest parse
+    errors are represented inline (``parse_error``) and still exit 0 so the tray
+    can distinguish "no data" from "broken".
+
+    With ``--federated`` it additionally fans out to configured peers via the
+    L6 store, merging each peer's own ``export_agents`` output re-tagged
+    ``source=<peer-name>`` / ``source_kind="peer"``. A peer that is unreachable
+    (or runs a build without the ``export_agents`` tool) contributes nothing and
+    is marked ``reachable: false`` rather than crashing the export.
+    """
+    agents_dir = (
+        Path(args.agents_dir)
+        if getattr(args, "agents_dir", None)
+        else _default_agents_dir()
+    )
+    if not agents_dir.is_dir():
+        print(
+            f"agents: agent-library directory not found: {agents_dir}",
+            file=sys.stderr,
+        )
+        return 2
+
+    local_name = resolve_local_name()
+
+    if getattr(args, "federated", False):
+        from core.l6_server import load_peers
+        from core.l6_store import L6Store
+
+        peers_config = (
+            Path(args.peers_config)
+            if getattr(args, "peers_config", None)
+            else _DEFAULT_PEERS_CONFIG
+        )
+        peers = load_peers(peers_config, [])
+        # The store's library is the PARENT of the agents dir (it appends
+        # ``agents/`` itself). For the default dir this is ~/agent-library.
+        store = L6Store(agents_dir.parent, peers=peers)
+        report = asyncio.run(store.export_agents_federated(local_name=local_name))
+        print(json.dumps(report, indent=2, sort_keys=False))
+        return 0
+
+    report = export_local_agents(agents_dir, local_name)
+    print(json.dumps(report, indent=2, sort_keys=False))
     return 0
 
 
@@ -341,14 +869,23 @@ def _handle_dogfood(args: argparse.Namespace) -> int:
 def _handle_serve(args: argparse.Namespace) -> int:
     """Launch the L6 federation MCP server.
 
-    Thin wrapper around ``python -m core.l6_server`` that prints an
-    onboarding banner (library path, agents loaded, transport, paste-ready
-    MCP config snippet) before handing off to the underlying server.
-    Stdio transport blocks until the connecting MCP client disconnects;
-    HTTP transport blocks until interrupted. Either way, this handler
-    returns the server's exit code, or 1 if startup fails.
+    Wrapper around ``python -m core.l6_server`` that prints an onboarding
+    banner (library path, agents loaded, transport, peers, paste-ready MCP
+    config snippet) before handing off to the shared :func:`run_l6_server`.
+    Peer federation (``--peer`` / ``--peers-config``) and HTTP Bearer auth
+    (``--allow-unauthenticated``) are resolved identically to the module entry
+    point via :func:`load_peers` + :func:`run_l6_server`, so both serve paths
+    behave the same. Stdio transport blocks until the connecting MCP client
+    disconnects; HTTP transport blocks until interrupted. Returns the server's
+    exit code (0 on clean shutdown / KeyboardInterrupt).
     """
-    from core.l6_server import L6Store, create_l6_server  # type: ignore[attr-defined]
+    from core.l6_server import (  # type: ignore[attr-defined]
+        DEFAULT_PEERS_CONFIG,
+        L6Store,
+        create_l6_server,
+        load_peers,
+        run_l6_server,
+    )
 
     library_path = Path(args.library) if getattr(args, "library", None) else None
     if library_path is None:
@@ -357,8 +894,16 @@ def _handle_serve(args: argparse.Namespace) -> int:
 
     transport = getattr(args, "transport", "stdio")
     port = getattr(args, "port", 7500)
+    host = getattr(args, "host", "127.0.0.1")
+    allow_unauthenticated = getattr(args, "allow_unauthenticated", False)
 
-    store = L6Store(library_path)
+    # Cross-machine peer federation (Phase 1.6+): merge --peer URLs with the
+    # optional peers.yaml so `bourdon serve` matches `python -m core.l6_server`.
+    peers_config = getattr(args, "peers_config", None) or DEFAULT_PEERS_CONFIG
+    peer_urls = list(getattr(args, "peer", []) or [])
+    peers = load_peers(Path(peers_config), peer_urls)
+
+    store = L6Store(library_path, peers=peers)
     agents = store.list_agents()
 
     if getattr(args, "quiet", False) is False:
@@ -370,54 +915,362 @@ def _handle_serve(args: argparse.Namespace) -> int:
         print(f"  agents:    {len(agents)} loaded ({agent_names})", file=sys.stderr)
         print(f"  transport: {transport}", file=sys.stderr)
         if transport == "http":
-            print(f"  port:      {port}", file=sys.stderr)
+            print(f"  bind:      {host}:{port}", file=sys.stderr)
+            auth_state = (
+                "disabled (--allow-unauthenticated, loopback only)"
+                if allow_unauthenticated
+                else "Bearer (bourdon agent add / BOURDON_PEER_TOKEN_SERVER)"
+            )
+            print(f"  auth:      {auth_state}", file=sys.stderr)
+        if peers:
+            peer_desc = ", ".join(f"{p.name} -> {p.url}" for p in peers)
+            print(f"  peers:     {len(peers)} ({peer_desc})", file=sys.stderr)
         print("", file=sys.stderr)
         if transport == "stdio":
             print("MCP client config (stdio):", file=sys.stderr)
             print('  {"command": "bourdon", "args": ["serve"]}', file=sys.stderr)
         else:
-            print(f"MCP client config (http): http://127.0.0.1:{port}/", file=sys.stderr)
+            print(f"MCP client endpoint (http): http://127.0.0.1:{port}/mcp", file=sys.stderr)
         print("", file=sys.stderr)
 
-    server = create_l6_server(store)
+    from core.federation_registry import FederationRegistry
+
+    registry = FederationRegistry()
+    server = create_l6_server(store, registry=registry)
     try:
-        if transport == "stdio":
-            server.run()
-        else:
-            try:
-                server.run(transport="http", port=port)
-            except TypeError:
-                print(
-                    "WARN: this fastmcp version does not accept transport='http'; "
-                    "falling back to stdio.",
-                    file=sys.stderr,
-                )
-                server.run()
+        run_l6_server(
+            server,
+            transport=transport,
+            port=port,
+            host=host,
+            allow_unauthenticated=allow_unauthenticated,
+            registry=registry,
+        )
     except KeyboardInterrupt:
         return 0
     return 0
 
 
+# -- OpenClaw (quarantined-class, network-shaped) handlers (v0.9.0) -------------
+
+
+def _handle_openclaw_export(args: argparse.Namespace) -> int:
+    """Export the OpenClaw instance's L5 manifest INTO STAGING.
+
+    Unlike the on-disk participants this is an explicit operator command with
+    loud failures: a handshake refusal (unpatched / auth-disabled instance)
+    prints the exact reason + fix and exits non-zero. On success the manifest
+    lands in ``<library>/staging/openclaw/`` — promote it with
+    ``bourdon staging promote openclaw`` (spec/SPEC_v0.9.0.md D6).
+    """
+    from core.federation_staging import stage_manifest
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    try:
+        manifest = participant.export_l5(since=_parse_since(getattr(args, "since", None)))
+    except ParticipantDiscoveryError as exc:
+        print(f"bourdon openclaw export: handshake refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"bourdon openclaw export: failed: {exc}", file=sys.stderr)
+        return 1
+
+    data = filter_manifest_for_access(
+        manifest, access_level=getattr(args, "access_level", "team")
+    )
+    library = (
+        Path(args.library)
+        if getattr(args, "library", None)
+        else Path.home() / "agent-library"
+    )
+    out_path = stage_manifest(library, "openclaw", data)
+    print(
+        f"bourdon openclaw export: STAGED {len(data.get('known_entities') or [])} "
+        f"entities / {len(data.get('recent_sessions') or [])} sessions at {out_path}"
+    )
+    print(
+        "Quarantined-class content never writes to the live store directly. "
+        "Review and promote with: bourdon staging promote openclaw",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _handle_openclaw_doctor(args: argparse.Namespace) -> int:
+    """Health-check the configured OpenClaw instance (handshake gate included)."""
+    from participants.openclaw import OpenClawParticipant
+
+    participant = OpenClawParticipant(url=getattr(args, "url", None))
+    health = participant.health_check()
+    row: dict[str, Any] = {
+        "agent": "openclaw",
+        "status": health.status,
+        "reason": health.reason,
+        "details": health.details,
+    }
+    if health.proposed_fix:
+        row["proposed_fix"] = health.proposed_fix
+    _print_yaml({"participants": [row]})
+    return 0 if health.status == "ok" else 1
+
+
+# -- Federation trust management handlers (v0.9.0) -----------------------------
+
+
+def _is_quarantined_class(agent_id: str) -> bool:
+    """Whether a participant declares itself quarantined-class (e.g. OpenClaw).
+
+    Quarantined-class agents may only be registered/promoted to ``trusted``
+    with an explicit ``--i-understand-the-risk`` acknowledgement.
+    """
+    for pid, participant_cls in discover_participants():
+        if pid == agent_id and getattr(participant_cls, "QUARANTINED_CLASS", False):
+            return True
+    return False
+
+
+def _handle_agent_add(args: argparse.Namespace) -> int:
+    """Register a federation member and print its token (shown ONCE)."""
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    tier = getattr(args, "tier", "quarantined")
+    if (
+        tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Registering it as trusted exposes the full federation to it. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
+    registry = FederationRegistry()
+    try:
+        token = registry.add_agent(
+            args.agent_id, tier=tier, grants=list(getattr(args, "grant", []) or [])
+        )
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"registered {args.agent_id} (tier: {tier})")
+    print(f"token: {token}")
+    print(
+        "This token is shown ONCE and stored only as a hash. "
+        "Pass it as `Authorization: Bearer <token>` on the HTTP transport.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _handle_agent_list(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry
+
+    rows = FederationRegistry().list_agents()
+    if not rows:
+        print("no federation members registered (see `bourdon agent add`)")
+        return 0
+    for agent_id, row in rows.items():
+        status = "REVOKED" if row.get("revoked") else row.get("tier", "?")
+        grants = ", ".join(row.get("grants") or []) or "-"
+        print(f"{agent_id:30s} {status:12s} grants: {grants}")
+    return 0
+
+
+def _handle_agent_rotate(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        token = FederationRegistry().rotate_token(args.agent_id)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"rotated {args.agent_id}")
+    print(f"token: {token}")
+    print("This token is shown ONCE. The previous token no longer authenticates.",
+          file=sys.stderr)
+    return 0
+
+
+def _handle_agent_set_tier(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    if (
+        args.tier == "trusted"
+        and _is_quarantined_class(args.agent_id)
+        and not getattr(args, "risk_ack", False)
+    ):
+        print(
+            f"refusing: {args.agent_id!r} is a quarantined-class agent. "
+            "Re-run with --i-understand-the-risk to override.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        FederationRegistry().set_tier(args.agent_id, args.tier)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.agent_id} -> tier: {args.tier}")
+    return 0
+
+
+def _handle_grant(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().grant(args.agent_id, args.namespace)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"granted {args.agent_id} read access to namespace {args.namespace!r}")
+    return 0
+
+
+def _handle_ungrant(args: argparse.Namespace) -> int:
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().ungrant(args.agent_id, args.namespace)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"removed {args.agent_id} grant on namespace {args.namespace!r}")
+    return 0
+
+
+def _handle_revoke(args: argparse.Namespace) -> int:
+    """Amputate a federation member: token dead, access dead, effective now."""
+    from core.federation_registry import FederationRegistry, RegistryError
+
+    try:
+        FederationRegistry().revoke(args.agent_id)
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"revoked {args.agent_id}: token invalidated, federation access cut. "
+        "Its audit history remains queryable (`bourdon audit --agent "
+        f"{args.agent_id}`)."
+    )
+    return 0
+
+
+def _staging_library(args: argparse.Namespace) -> Path:
+    lib = getattr(args, "library", None)
+    if lib:
+        return Path(lib)
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+
+    return DEFAULT_LIBRARY_PATH
+
+
+def _handle_staging_list(args: argparse.Namespace) -> int:
+    from core.federation_staging import list_staged
+
+    staged = list_staged(_staging_library(args))
+    if not staged:
+        print("no staged writes")
+        return 0
+    for item in staged:
+        print(
+            f"{item.agent_id:30s} via {item.caller:20s} "
+            f"{item.entities:3d} entities {item.sessions:3d} sessions  "
+            f"staged {item.age_days:.1f}d ago"
+        )
+    return 0
+
+
+def _handle_staging_promote(args: argparse.Namespace) -> int:
+    from core.federation_staging import promote
+
+    try:
+        results = promote(_staging_library(args), args.agent_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for summary in results:
+        print(
+            f"promoted {args.agent_id}: "
+            f"+{summary.get('entities_added', 0)} entities "
+            f"(~{summary.get('entities_updated', 0)} updated), "
+            f"+{summary.get('sessions_added', 0)} sessions "
+            f"(~{summary.get('sessions_updated', 0)} updated)"
+        )
+    return 0
+
+
+def _handle_staging_reject(args: argparse.Namespace) -> int:
+    from core.federation_staging import reject
+
+    try:
+        count = reject(_staging_library(args), args.agent_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"rejected {count} staged write(s) for {args.agent_id}")
+    return 0
+
+
+def _handle_audit(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from core.federation_audit import FederationAudit
+
+    entries = FederationAudit().entries(
+        agent=getattr(args, "agent", None),
+        denials_only=getattr(args, "denials", False),
+        limit=getattr(args, "limit", 50),
+    )
+    if getattr(args, "export", False):
+        for entry in entries:
+            print(_json.dumps(entry, ensure_ascii=False))
+        return 0
+    if not entries:
+        print("no audit entries match")
+        return 0
+    for entry in entries:
+        detail = f"  ({entry['detail']})" if entry.get("detail") else ""
+        print(
+            f"{entry.get('ts', '?'):28s} {entry.get('decision', '?'):5s} "
+            f"{entry.get('agent', '?'):20s} {entry.get('op', '?'):28s} "
+            f"ns={entry.get('namespace', '*')}{detail}"
+        )
+    return 0
+
+
 def _handle_export_all(args: argparse.Namespace) -> int:
-    """Export L5 manifests for all healthy adapters."""
+    """Export L5 manifests for all healthy participants."""
     access_level = args.access_level
     since = _parse_since(getattr(args, "since", None))
     results: list[dict[str, Any]] = []
 
-    for agent_id, adapter_cls in _ADAPTER_REGISTRY:
+    for agent_id, participant_cls in discover_participants():
         try:
-            adapter = adapter_cls()
-            manifest = adapter.export_l5(since=since)
+            participant = participant_cls()
+            manifest = participant.export_l5(since=since)
             data = filter_manifest_for_access(manifest, access_level=access_level)
-            out_path = (
-                Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
-            )
-            write_l5_dict(data, out_path)
+            if getattr(participant_cls, "QUARANTINED_CLASS", False):
+                # Quarantine follows the content (spec/SPEC_v0.9.0.md D6):
+                # quarantined-class exports stage for review, never write
+                # to the live store directly.
+                from core.federation_staging import stage_manifest
+
+                out_path = stage_manifest(Path(args.library), agent_id, data)
+                status = "staged"
+            else:
+                out_path = (
+                    Path(args.library) / "agents" / f"{agent_id}.l5.yaml"
+                )
+                write_l5_dict(data, out_path)
+                status = "ok"
             entity_count = len(data.get("known_entities") or [])
             session_count = len(data.get("recent_sessions") or [])
             results.append({
                 "agent": agent_id,
-                "status": "ok",
+                "status": status,
                 "path": str(out_path),
                 "entities": entity_count,
                 "sessions": session_count,
@@ -520,8 +1373,10 @@ def _handle_sync_pull(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_build_context(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
-    manifest = _manifest_for_access(adapter, since=_parse_since(args.since), access_level="team")
+    participant = _build_participant(args)
+    manifest = _manifest_for_access(
+        participant, since=_parse_since(args.since), access_level="team"
+    )
     report = write_codex_context_artifacts(manifest, Path(args.out_dir), access_level="team")
     _print_yaml(report)
     return 0
@@ -574,9 +1429,9 @@ def _inspect_l5_quality(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_codex_doctor(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     try:
-        manifest = adapter.export_l5().to_dict()
+        manifest = participant.export_l5().to_dict()
         l5_quality = _inspect_l5_quality(manifest)
     except Exception as exc:  # noqa: BLE001
         l5_quality = {
@@ -584,11 +1439,11 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
             "reason": str(exc),
         }
     report = {
-        "source_coverage": _source_coverage(adapter),
-        "codex_state_db": _inspect_codex_state_db(adapter._codex_home),
+        "source_coverage": _source_coverage(participant),
+        "codex_state_db": _inspect_codex_state_db(participant._codex_home),
         "fallback_recall": _inspect_codex_fallback_recall(
-            adapter._codex_home,
-            adapter._codex_brain,
+            participant._codex_home,
+            participant._codex_brain,
         ),
         "l5_quality": l5_quality,
     }
@@ -598,13 +1453,13 @@ def _handle_codex_doctor(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_sync_native(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     library_path = (
         Path(args.library_path) if getattr(args, "library_path", None) else None
     )
     payload = _build_codex_native_memory_payload(
-        adapter._codex_home,
-        adapter._codex_brain,
+        participant._codex_home,
+        participant._codex_brain,
         max_sessions=args.max_sessions,
         from_library=bool(getattr(args, "from_library", False)),
         include_local=bool(getattr(args, "include_local", False)),
@@ -616,9 +1471,9 @@ def _handle_codex_sync_native(args: argparse.Namespace) -> int:
         Path(args.out)
         if getattr(args, "out", None)
         else (
-            _default_codex_memory_md_path(adapter._codex_home)
+            _default_codex_memory_md_path(participant._codex_home)
             if args.memory_md
-            else _default_codex_native_memory_path(adapter._codex_home)
+            else _default_codex_native_memory_path(participant._codex_home)
         )
     )
     mode = "write" if args.write else "dry-run"
@@ -669,9 +1524,9 @@ def _build_recognition_prompt_context(result: Any) -> str:
 
 
 def _handle_codex_recognize(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -710,15 +1565,15 @@ def _handle_codex_recognize(args: argparse.Namespace) -> int:
 
 
 def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
-    adapter = _build_adapter(args)
+    participant = _build_participant(args)
     access_level = args.access_level
     since = _parse_since(args.since)
     mode = "write" if args.write else "dry-run"
     strategy = getattr(args, "strategy", "legacy")
 
     native_payload = _build_codex_native_memory_payload(
-        adapter._codex_home,
-        adapter._codex_brain,
+        participant._codex_home,
+        participant._codex_brain,
         max_sessions=args.max_sessions,
     )
     native_target_kind = "memory_md" if args.memory_md else "bourdon_file"
@@ -726,9 +1581,9 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
         Path(args.native_out)
         if getattr(args, "native_out", None)
         else (
-            _default_codex_memory_md_path(adapter._codex_home)
+            _default_codex_memory_md_path(participant._codex_home)
             if args.memory_md
-            else _default_codex_native_memory_path(adapter._codex_home)
+            else _default_codex_native_memory_path(participant._codex_home)
         )
     )
     native_text = str(native_payload["text"])
@@ -741,7 +1596,7 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
         native_text = _merge_bourdon_memory_md_section(existing_text, native_text)
 
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=since,
         access_level=access_level,
     )
@@ -787,7 +1642,7 @@ def _handle_codex_prepare_turn(args: argparse.Namespace) -> int:
             compiled = compile_codex_turn(
                 args.prompt,
                 cwd=getattr(args, "cwd", None),
-                codex_home=adapter._codex_home,
+                codex_home=participant._codex_home,
                 library_path=getattr(args, "library_path", None),
                 access_level=access_level,
                 max_items=getattr(args, "max_items", 6),
@@ -856,19 +1711,218 @@ def _handle_codex_compile_turn(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fixture_adapter() -> CodexAdapter:
+def _handle_codex_hook_user_prompt_submit(args: argparse.Namespace) -> int:
+    """Codex UserPromptSubmit hook: inject a bounded turn brief.
+
+    Hook handlers run inside the user's live turn. They MUST fail open: any
+    failure — malformed input, non-UTF-8 stdin (common on Windows code pages),
+    a compiler error, or a post-processing raise — degrades to "no recognition
+    context", never a traceback into the user's turn. The entire body is wrapped
+    so the contract holds end to end (3-Star audit P0/P1: the stdin read and the
+    to_dict()/routing/print tail previously ran outside the guard).
+    """
+    try:
+        return _codex_hook_user_prompt_submit_impl(args)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: degrade, never block
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: {exc}", file=sys.stderr)
+        return 0
+
+
+def _read_hook_stdin() -> str:
+    """Read hook stdin without ever raising on encoding.
+
+    Real consoles hand us a byte stream whose code page may not be UTF-8
+    (cp932/cp936/cp1252 on Windows); decode with errors='replace' so a non-ASCII
+    prompt can never raise UnicodeDecodeError into the live turn. Test harnesses
+    inject an ``io.StringIO`` (no ``.buffer``); fall back to a text read there.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        return buffer.read().decode("utf-8", "replace")
+    return sys.stdin.read()
+
+
+def _codex_hook_user_prompt_submit_impl(args: argparse.Namespace) -> int:
+    raw_input = _read_hook_stdin()
+    if not raw_input.strip():
+        return 0
+
+    try:
+        hook_payload = json.loads(raw_input)
+    except json.JSONDecodeError as exc:
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: invalid JSON: {exc}", file=sys.stderr)
+        return 0
+
+    if not isinstance(hook_payload, dict):
+        return 0
+
+    prompt = hook_payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return 0
+
+    hook_cwd = hook_payload.get("cwd")
+    cwd = hook_cwd if isinstance(hook_cwd, str) and hook_cwd.strip() else args.cwd
+
+    try:
+        brief = compile_codex_turn(
+            prompt,
+            cwd=cwd,
+            codex_home=getattr(args, "codex_home", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery="explicit",
+        )
+    except Exception as exc:  # noqa: BLE001 -- hook contract: degrade, never block
+        if getattr(args, "verbose", False):
+            print(f"codex hook user-prompt-submit: {exc}", file=sys.stderr)
+        return 0
+
+    brief_data = brief.to_dict()
+    explicit_text = _build_codex_hook_context(
+        brief_data,
+        max_chars=args.max_chars,
+    )
+    if brief_data["routing"].get("mode") != "inject" or not explicit_text:
+        return 0
+    if brief_data["routing"].get("confidence") == "low":
+        return 0
+
+    hook_response = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": explicit_text,
+        }
+    }
+    print(json.dumps(hook_response, indent=2, sort_keys=False))
+    return 0
+
+
+def _build_codex_hook_context(
+    brief_data: dict[str, Any],
+    *,
+    max_chars: int,
+) -> str:
+    """Render the live Codex hook context without debug metadata.
+
+    The full compiler text is useful in `compile-turn`, but a live
+    UserPromptSubmit hook is injected directly into the conversation. Keep it
+    recognition-shaped: one anchor, no scores, no trace reasons.
+    """
+    items = brief_data.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+
+    first_item = items[0]
+    if not isinstance(first_item, dict):
+        return ""
+
+    anchor = _condense_codex_hook_anchor(
+        str(first_item.get("name") or "anchor"),
+        str(first_item.get("summary") or "Recognition anchor."),
+    )
+    source_agents = first_item.get("source_agents")
+    source_text = ""
+    if isinstance(source_agents, list) and source_agents:
+        agent_names = [
+            str(agent)
+            for agent in source_agents[:2]
+            if isinstance(agent, str) and agent.strip()
+        ]
+        if agent_names:
+            source_text = f" Source: {', '.join(agent_names)}."
+
+    context = (
+        f"Bourdon recognition: {anchor}.{source_text}\n"
+        "Use as context only; answer the user directly."
+    )
+    char_limit = max(200, min(int(max_chars), 1_000))
+    if len(context) <= char_limit:
+        return context
+    return context[: char_limit - 3].rstrip() + "..."
+
+
+def _condense_codex_hook_anchor(name: str, summary: str) -> str:
+    name_text = _clean_hook_anchor_text(name)
+    summary_text = _clean_hook_anchor_text(summary)
+    combined_text = name_text
+    if summary_text and summary_text != name_text:
+        combined_text = f"{name_text}. {summary_text}" if name_text else summary_text
+
+    subject = _hook_anchor_subject(combined_text, name_text)
+    detail = _hook_anchor_detail(name_text, summary_text)
+    if subject and detail:
+        return f"{subject}: {detail}"
+    if subject and not detail:
+        return subject
+    if detail:
+        return detail
+    return _safe_native_memory_text(name_text or summary_text or "Recognition anchor", limit=180)
+
+
+def _clean_hook_anchor_text(value: str) -> str:
+    text = value.replace("**", "")
+    text = text.replace("`", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _hook_anchor_subject(combined_text: str, name_text: str) -> str:
+    if name_text and len(name_text) <= 60 and not _looks_like_sentence(name_text):
+        return _safe_native_memory_text(name_text, limit=60)
+
+    ignored_subjects = {
+        "Picked",
+        "Recognition",
+        "Recent",
+        "Source",
+        "Ry",
+    }
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]{2,}\b", combined_text):
+        candidate = match.group(0)
+        if candidate not in ignored_subjects and not re.fullmatch(r"C\d+[A-Za-z]?", candidate):
+            return _safe_native_memory_text(candidate, limit=60)
+    return ""
+
+
+def _looks_like_sentence(value: str) -> bool:
+    return "." in value or ";" in value or len(value.split()) > 6
+
+
+def _hook_anchor_detail(name_text: str, summary_text: str) -> str:
+    fallback = summary_text if summary_text and summary_text != name_text else name_text
+    detail = _first_informative_hook_clause(fallback)
+    return _safe_native_memory_text(detail, limit=170)
+
+
+def _first_informative_hook_clause(value: str) -> str:
+    for clause in re.split(r"(?:\. |- |; )", value):
+        text = clause.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("picked ") or lowered.startswith("ry chose"):
+            continue
+        return text
+    return ""
+
+
+def _fixture_participant() -> CodexParticipant:
     tmpdir = tempfile.TemporaryDirectory()
     sources = create_sample_codex_sources(Path(tmpdir.name) / "home")
-    adapter = CodexAdapter(
+    participant = CodexParticipant(
         codex_home=sources["codex_home"],
         codex_brain=sources["codex_brain"],
     )
-    adapter._fixture_tmpdir = tmpdir  # type: ignore[attr-defined]
-    return adapter
+    participant._fixture_tmpdir = tmpdir  # type: ignore[attr-defined]
+    return participant
 
 
-def _source_coverage(adapter: CodexAdapter) -> dict[str, Any]:
-    health = adapter.health_check()
+def _source_coverage(participant: CodexParticipant) -> dict[str, Any]:
+    health = participant.health_check()
     details = health.details or {}
     return {
         "status": health.status,
@@ -1110,9 +2164,9 @@ def _turn_compiler_eval(
 
 
 def _handle_codex_eval(args: argparse.Namespace) -> int:
-    adapter = _fixture_adapter() if args.fixtures else _build_adapter(args)
+    participant = _fixture_participant() if args.fixtures else _build_participant(args)
     manifest = _manifest_for_access(
-        adapter,
+        participant,
         since=_parse_since(args.since),
         access_level=args.access_level,
     )
@@ -1141,7 +2195,7 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
     report = {
         "mode": "fixtures" if args.fixtures else "live",
         "access_level": args.access_level,
-        "source_coverage": _source_coverage(adapter),
+        "source_coverage": _source_coverage(participant),
         "session_count": len(sessions),
         "entity_counts": {
             "total": len(entities),
@@ -1182,7 +2236,7 @@ def _handle_codex_eval(args: argparse.Namespace) -> int:
             )
             report["turn_compiler"] = _turn_compiler_eval(
                 cases=cases,
-                codex_home=adapter._codex_home,
+                codex_home=participant._codex_home,
                 library_path=compiler_library,
                 cwd=compiler_cwd,
                 access_level=args.access_level,
@@ -1214,18 +2268,18 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
     to stderr.
     """
     try:
-        adapter = ClaudeCodeAdapter()
+        participant = ClaudeCodeParticipant()
     except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
         if args.verbose:
             print(
-                f"bourdon claude-code export: adapter init failed: {exc}",
+                f"bourdon claude-code export: participant init failed: {exc}",
                 file=sys.stderr,
             )
         return 0
 
     try:
-        manifest = adapter.export_l5(since=_parse_since(args.since))
-    except AdapterDiscoveryError as exc:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
         if args.verbose:
             print(
                 "bourdon claude-code export: no Claude Code memory sources "
@@ -1261,6 +2315,501 @@ def _handle_claude_code_export(args: argparse.Namespace) -> int:
             f"bourdon claude-code export: wrote {out_path}",
             file=sys.stderr,
         )
+    return 0
+
+
+def _handle_claude_code_automations_export(args: argparse.Namespace) -> int:
+    """
+    Build a Claude Code automations L5 manifest from
+    ``~/.claude/automations/<id>/{automation.toml, memory.md}`` and write it
+    to ``~/agent-library/agents/claude-code-automations.l5.yaml`` (or
+    ``--out`` if specified).
+
+    Designed for use both as a SessionEnd companion to ``claude-code export``
+    and as a cron-friendly publisher for automations that have no associated
+    interactive session. Silent on success; never raises -- matches the hook
+    contract of ``_handle_claude_code_export``.
+    """
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    try:
+        participant = ClaudeCodeAutomationsParticipant(automations_dir=automations_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: participant init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-code-automations export: no automations "
+                f"directory found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = (
+        Path(args.out) if args.out else _default_claude_code_automations_l5_path()
+    )
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-code-automations export: write to {out_path} "
+                f"failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-code-automations export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_desktop_cowork_export(args: argparse.Namespace) -> int:
+    """Build a Claude Desktop Co-Work L5 manifest and write it to
+    ``~/agent-library/agents/claude-desktop-cowork.l5.yaml`` (or ``--out``).
+
+    Emits recognition metadata only -- never conversation content. Silent on
+    success; never raises -- matches the SessionEnd hook contract of
+    ``_handle_claude_code_export``.
+    """
+    store_dir = Path(args.store_dir) if getattr(args, "store_dir", None) else None
+    try:
+        participant = ClaudeDesktopCoworkParticipant(store_dir=store_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: participant init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-desktop-cowork export: no Co-Work store "
+                f"found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = Path(args.out) if args.out else _default_claude_desktop_cowork_l5_path()
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-cowork export: write to {out_path} failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-desktop-cowork export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_desktop_code_export(args: argparse.Namespace) -> int:
+    """Build a Claude Desktop Code (GUI) L5 manifest and write it to
+    ``~/agent-library/agents/claude-desktop-code.l5.yaml`` (or ``--out``).
+
+    Emits recognition metadata only -- never conversation content. Silent on
+    success; never raises -- matches the SessionEnd hook contract of
+    ``_handle_claude_code_export``.
+    """
+    store_dir = Path(args.store_dir) if getattr(args, "store_dir", None) else None
+    try:
+        participant = ClaudeDesktopCodeParticipant(store_dir=store_dir)
+    except Exception as exc:  # noqa: BLE001 -- hook contract: never raises
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: participant init failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if getattr(args, "verbose", False):
+            print(
+                "bourdon claude-desktop-code export: no Code store "
+                f"found ({exc}), skipping",
+                file=sys.stderr,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: export failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+
+    out_path = Path(args.out) if args.out else _default_claude_desktop_code_l5_path()
+    try:
+        write_l5_dict(data, out_path)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if getattr(args, "verbose", False):
+            print(
+                f"bourdon claude-desktop-code export: write to {out_path} failed: {exc}",
+                file=sys.stderr,
+            )
+        return 0
+
+    if getattr(args, "print_manifest", False):
+        _print_yaml(data)
+    elif getattr(args, "verbose", False):
+        print(
+            f"bourdon claude-desktop-code export: wrote {out_path}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _handle_claude_code_automations_ingest(args: argparse.Namespace) -> int:
+    """Ingest an ``automations/`` tree into the local one.
+
+    Four modes (mutually exclusive, mode is auto-detected from flags):
+
+      1. ``--source <local-dir>`` -- merge from an already-downloaded tree
+         (also serves the claude-brain-relay case: ``--source
+         ~/claude-brain/automations``).
+      2. ``--artifact-zip <path>`` -- unzip a workflow artifact zip first.
+      3. ``--repo owner/name --run <run-id>`` -- shell out to ``gh run
+         download`` to fetch the named artifact, then merge.
+      4. ``--gh-issue owner/name#N --automation-id <id>`` -- shell out to
+         ``gh issue view`` to read the issue body + comments, treat each as
+         a memory.md run entry for the given automation_id. This is the
+         routine-self-report relay (Path C of the federation plan).
+
+    On success prints a JSON summary. Non-zero exit only on config error.
+    """
+    source: Path | None = None
+    cleanup_dir: tempfile.TemporaryDirectory | None = None
+
+    try:
+        if args.source:
+            source = Path(args.source)
+        elif args.gh_issue:
+            if shutil.which("gh") is None:
+                print(
+                    "claude-code-automations ingest: 'gh' CLI not on PATH "
+                    "-- install GitHub CLI to use --gh-issue.",
+                    file=sys.stderr,
+                )
+                return 127
+            if not args.automation_id:
+                print(
+                    "claude-code-automations ingest: --gh-issue requires "
+                    "--automation-id <id>.",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                repo_part, issue_num = args.gh_issue.rsplit("#", 1)
+            except ValueError:
+                print(
+                    "claude-code-automations ingest: --gh-issue must be "
+                    "'owner/repo#N'.",
+                    file=sys.stderr,
+                )
+                return 2
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-issue-")
+            cleanup_dir = tmp
+            try:
+                source = _build_source_from_gh_issue(
+                    Path(tmp.name),
+                    repo=repo_part,
+                    issue_number=issue_num,
+                    automation_id=args.automation_id,
+                    gh_runner=subprocess.run,
+                )
+            except _GhIssueIngestError as exc:
+                print(
+                    f"claude-code-automations ingest: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+        elif args.artifact_zip:
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            zip_path = Path(args.artifact_zip)
+            if not zip_path.is_file():
+                print(
+                    f"claude-code-automations ingest: artifact zip not found: {zip_path}",
+                    file=sys.stderr,
+                )
+                return 2
+            shutil.unpack_archive(str(zip_path), tmp.name)
+            source = _find_automations_root(Path(tmp.name))
+        elif args.repo and args.run:
+            if shutil.which("gh") is None:
+                print(
+                    "claude-code-automations ingest: 'gh' CLI not on PATH "
+                    "-- install GitHub CLI or use --source / --artifact-zip.",
+                    file=sys.stderr,
+                )
+                return 127
+            tmp = tempfile.TemporaryDirectory(prefix="bourdon-cca-ingest-")
+            cleanup_dir = tmp
+            cmd = [
+                "gh", "run", "download", str(args.run),
+                "--repo", args.repo,
+                "--name", args.artifact_name,
+                "--dir", tmp.name,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(
+                    f"claude-code-automations ingest: gh download failed: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+            source = _find_automations_root(Path(tmp.name))
+        else:
+            print(
+                "claude-code-automations ingest: must specify one of "
+                "--source / --artifact-zip / (--repo + --run) / --gh-issue.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if source is None or not source.is_dir():
+            print(
+                "claude-code-automations ingest: could not locate an "
+                "'automations/' directory inside the source.",
+                file=sys.stderr,
+            )
+            return 2
+
+        dest_dir = (
+            Path(args.dest)
+            if args.dest
+            else default_claude_code_automations_dir()
+        )
+        result = merge_automation_tree(source, dest_dir, default_kind=args.default_kind)
+
+        report = {
+            "source": str(source),
+            "dest": str(dest_dir),
+            "automations_seen": result.automations_seen,
+            "automations_created": result.automations_created,
+            "bullets_added": result.bullets_added,
+            "sections_created": result.sections_created,
+            "skipped_invalid_id": list(result.skipped),
+        }
+        # JSON for easy piping; YAML would be ambiguous with the doctor command.
+        print(json.dumps(report, indent=2))
+        return 0
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
+
+
+class _GhIssueIngestError(Exception):
+    """Raised when gh issue view fails or returns unparsable data."""
+
+
+def _build_source_from_gh_issue(
+    tmpdir: Path,
+    repo: str,
+    issue_number: str,
+    automation_id: str,
+    gh_runner,
+) -> Path:
+    """Materialize a synthetic automations/ tree from a GitHub issue.
+
+    Calls ``gh issue view <N> --repo <repo> --json body,comments,title``
+    and treats:
+      - the issue body as one run entry (dated by issue createdAt fallback today)
+      - each comment body as one run entry dated by the comment's createdAt
+
+    All run entries land in ``automations/<automation_id>/memory.md`` so the
+    standard merge_automation_tree pipeline handles deduplication.
+
+    ``gh_runner`` is injected so tests can stub the subprocess call.
+    """
+    import json as _json
+    import re as _re
+
+    cmd = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "title,body,comments,createdAt",
+    ]
+    result = gh_runner(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise _GhIssueIngestError(
+            f"gh issue view failed: {result.stderr.strip() or 'no stderr'}"
+        )
+    try:
+        payload = _json.loads(result.stdout)
+    except _json.JSONDecodeError as exc:
+        raise _GhIssueIngestError(f"gh returned non-JSON: {exc}") from exc
+
+    automations_dir = tmpdir / "automations" / automation_id
+    automations_dir.mkdir(parents=True)
+    (automations_dir / "automation.toml").write_text(
+        f'version = 1\n'
+        f'id = "{automation_id}"\n'
+        f'name = "{automation_id}"\n'
+        f'status = "ACTIVE"\n'
+        f'kind = "routine-gh-issue"\n'
+        f'rrule = ""\n'
+        f'cwds = []\n',
+        encoding="utf-8",
+    )
+
+    def _bullets_from_body(body: str) -> list[str]:
+        """Pull bullets out of an issue/comment body.
+
+        Routine prompts that follow the convention emit dashed bullets;
+        non-bulleted bodies become one bullet (the whole body, normalized).
+        """
+        bullets: list[str] = []
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            m = _re.match(r"^[-*]\s+(.*)$", stripped)
+            bullets.append(m.group(1) if m else stripped)
+        return bullets
+
+    def _date_from_iso(s: str) -> str:
+        """Extract YYYY-MM-DD from an ISO timestamp, with today as fallback."""
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2})", s or "")
+        return m.group(1) if m else datetime.now(timezone.utc).date().isoformat()
+
+    sections: list[tuple[str, list[str]]] = []
+    body = str(payload.get("body") or "").strip()
+    if body:
+        sections.append((_date_from_iso(payload.get("createdAt", "")), _bullets_from_body(body)))
+    for comment in payload.get("comments") or []:
+        c_body = str(comment.get("body") or "").strip()
+        if not c_body:
+            continue
+        sections.append((_date_from_iso(comment.get("createdAt", "")), _bullets_from_body(c_body)))
+
+    # Group bullets by date so multiple comments on the same day collapse.
+    by_date: dict[str, list[str]] = {}
+    for date_str, bullets in sections:
+        by_date.setdefault(date_str, []).extend(bullets)
+
+    lines: list[str] = []
+    for date_str in sorted(by_date.keys()):
+        if lines:
+            lines.append("")
+        lines.append(date_str)
+        for bullet in by_date[date_str]:
+            lines.append(f"- {bullet}")
+    (automations_dir / "memory.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return tmpdir / "automations"
+
+
+def _find_automations_root(extracted_dir: Path) -> Path | None:
+    """Locate the 'automations/' subtree inside an extracted artifact.
+
+    Workflows can upload either the parent `~/.claude/` or just the
+    `automations/` dir; tolerate both. Returns the dir containing
+    `<id>/automation.toml` children.
+    """
+    if extracted_dir.name == "automations" and extracted_dir.is_dir():
+        return extracted_dir
+    candidate = extracted_dir / "automations"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: walk one level deep
+    for child in extracted_dir.iterdir():
+        if child.is_dir() and (child / "automations").is_dir():
+            return child / "automations"
+    # Bottom case: the extracted dir IS the automations root (no wrapping)
+    if any(
+        (extracted_dir / sub / "automation.toml").is_file()
+        for sub in (p.name for p in extracted_dir.iterdir() if p.is_dir())
+    ):
+        return extracted_dir
+    return None
+
+
+def _handle_claude_code_automations_doctor(args: argparse.Namespace) -> int:
+    automations_dir = (
+        Path(args.automations_dir)
+        if getattr(args, "automations_dir", None)
+        else None
+    )
+    participant = ClaudeCodeAutomationsParticipant(automations_dir=automations_dir)
+    health = participant.health_check()
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+        },
+        "automations_dir": participant.native_path,
+    }
+    if health.proposed_fix:
+        report["health"]["proposed_fix"] = health.proposed_fix
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
+
+
+def _handle_improve_sync(args: argparse.Namespace) -> int:
+    from core.improve_backlog import sync
+
+    summary = sync(
+        Path(args.path).resolve(),
+        args.library,
+        agent_id=args.agent_id,
+        dry_run=args.dry_run,
+    )
+    if not args.dry_run:
+        # Dry-run already printed its would-be payload inside sync().
+        _print_yaml(summary)
     return 0
 
 
@@ -1324,7 +2873,192 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the exported manifest after writing it.",
     )
+    cursor_export_cmd.add_argument(
+        "--verbose", action="store_true",
+        help="Print diagnostics to stderr on failure (normally silent).",
+    )
     cursor_export_cmd.set_defaults(func=_handle_cursor_export)
+
+    cursor_doctor_cmd = cursor_subparsers.add_parser(
+        "doctor", help="Diagnose Cursor memory sources",
+    )
+    cursor_doctor_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
+    cursor_doctor_cmd.add_argument("--report-out")
+    cursor_doctor_cmd.set_defaults(func=_handle_cursor_doctor)
+
+    cursor_compile_turn_cmd = cursor_subparsers.add_parser(
+        "compile-turn", help="Compile a turn-scoped Cursor recognition brief",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "prompt", help="The user prompt to compile recognition for.",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "--cwd", help="Current working directory for project context.",
+    )
+    cursor_compile_turn_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_compile_turn_cmd.add_argument("--library-path")
+    cursor_compile_turn_cmd.add_argument("--max-items", type=int, default=6)
+    cursor_compile_turn_cmd.set_defaults(func=_handle_cursor_compile_turn)
+
+    cursor_sync_native_cmd = cursor_subparsers.add_parser(
+        "sync-native",
+        help="Render federation content into a Cursor-readable markdown file",
+    )
+    cursor_sync_mode = cursor_sync_native_cmd.add_mutually_exclusive_group()
+    cursor_sync_mode.add_argument(
+        "--dry-run", action="store_true", default=True,
+    )
+    cursor_sync_mode.add_argument(
+        "--write", action="store_true", default=False,
+        help="Write ~/.cursor/memory/bourdon_context.md.",
+    )
+    cursor_sync_native_cmd.add_argument("--out")
+    cursor_sync_native_cmd.add_argument("--cursor-dir", help=argparse.SUPPRESS)
+    cursor_sync_native_cmd.add_argument("--max-entities", type=int, default=100)
+    cursor_sync_native_cmd.add_argument("--max-sessions", type=int, default=20)
+    cursor_sync_native_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_sync_native_cmd.add_argument("--library-path")
+    cursor_sync_native_cmd.set_defaults(func=_handle_cursor_sync_native)
+
+    cursor_init_cmd = cursor_subparsers.add_parser(
+        "init",
+        help="Create a starter ~/.cursor/automations/ directory",
+    )
+    cursor_init_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cursor_init_cmd.add_argument(
+        "--automation-id", default="cursor-cloud-agent",
+    )
+    cursor_init_cmd.add_argument("--force", action="store_true")
+    cursor_init_cmd.set_defaults(func=_handle_cursor_init)
+
+    # ---- improve backlog subcommands ----------------------------------------
+    improve = subparsers.add_parser(
+        "improve",
+        help="shadcn/improve plan-backlog commands",
+    )
+    improve_subparsers = improve.add_subparsers(dest="improve_command")
+
+    improve_sync_cmd = improve_subparsers.add_parser(
+        "sync",
+        help="Federate a repo's improve-format plans/ backlog into the L6 store",
+    )
+    improve_sync_cmd.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Repo root containing a plans/ backlog (default: current directory)",
+    )
+    improve_sync_cmd.add_argument(
+        "--library",
+        type=Path,
+        default=DEFAULT_LIBRARY_PATH,
+        help=f"Path to agent-library (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    improve_sync_cmd.add_argument(
+        "--agent-id",
+        default="improve",
+        help="Agent slug to commit the backlog under (default: improve)",
+    )
+    improve_sync_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be committed without writing.",
+    )
+    improve_sync_cmd.set_defaults(func=_handle_improve_sync)
+
+    # ---- cursor automation subcommands -------------------------------------
+    cursor_automations = subparsers.add_parser(
+        "cursor-automations",
+        help="Cursor Cloud Agent automation memory commands",
+    )
+    cursor_automation_subparsers = cursor_automations.add_subparsers(
+        dest="cursor_automations_command",
+    )
+    cursor_automation_export_cmd = cursor_automation_subparsers.add_parser(
+        "export",
+        help="Build a Cursor automations L5 manifest",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--automations-dir", help=argparse.SUPPRESS,
+    )
+    cursor_automation_export_cmd.add_argument("--out")
+    cursor_automation_export_cmd.add_argument("--since")
+    cursor_automation_export_cmd.add_argument(
+        "--access-level", choices=("public", "team", "private"), default="team",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--print", dest="print_manifest", action="store_true",
+    )
+    cursor_automation_export_cmd.add_argument(
+        "--verbose", action="store_true",
+    )
+    cursor_automation_export_cmd.set_defaults(
+        func=_handle_cursor_automations_export,
+    )
+    cursor_automation_doctor_cmd = cursor_automation_subparsers.add_parser(
+        "doctor", help="Diagnose local Cursor automation memory coverage",
+    )
+    cursor_automation_doctor_cmd.add_argument(
+        "--automations-dir", help=argparse.SUPPRESS,
+    )
+    cursor_automation_doctor_cmd.add_argument("--report-out")
+    cursor_automation_doctor_cmd.set_defaults(
+        func=_handle_cursor_automations_doctor,
+    )
+    cursor_automation_ingest_cmd = cursor_automation_subparsers.add_parser(
+        "ingest",
+        help="Ingest an automations/ tree into the local Cursor automations",
+    )
+    cursor_automation_ingest_cmd.add_argument("--source")
+    cursor_automation_ingest_cmd.add_argument("--artifact-zip")
+    cursor_automation_ingest_cmd.add_argument("--dest")
+    cursor_automation_ingest_cmd.add_argument(
+        "--default-kind", default="cursor-cloud-agent",
+    )
+    cursor_automation_ingest_cmd.set_defaults(
+        func=_handle_cursor_automations_ingest,
+    )
+
+    # ---- codex automation subcommands --------------------------------------
+    codex_automations = subparsers.add_parser(
+        "codex-automations",
+        help="Codex automation memory commands",
+    )
+    codex_automation_subparsers = codex_automations.add_subparsers(
+        dest="codex_automations_command"
+    )
+
+    codex_automation_export_cmd = codex_automation_subparsers.add_parser(
+        "export",
+        help="Build a Codex automations L5 manifest from local automation memory",
+    )
+    codex_automation_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    codex_automation_export_cmd.add_argument("--out")
+    codex_automation_export_cmd.add_argument("--since")
+    codex_automation_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    codex_automation_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    codex_automation_export_cmd.set_defaults(func=_handle_codex_automations_export)
+
+    codex_automation_doctor_cmd = codex_automation_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Codex automation memory coverage",
+    )
+    codex_automation_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    codex_automation_doctor_cmd.add_argument("--report-out")
+    codex_automation_doctor_cmd.set_defaults(func=_handle_codex_automations_doctor)
 
     # ---- copilot subcommands ------------------------------------------------
     copilot = subparsers.add_parser("copilot", help="GitHub Copilot-specific commands")
@@ -1417,14 +3151,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- top-level doctor / export-all --------------------------------------
     doctor_cmd = subparsers.add_parser(
         "doctor",
-        help="Run health checks across all installed adapters",
+        help="Run health checks across all installed participants",
     )
     doctor_cmd.add_argument("--report-out")
     doctor_cmd.set_defaults(func=_handle_doctor)
 
     export_all_cmd = subparsers.add_parser(
         "export-all",
-        help="Export L5 manifests for all healthy adapters",
+        help="Export L5 manifests for all healthy participants",
     )
     export_all_cmd.add_argument("--since")
     export_all_cmd.add_argument(
@@ -1441,11 +3175,36 @@ def _build_parser() -> argparse.ArgumentParser:
     export_all_cmd.add_argument("--report-out")
     export_all_cmd.set_defaults(func=_handle_export_all)
 
+    agents_cmd = subparsers.add_parser(
+        "agents",
+        help=(
+            "Enumerate L5 manifests as a redacted, source-attributed JSON "
+            "object (read foundation for the desktop tray). With --federated, "
+            "merge this machine's agents with configured peers'."
+        ),
+    )
+    agents_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON (the stable tray contract; currently the default).",
+    )
+    agents_cmd.add_argument(
+        "--federated",
+        action="store_true",
+        help=(
+            "Also fan out to configured L6 peers and merge their agents in, "
+            "each re-tagged with the peer's machine name."
+        ),
+    )
+    agents_cmd.add_argument("--agents-dir", help=argparse.SUPPRESS)
+    agents_cmd.add_argument("--peers-config", help=argparse.SUPPRESS)
+    agents_cmd.set_defaults(func=_handle_agents)
+
     dogfood_cmd = subparsers.add_parser(
         "dogfood",
         help=(
             "End-to-end federation smoke test: plant marker in convention-file "
-            "adapters, export all, query L6, verify round-trip"
+            "participants, export all, query L6, verify round-trip"
         ),
     )
     dogfood_cmd.add_argument(
@@ -1488,11 +3247,194 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
     )
     serve_cmd.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind host for HTTP transport (default: 127.0.0.1 — loopback only). "
+            "Use 0.0.0.0 for cross-host / Tailnet federation; non-loopback "
+            "binds require auth configured (bourdon agent add / "
+            "BOURDON_PEER_TOKEN_SERVER) or the server refuses to start."
+        ),
+    )
+    serve_cmd.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress the onboarding banner",
     )
+    serve_cmd.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "Peer L6 server URL to federate with (e.g. http://pc.tailnet:7500). "
+            "Repeatable. Merged with peers from --peers-config. Cross-machine "
+            "federation requires the bourdon[federation] extra."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--peers-config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a YAML file listing peer L6 servers (entries: name, url, "
+            "token_env). Loaded if present; defaults to ~/.bourdon/peers.yaml. "
+            "See config/peers.example.yaml."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help=(
+            "Serve HTTP transport without Bearer-token auth. Off by default. "
+            "v0.9.0: honored on loopback binds ONLY — combined with a "
+            "non-loopback --host the server refuses to start."
+        ),
+    )
     serve_cmd.set_defaults(func=_handle_serve)
+
+    # -- Federation trust management (v0.9.0) ----------------------------------
+
+    agent_cmd = subparsers.add_parser(
+        "agent", help="Manage federation member identities (tokens + tiers)"
+    )
+    agent_sub = agent_cmd.add_subparsers(dest="agent_command")
+
+    agent_add = agent_sub.add_parser(
+        "add", help="Register a federation member; prints its token ONCE"
+    )
+    agent_add.add_argument("agent_id", help="Member slug (e.g. openclaw, clyde)")
+    agent_add.add_argument(
+        "--tier",
+        choices=("trusted", "quarantined"),
+        default="quarantined",
+        help="Trust tier (default: quarantined — deny-by-default)",
+    )
+    agent_add.add_argument(
+        "--grant",
+        action="append",
+        default=[],
+        metavar="NAMESPACE",
+        help="Agent-manifest namespace this member may read (repeatable)",
+    )
+    agent_add.add_argument(
+        "--i-understand-the-risk",
+        action="store_true",
+        dest="risk_ack",
+        help=(
+            "Required to register a quarantined-class agent (e.g. openclaw) "
+            "as trusted"
+        ),
+    )
+    agent_add.set_defaults(func=_handle_agent_add)
+
+    agent_list = agent_sub.add_parser(
+        "list", help="List registered federation members (no token material)"
+    )
+    agent_list.set_defaults(func=_handle_agent_list)
+
+    agent_rotate = agent_sub.add_parser(
+        "rotate", help="Rotate a member's token; prints the new token ONCE"
+    )
+    agent_rotate.add_argument("agent_id")
+    agent_rotate.set_defaults(func=_handle_agent_rotate)
+
+    agent_set_tier = agent_sub.add_parser(
+        "set-tier", help="Change a member's trust tier"
+    )
+    agent_set_tier.add_argument("agent_id")
+    agent_set_tier.add_argument("tier", choices=("trusted", "quarantined"))
+    agent_set_tier.add_argument(
+        "--i-understand-the-risk",
+        action="store_true",
+        dest="risk_ack",
+        help="Required to promote a quarantined-class agent to trusted",
+    )
+    agent_set_tier.set_defaults(func=_handle_agent_set_tier)
+
+    grant_cmd = subparsers.add_parser(
+        "grant", help="Grant a quarantined member read access to one namespace"
+    )
+    grant_cmd.add_argument("agent_id")
+    grant_cmd.add_argument("namespace", help="Agent-manifest namespace (agent id)")
+    grant_cmd.set_defaults(func=_handle_grant)
+
+    ungrant_cmd = subparsers.add_parser(
+        "ungrant", help="Remove a namespace grant from a member"
+    )
+    ungrant_cmd.add_argument("agent_id")
+    ungrant_cmd.add_argument("namespace")
+    ungrant_cmd.set_defaults(func=_handle_ungrant)
+
+    revoke_cmd = subparsers.add_parser(
+        "revoke",
+        help="Immediately invalidate a member's token and federation access",
+    )
+    revoke_cmd.add_argument("agent_id")
+    revoke_cmd.set_defaults(func=_handle_revoke)
+
+    staging_cmd = subparsers.add_parser(
+        "staging", help="Review quarantined writes awaiting promotion"
+    )
+    staging_sub = staging_cmd.add_subparsers(dest="staging_command")
+    staging_list = staging_sub.add_parser("list", help="List staged writes")
+    staging_list.add_argument("--library", type=Path, default=None)
+    staging_list.set_defaults(func=_handle_staging_list)
+    staging_promote = staging_sub.add_parser(
+        "promote", help="Merge a staged write into the live federation store"
+    )
+    staging_promote.add_argument("agent_id")
+    staging_promote.add_argument("--library", type=Path, default=None)
+    staging_promote.set_defaults(func=_handle_staging_promote)
+    staging_reject = staging_sub.add_parser(
+        "reject", help="Delete a staged write without promoting it"
+    )
+    staging_reject.add_argument("agent_id")
+    staging_reject.add_argument("--library", type=Path, default=None)
+    staging_reject.set_defaults(func=_handle_staging_reject)
+
+    audit_cmd = subparsers.add_parser(
+        "audit", help="Query the append-only federation audit log"
+    )
+    audit_cmd.add_argument("--agent", default=None, help="Filter to one member")
+    audit_cmd.add_argument(
+        "--denials", action="store_true", help="Show only denied operations"
+    )
+    audit_cmd.add_argument("--limit", type=int, default=50)
+    audit_cmd.add_argument(
+        "--export",
+        action="store_true",
+        help="Emit raw JSONL (machine-readable) instead of the table",
+    )
+    audit_cmd.set_defaults(func=_handle_audit)
+
+    openclaw_cmd = subparsers.add_parser(
+        "openclaw",
+        help="OpenClaw adapter (quarantined class — exports stage for review)",
+    )
+    openclaw_sub = openclaw_cmd.add_subparsers(dest="openclaw_command")
+    openclaw_export = openclaw_sub.add_parser(
+        "export",
+        help="Export the OpenClaw instance's L5 manifest into staging",
+    )
+    openclaw_export.add_argument(
+        "--url",
+        default=None,
+        help="OpenClaw instance URL (default: $OPENCLAW_URL or http://127.0.0.1:8080)",
+    )
+    openclaw_export.add_argument("--since")
+    openclaw_export.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    openclaw_export.add_argument("--library", type=Path, default=None)
+    openclaw_export.set_defaults(func=_handle_openclaw_export)
+    openclaw_doctor = openclaw_sub.add_parser(
+        "doctor", help="Health-check the OpenClaw instance (handshake gate)"
+    )
+    openclaw_doctor.add_argument("--url", default=None)
+    openclaw_doctor.set_defaults(func=_handle_openclaw_doctor)
 
     codex = subparsers.add_parser("codex", help="Codex-specific commands")
     codex_subparsers = codex.add_subparsers(dest="codex_command")
@@ -1695,6 +3637,35 @@ def _build_parser() -> argparse.ArgumentParser:
     compile_turn_cmd.add_argument("--report-out")
     compile_turn_cmd.set_defaults(func=_handle_codex_compile_turn)
 
+    hook_cmd = codex_subparsers.add_parser(
+        "hook",
+        help="Codex CLI hook handlers",
+    )
+    hook_subparsers = hook_cmd.add_subparsers(dest="codex_hook_command")
+    user_prompt_hook_cmd = hook_subparsers.add_parser(
+        "user-prompt-submit",
+        help="Inject a Codex UserPromptSubmit recognition brief",
+    )
+    user_prompt_hook_cmd.add_argument("--cwd")
+    user_prompt_hook_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    user_prompt_hook_cmd.add_argument("--codex-home", help=argparse.SUPPRESS)
+    user_prompt_hook_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    user_prompt_hook_cmd.add_argument("--max-items", type=int, default=1)
+    user_prompt_hook_cmd.add_argument("--max-chars", type=int, default=500)
+    user_prompt_hook_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print hook diagnostic failures to stderr.",
+    )
+    user_prompt_hook_cmd.set_defaults(func=_handle_codex_hook_user_prompt_submit)
+
     eval_cmd = codex_subparsers.add_parser("eval", help="Evaluate Codex sources")
     eval_mode = eval_cmd.add_mutually_exclusive_group()
     eval_mode.add_argument("--fixtures", action="store_true")
@@ -1777,6 +3748,172 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Log progress + errors to stderr (default: silent).",
     )
     cc_export_cmd.set_defaults(func=_handle_claude_code_export)
+
+    # ---- claude-code-automations subcommands -------------------------------
+    cca = subparsers.add_parser(
+        "claude-code-automations",
+        help="Claude Code automation memory commands",
+    )
+    cca_subparsers = cca.add_subparsers(dest="cca_command")
+
+    cca_export_cmd = cca_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Code automations L5 manifest from local "
+            "~/.claude/automations/ memory."
+        ),
+    )
+    cca_export_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_export_cmd.add_argument("--out")
+    cca_export_cmd.add_argument("--since")
+    cca_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cca_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cca_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cca_export_cmd.set_defaults(func=_handle_claude_code_automations_export)
+
+    cca_doctor_cmd = cca_subparsers.add_parser(
+        "doctor",
+        help="Diagnose local Claude Code automation memory coverage",
+    )
+    cca_doctor_cmd.add_argument("--automations-dir", help=argparse.SUPPRESS)
+    cca_doctor_cmd.add_argument("--report-out")
+    cca_doctor_cmd.set_defaults(func=_handle_claude_code_automations_doctor)
+
+    cca_ingest_cmd = cca_subparsers.add_parser(
+        "ingest-github",
+        help=(
+            "Ingest an automations/ tree produced by a claude-code-action "
+            "GitHub Actions run into the local ~/.claude/automations/."
+        ),
+    )
+    cca_ingest_cmd.add_argument(
+        "--source",
+        help="Local automations/ directory (already downloaded).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-zip",
+        help="Path to a workflow artifact zip to extract.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--repo",
+        help="GitHub repo (owner/name) to pull from via 'gh run download'.",
+    )
+    cca_ingest_cmd.add_argument(
+        "--run",
+        help="Workflow run id (used with --repo).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--artifact-name",
+        default="claude-code-automations",
+        help="Artifact name uploaded by the workflow (default: %(default)s).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--dest",
+        help="Destination automations directory (default: ~/.claude/automations).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--default-kind",
+        default="github-action",
+        help="kind= value for newly created automation.toml stubs (default: %(default)s).",
+    )
+    cca_ingest_cmd.add_argument(
+        "--gh-issue",
+        help=(
+            "GitHub issue to pull routine self-report comments from "
+            "(format: owner/repo#NUMBER). Requires --automation-id."
+        ),
+    )
+    cca_ingest_cmd.add_argument(
+        "--automation-id",
+        help=(
+            "Automation id to attribute the ingested entries to. "
+            "Required with --gh-issue."
+        ),
+    )
+    cca_ingest_cmd.set_defaults(func=_handle_claude_code_automations_ingest)
+
+    # ---- claude-desktop-cowork subcommands ---------------------------------
+    cdcw = subparsers.add_parser(
+        "claude-desktop-cowork",
+        help="Claude desktop app Co-Work / local-agent memory commands",
+    )
+    cdcw_subparsers = cdcw.add_subparsers(dest="cdcw_command")
+
+    cdcw_export_cmd = cdcw_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Desktop Co-Work L5 manifest from local "
+            "local-agent-mode-sessions/ state (metadata only -- no content)."
+        ),
+    )
+    cdcw_export_cmd.add_argument("--store-dir", help=argparse.SUPPRESS)
+    cdcw_export_cmd.add_argument("--out")
+    cdcw_export_cmd.add_argument("--since")
+    cdcw_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cdcw_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cdcw_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cdcw_export_cmd.set_defaults(func=_handle_claude_desktop_cowork_export)
+
+    # ---- claude-desktop-code subcommands -----------------------------------
+    cdco = subparsers.add_parser(
+        "claude-desktop-code",
+        help="Claude desktop app GUI Claude Code memory commands",
+    )
+    cdco_subparsers = cdco.add_subparsers(dest="cdco_command")
+
+    cdco_export_cmd = cdco_subparsers.add_parser(
+        "export",
+        help=(
+            "Build a Claude Desktop Code L5 manifest from local "
+            "claude-code-sessions/ state (metadata only -- no content)."
+        ),
+    )
+    cdco_export_cmd.add_argument("--store-dir", help=argparse.SUPPRESS)
+    cdco_export_cmd.add_argument("--out")
+    cdco_export_cmd.add_argument("--since")
+    cdco_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cdco_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    cdco_export_cmd.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log progress + errors to stderr (default: silent).",
+    )
+    cdco_export_cmd.set_defaults(func=_handle_claude_desktop_code_export)
 
     # ---- benchmark ---------------------------------------------------------
     benchmark_cmd = subparsers.add_parser(

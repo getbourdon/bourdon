@@ -17,7 +17,7 @@ Store layout on disk::
     |   +-- clyde.l5.yaml
     |   ...
 
-Each `*.l5.yaml` file is an L5 manifest produced by an adapter. See
+Each `*.l5.yaml` file is an L5 manifest produced by a participant. See
 ``spec/L5_schema.json`` for the manifest schema.
 
 Design invariants
@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -213,7 +214,7 @@ class ProjectSummary:
         }
 
 
-# -- Visibility helpers (module-local, independent of adapters.base) ----------
+# -- Visibility helpers (module-local, independent of participants.base) ----------
 
 
 def _entity_visibility(entity: dict) -> str:
@@ -244,7 +245,7 @@ def _resolve_access_level(
     Default is ``public`` (most restrictive view of federation content).
     For single-user federations where the user trusts their own agents,
     set ``BOURDON_DEFAULT_ACCESS_LEVEL=team`` (or ``private``) in the
-    environment. Without this override, three of five shipping adapters
+    environment. Without this override, three of five shipping participants
     (Codex always, Copilot + Cursor by default policy) tag entities
     ``team``, which are silently filtered from default ``public`` queries.
     Finding #2 from the Layer 1 federation work.
@@ -311,6 +312,10 @@ class L6Store:
         self.peers: list["RemoteL6Client"] = list(peers or [])
         self._manifests: dict[str, dict] = {}
         self._entity_index: dict[str, set[str]] = defaultdict(set)
+        # Serializes commit_l5's read-modify-write-reload. The L6 server runs
+        # sync MCP tools in a threadpool, so concurrent commits to the same
+        # agent would otherwise race and drop contributions (3-Star audit P1-3).
+        self._write_lock = threading.RLock()
         self.reload_all()
 
     # -- Load / reload ---------------------------------------------------------
@@ -789,6 +794,133 @@ class L6Store:
                     agents.add(a)
         return sorted(agents)
 
+    async def export_agents_federated(
+        self,
+        local_name: str | None = None,
+    ) -> dict:
+        """Source-attributed export of local + peer agents for the desktop tray.
+
+        Produces the multi-machine ``bourdon.agents/v1`` envelope: this
+        machine's own agents (``source_kind="local"``) plus each peer's
+        ``export_agents`` output, with every peer agent's ``source`` re-tagged
+        caller-side to the peer's configured name (``source_kind="peer"``).
+        The peer's self-reported ``machine`` / per-agent ``source`` is never
+        trusted -- this is what prevents the bidirectional-federation echo (the
+        Mac federating the PC's agents back to the PC) and source spoofing.
+
+        Agents dedupe by ``(source, id)`` so a same-named agent that exists on
+        two machines (e.g. ``claude-code`` on both) is kept as two distinct
+        rows, one per source.
+
+        A peer that raises, returns ``None``, returns no agents, or is too old
+        to expose ``export_agents`` contributes nothing and is reported with
+        ``reachable: false`` / ``agent_count: 0`` -- never crashes the export.
+        The local source is always ``reachable: true``.
+
+        Parameters
+        ----------
+        local_name : str, optional
+            Machine label for this server's own agents. Defaults to the
+            resolved local name (``BOURDON_LOCAL_NAME`` or hostname).
+
+        Returns
+        -------
+        dict
+            ``{"schema", "agents": [...], "sources": [...]}`` where each source
+            is ``{"name", "kind", "reachable", "agent_count"}``.
+        """
+        from core.agents_export import (
+            AGENTS_SCHEMA,
+            export_local_agents,
+            resolve_local_name,
+        )
+
+        machine = local_name or resolve_local_name()
+        local_export = export_local_agents(self._agents_dir(), machine)
+        local_agents = list(local_export.get("agents") or [])
+
+        merged: dict[tuple[str, str], dict] = {}
+
+        def _ingest(agent: dict, source: str, source_kind: str) -> None:
+            tagged = dict(agent)
+            tagged["source"] = source
+            tagged["source_kind"] = source_kind
+            key = (source, str(tagged.get("id") or ""))
+            merged.setdefault(key, tagged)
+
+        for agent in local_agents:
+            _ingest(agent, machine, "local")
+
+        sources: list[dict] = [
+            {
+                "name": machine,
+                "kind": "local",
+                "reachable": True,
+                "agent_count": len(local_agents),
+            }
+        ]
+
+        if self.peers:
+            import asyncio
+
+            peer_results = await asyncio.gather(
+                *(peer.export_agents() for peer in self.peers),
+                return_exceptions=True,
+            )
+            for peer, payload in zip(self.peers, peer_results, strict=False):
+                if isinstance(payload, Exception):
+                    logger.warning(
+                        "peer %s export_agents raised: %s", peer.name, payload
+                    )
+                    sources.append(
+                        {
+                            "name": peer.name,
+                            "kind": "peer",
+                            "reachable": False,
+                            "agent_count": 0,
+                        }
+                    )
+                    continue
+                peer_agents = (
+                    payload.get("agents")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if not peer_agents:
+                    # None / empty / missing tool (un-upgraded peer) -> unreachable.
+                    sources.append(
+                        {
+                            "name": peer.name,
+                            "kind": "peer",
+                            "reachable": False,
+                            "agent_count": 0,
+                        }
+                    )
+                    continue
+                count = 0
+                for agent in peer_agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    _ingest(agent, peer.name, "peer")
+                    count += 1
+                sources.append(
+                    {
+                        "name": peer.name,
+                        "kind": "peer",
+                        "reachable": True,
+                        "agent_count": count,
+                    }
+                )
+
+        agents = list(merged.values())
+        agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
+
+        return {
+            "schema": AGENTS_SCHEMA,
+            "agents": agents,
+            "sources": sources,
+        }
+
     async def find_entity_federated(
         self,
         name: str,
@@ -844,7 +976,11 @@ class L6Store:
                         target.tags.append(tag)
                 for agent_id, summary in (entry.get("summaries") or {}).items():
                     if isinstance(agent_id, str) and isinstance(summary, str):
-                        tagged = f"peer:{peer.name}:{agent_id}"
+                        tagged = (
+                            agent_id
+                            if agent_id.startswith("peer:")
+                            else f"peer:{peer.name}:{agent_id}"
+                        )
                         target.summaries.setdefault(tagged, summary)
         return list(by_key.values())
 
@@ -900,7 +1036,15 @@ class L6Store:
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
-                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                # Don't re-tag rows that already carry peer provenance — a
+                # well-behaved peer answers local-only (depth-1, #139), but a
+                # pre-#139 peer may return its own federated merge.
+                raw_agent = str(s.get("agent") or "")
+                tagged_agent = (
+                    raw_agent
+                    if raw_agent.startswith("peer:")
+                    else f"peer:{peer.name}:{raw_agent}"
+                )
                 date_str = str(s.get("date") or "")
                 cwd = s.get("cwd")
                 key = (date_str, cwd, tagged_agent)
@@ -975,11 +1119,18 @@ class L6Store:
                 continue
             for a in payload.get("agents") or []:
                 if isinstance(a, str):
-                    agent_set.add(f"peer:{peer.name}:{a}")
+                    agent_set.add(
+                        a if a.startswith("peer:") else f"peer:{peer.name}:{a}"
+                    )
             for s in payload.get("recent_sessions") or []:
                 if not isinstance(s, dict):
                     continue
-                tagged_agent = f"peer:{peer.name}:{s.get('agent', '')}"
+                raw_agent = str(s.get("agent") or "")
+                tagged_agent = (
+                    raw_agent
+                    if raw_agent.startswith("peer:")
+                    else f"peer:{peer.name}:{raw_agent}"
+                )
                 key = (str(s.get("date") or ""), s.get("cwd"), tagged_agent)
                 if key in seen:
                     continue
@@ -1007,7 +1158,7 @@ class L6Store:
                     merged_entities[key2] = target
                 for a in entry.get("agents") or []:
                     if isinstance(a, str):
-                        tagged = f"peer:{peer.name}:{a}"
+                        tagged = a if a.startswith("peer:") else f"peer:{peer.name}:{a}"
                         if tagged not in target.agents:
                             target.agents.append(tagged)
                 for t in entry.get("types") or []:
@@ -1019,7 +1170,10 @@ class L6Store:
                 for agent_id, summary in (entry.get("summaries") or {}).items():
                     if isinstance(agent_id, str) and isinstance(summary, str):
                         target.summaries.setdefault(
-                            f"peer:{peer.name}:{agent_id}", summary
+                            agent_id
+                            if agent_id.startswith("peer:")
+                            else f"peer:{peer.name}:{agent_id}",
+                            summary,
                         )
         merged_sessions.sort(key=lambda s: s.date, reverse=True)
         return ProjectSummary(
@@ -1040,13 +1194,44 @@ class L6Store:
         sessions: list[dict] | None = None,
         mode: str = "merge",
     ) -> dict[str, Any]:
+        """Serialize the read-modify-write-reload (3-Star audit P1-3).
+
+        The L6 server runs sync MCP tools in a threadpool, so two concurrent
+        commits to the same agent would otherwise both read the same cached
+        manifest, each build a merge missing the other's rows, and the second
+        write would silently drop the first's contribution (and could corrupt
+        the shared in-memory entity index). The per-store lock makes the whole
+        operation atomic; the logic lives in :meth:`_commit_l5_impl`.
+        """
+        with self._write_lock:
+            return self._commit_l5_impl(
+                agent_id,
+                agent_type=agent_type,
+                instance=instance,
+                role_narrative=role_narrative,
+                entities=entities,
+                sessions=sessions,
+                mode=mode,
+            )
+
+    def _commit_l5_impl(
+        self,
+        agent_id: str,
+        *,
+        agent_type: str | None = None,
+        instance: str | None = None,
+        role_narrative: str | None = None,
+        entities: list[dict] | None = None,
+        sessions: list[dict] | None = None,
+        mode: str = "merge",
+    ) -> dict[str, Any]:
         """
         Write a contribution to ``~/agent-library/agents/<agent_id>.l5.yaml``.
 
         This is the write-side companion to the existing read APIs. It exists
         so cloud-only or webview-wrapper agents (Claude Desktop, ChatGPT
         desktop, etc.) -- which have no readable on-disk store for a Bourdon
-        adapter to scrape -- can contribute to federation by calling this
+        participant to scrape -- can contribute to federation by calling this
         method (via the ``commit_to_federation`` MCP tool).
 
         Parameters
@@ -1181,7 +1366,7 @@ class L6Store:
 
         # -- write atomically -----------------------------------------------
         # Lazy import to avoid a circular dependency: core.l5_io imports
-        # adapters.base.L5Manifest which imports nothing in core, but the
+        # participants.base.L5Manifest which imports nothing in core, but the
         # lazy import keeps the import graph tidy in case that ever flips.
         from core.l5_io import write_l5_dict
 
@@ -1232,6 +1417,45 @@ _ENTITY_LIST_FIELDS = ("tags", "aliases")
 _SESSION_LIST_FIELDS = ("project_focus", "key_actions", "files_touched")
 
 
+def _coerce_list(value: Any) -> list:
+    """Normalize a list-typed manifest field that may arrive as a scalar.
+
+    Reader-exported manifests can carry list fields as bare strings (e.g.
+    ``project_focus: "Bourdon"``). Without coercion the merge union either
+    crashes (`'str' object has no attribute 'append'` when the EXISTING side
+    is a string) or silently corrupts (iterating an INCOMING string unions
+    its characters). Issue #134.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _union_list_field(target: dict, field_name: str, value: Any) -> None:
+    """Union ``value`` into ``target[field_name]``, coercing both sides."""
+    current = _coerce_list(target.get(field_name))
+    target[field_name] = current
+    for item in _coerce_list(value):
+        if item not in current:
+            current.append(item)
+
+
+def _normalized_row(row: dict, list_fields: tuple[str, ...]) -> dict:
+    """Copy ``row`` with every present list field coerced via ``_coerce_list``.
+
+    Applied on the add path so freshly written rows land schema-clean on
+    disk — manifest consumers beyond the merge union (agents export,
+    recognition, the tray) read these fields too (#134 follow-up).
+    """
+    out = dict(row)
+    for field_name in list_fields:
+        if field_name in out:
+            out[field_name] = _coerce_list(out[field_name])
+    return out
+
+
 def _merge_entities(
     existing: list[dict], incoming: list[dict]
 ) -> tuple[int, int]:
@@ -1256,15 +1480,12 @@ def _merge_entities(
             target = by_key[key]
             for field_name, value in incoming_ent.items():
                 if field_name in _ENTITY_LIST_FIELDS:
-                    target.setdefault(field_name, [])
-                    for item in value or []:
-                        if item not in target[field_name]:
-                            target[field_name].append(item)
+                    _union_list_field(target, field_name, value)
                 elif value is not None:
                     target[field_name] = value
             updated += 1
         else:
-            existing.append(dict(incoming_ent))
+            existing.append(_normalized_row(incoming_ent, _ENTITY_LIST_FIELDS))
             by_key[key] = existing[-1]
             added += 1
     return added, updated
@@ -1294,15 +1515,12 @@ def _merge_sessions(
             target = by_key[key]
             for field_name, value in incoming_ses.items():
                 if field_name in _SESSION_LIST_FIELDS:
-                    target.setdefault(field_name, [])
-                    for item in value or []:
-                        if item not in target[field_name]:
-                            target[field_name].append(item)
+                    _union_list_field(target, field_name, value)
                 elif value is not None:
                     target[field_name] = value
             updated += 1
         else:
-            existing.append(dict(incoming_ses))
+            existing.append(_normalized_row(incoming_ses, _SESSION_LIST_FIELDS))
             by_key[key] = existing[-1]
             added += 1
     return added, updated

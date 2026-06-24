@@ -1,0 +1,349 @@
+"""
+Bourdon external participant for Cursor (the AI-first IDE).
+
+Cursor stores its workspace state in SQLite databases at platform-specific
+paths (`~/.config/Cursor/`, `~/Library/Application Support/Cursor/`,
+`%APPDATA%/Cursor/`). This participant discovers those stores, copies them
+read-only to a tmp file, parses the ``ItemTable`` key-value rows, and
+emits a normalized Bourdon L5 manifest.
+
+The SQLite extraction logic is in ``participants/_cursor_sqlite.py``. This
+module wraps it in the ``BourdonParticipant`` Protocol from
+``participants/base.py`` and applies the project's standard visibility policy.
+
+Usage::
+
+    from participants.cursor import CursorParticipant
+
+    participant = CursorParticipant()
+    store = participant.discover()
+    manifest = participant.export_l5()
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from participants._cursor_sqlite import (
+    CursorSQLiteMemories,
+    _iter_state_dbs,
+    default_cursor_dir,
+    extract_cursor_memories,
+)
+from participants.base import (
+    AgentInfo,
+    AgentStore,
+    Entity,
+    HealthStatus,
+    L5Manifest,
+    ParticipantDiscoveryError,
+    Session,
+    Visibility,
+    VisibilityPolicy,
+    filter_for_federation,
+)
+
+logger = logging.getLogger(__name__)
+
+
+AGENT_ID = "cursor"
+AGENT_TYPE = "code-assistant"
+ROLE_NARRATIVE = (
+    "AI-first IDE. Bourdon reads the SQLite-backed composer/workspace "
+    "state to surface recent sessions and project entities to other agents."
+)
+
+DEFAULT_POLICY = VisibilityPolicy(
+    default=Visibility.TEAM,
+    private_tags=["personal", "credential", "secret"],
+    team_tags=["cursor", "workspace", "sqlite"],
+)
+
+_SPEC_VERSION = "0.1"
+
+
+# -- Short-index integration --------------------------------------------------
+
+
+def _read_short_index(path: Path) -> list[dict[str, Any]]:
+    """Read a short-index.json and return normalized entries."""
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("CursorParticipant: cannot read short-index %s: %s", path, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("topic_key")]
+
+
+def _short_index_to_entities(
+    workspace_root: Path | None,
+    cursor_dir: Path | None,
+) -> list[Entity]:
+    """Merge workspace + global short-index files into Entity objects."""
+    paths: list[Path] = []
+    if workspace_root:
+        paths.append(workspace_root / ".cursor" / "memory" / "short-index.json")
+    cursor_home = (
+        Path(os.environ["CURSOR_DIR"])
+        if os.environ.get("CURSOR_DIR")
+        else None
+    )
+    home_base = cursor_home or Path.home() / ".cursor"
+    home_index = home_base / "memory" / "short-index.json"
+    paths.append(home_index)
+
+    merged: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        for entry in _read_short_index(path):
+            key = str(entry["topic_key"]).strip().lower()
+            merged[key] = entry
+
+    entities: list[Entity] = []
+    for entry in merged.values():
+        name = str(entry.get("topic_name", entry.get("topic_key", ""))).strip()
+        if not name:
+            continue
+        aliases_raw = entry.get("triggers", entry.get("aliases", []))
+        aliases = (
+            [str(a).strip() for a in aliases_raw if str(a).strip()]
+            if isinstance(aliases_raw, list) else []
+        )
+        summary = str(entry.get("summary", "")).strip()
+        tags_raw = entry.get("tags", [])
+        tags = (
+            [str(t).strip() for t in tags_raw if str(t).strip()]
+            if isinstance(tags_raw, list) else []
+        )
+        tags.append("short-index")
+        access = str(entry.get("access_level", "team")).strip().lower()
+        visibility = Visibility.PRIVATE if access == "private" else (
+            Visibility.PUBLIC if access == "public" else Visibility.TEAM
+        )
+        entities.append(Entity(
+            name=name,
+            type="topic",
+            aliases=aliases,
+            summary=summary or None,
+            tags=tags,
+            last_touched=str(entry.get("last_updated", "")) or None,
+            visibility=visibility,
+        ))
+    return entities
+
+
+# -- Conversion helpers -------------------------------------------------------
+
+
+def _to_session(raw) -> Session:
+    return Session(
+        date=raw.date or "",
+        cwd=raw.cwd or None,
+        project_focus=[],
+        key_actions=list(raw.key_actions),
+        files_touched=list(raw.files_touched),
+    )
+
+
+def _to_entity(raw) -> Entity:
+    return Entity(
+        name=raw.name,
+        type=raw.entity_type or None,
+        aliases=list(raw.aliases),
+        summary=raw.summary or None,
+        tags=list(raw.tags),
+        last_touched=raw.last_updated or None,
+    )
+
+
+# -- Participant class --------------------------------------------------------
+
+
+class CursorParticipant:
+    """External participant for Cursor's SQLite workspace state."""
+
+    agent_id = AGENT_ID
+    agent_type = AGENT_TYPE
+
+    @classmethod
+    def default_native_path(cls, home: Path | None = None) -> Path:
+        """Conventional Cursor config dir (``~/.cursor``) used by the setup wizard.
+
+        The wizard probes ``~/.cursor`` for *presence*; the SQLite workspace state
+        that ``export_l5`` actually reads lives at the platform-specific
+        :func:`default_cursor_dir` (e.g. ``%APPDATA%/Cursor``). Detection and
+        extraction intentionally use different anchors.
+        """
+        return (home or Path.home()) / ".cursor"
+
+    def __init__(
+        self,
+        cursor_dir: Path | None = None,
+        workspace_root: Path | None = None,
+    ) -> None:
+        self._cursor_dir = cursor_dir
+        self._workspace_root = workspace_root
+        self._policy = DEFAULT_POLICY
+
+    @property
+    def native_path(self) -> str:
+        path = self._cursor_dir or default_cursor_dir()
+        return str(path) if path is not None else ""
+
+    # -- Protocol surface -----------------------------------------------------
+
+    def discover(self) -> AgentStore:
+        """Locate the Cursor data directory and return metadata."""
+        path = self._cursor_dir or default_cursor_dir()
+        if path is None or not path.is_dir():
+            raise ParticipantDiscoveryError(
+                f"Cursor data directory not found at {path!r}. "
+                "Pass an explicit ``cursor_dir`` to CursorParticipant() if Cursor "
+                "stores its state somewhere non-standard."
+            )
+        dbs = _iter_state_dbs(path)
+        db_details = []
+        for db in dbs:
+            try:
+                size = db.stat().st_size
+            except OSError:
+                size = -1
+            db_details.append({"path": str(db), "size_bytes": size})
+
+        return AgentStore(
+            path=str(path),
+            version="unknown",
+            metadata={
+                "platform_default": str(default_cursor_dir()),
+                "databases_found": len(dbs),
+                "databases": db_details,
+            },
+        )
+
+    def export_sessions(
+        self,
+        since: datetime,
+        limit: int = 100,
+    ) -> list[Session]:
+        """Return recent Cursor sessions newer than ``since``."""
+        memories = self._extract()
+        out: list[Session] = []
+        since_iso = since.astimezone(timezone.utc).date().isoformat()
+        for raw in memories.sessions:
+            if raw.date and raw.date < since_iso:
+                continue
+            out.append(_to_session(raw))
+            if len(out) >= limit:
+                break
+        return out
+
+    def export_l5(self, since: datetime | None = None) -> L5Manifest:
+        """Build the L5 manifest from Cursor's current SQLite state.
+
+        Merges curated short-index entities alongside SQLite-extracted ones.
+        """
+        memories = self._extract()
+        sessions = [_to_session(s) for s in memories.sessions]
+        if since is not None:
+            since_iso = since.astimezone(timezone.utc).date().isoformat()
+            sessions = [s for s in sessions if not s.date or s.date >= since_iso]
+
+        entities = [_to_entity(e) for e in memories.entities]
+        short_index_entities = _short_index_to_entities(
+            self._workspace_root, self._cursor_dir,
+        )
+        seen_names = {e.name.lower() for e in entities}
+        for si_entity in short_index_entities:
+            if si_entity.name.lower() not in seen_names:
+                entities.append(si_entity)
+                seen_names.add(si_entity.name.lower())
+        visible_entities = filter_for_federation(entities, self._policy)
+
+        return L5Manifest(
+            spec_version=_SPEC_VERSION,
+            agent=AgentInfo(
+                id=AGENT_ID,
+                type=AGENT_TYPE,
+                role_narrative=ROLE_NARRATIVE,
+                spec_version_compat=_SPEC_VERSION,
+            ),
+            last_updated=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            capabilities=["composer-history", "workspace-state"],
+            recent_sessions=sessions,
+            known_entities=visible_entities,
+            visibility_policy=self._policy,
+        )
+
+    def health_check(self) -> HealthStatus:
+        """Report ok / degraded / blocked. Never raises."""
+        path = self._cursor_dir or default_cursor_dir()
+        if path is None:
+            return HealthStatus(
+                status="blocked",
+                reason="Cursor data directory not resolvable on this platform.",
+                details={},
+                proposed_fix=(
+                    "Install Cursor (https://cursor.sh) and open it once. "
+                    "Set CURSOR_DIR if Cursor stores state outside the default location."
+                ),
+            )
+        if not path.is_dir():
+            return HealthStatus(
+                status="blocked",
+                reason=f"Cursor data directory not present at {path}.",
+                details={"expected_path": str(path)},
+                proposed_fix=(
+                    "Install Cursor and open it once to create the data directory, "
+                    "or set CURSOR_DIR to the actual location."
+                ),
+            )
+        try:
+            memories = self._extract()
+        except Exception as exc:  # noqa: BLE001 -- health check must not raise
+            logger.warning("CursorParticipant health_check extraction failed: %s", exc)
+            return HealthStatus(
+                status="degraded",
+                reason="Cursor data directory present but extraction failed.",
+                details={"error": str(exc)},
+                proposed_fix=(
+                    "Close Cursor (its SQLite stores may be locked) then re-run "
+                    "`bourdon cursor export`. If extraction still fails, file an "
+                    "issue with the error above."
+                ),
+            )
+        if memories.databases_scanned == ():
+            return HealthStatus(
+                status="degraded",
+                reason="No Cursor SQLite stores found under the data directory.",
+                details={"path": str(path)},
+                proposed_fix=(
+                    "Open Cursor and use it for at least one chat session, then "
+                    "re-run `bourdon cursor export`."
+                ),
+            )
+        return HealthStatus(
+            status="ok",
+            reason=None,
+            details={
+                "databases_scanned": len(memories.databases_scanned),
+                "sessions_extracted": len(memories.sessions),
+                "entities_extracted": len(memories.entities),
+                "malformed_records": memories.malformed_records,
+            },
+        )
+
+    # -- Internal -------------------------------------------------------------
+
+    def _extract(self) -> CursorSQLiteMemories:
+        return extract_cursor_memories(self._cursor_dir)

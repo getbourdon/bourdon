@@ -2,7 +2,7 @@
 
 Claude Code is Anthropic's CLI agent. Unlike Claude Desktop, which is a read-only MCP host, Claude Code is **both a writer and a reader** in the Bourdon federation when fully wired:
 
-- **Writer**: the `claude-code` adapter that ships with Bourdon parses your claude-brain `LOG/`, Claude Code auto-memory, and the MCP knowledge graph into a Claude Code L5 manifest at `~/agent-library/agents/claude-code.l5.yaml`. A SessionEnd hook runs `bourdon claude-code export` after every session.
+- **Writer**: the `claude-code` participant that ships with Bourdon parses your claude-brain `LOG/`, Claude Code auto-memory, and the MCP knowledge graph into a Claude Code L5 manifest at `~/agent-library/agents/claude-code.l5.yaml`. A SessionEnd hook runs `bourdon claude-code export` after every session.
 - **Reader**: the `bourdon serve` MCP server, registered in Claude Code's `mcp.json`, lets a Claude Code session query the federation mid-conversation — the same surface Claude Desktop uses.
 
 This doc covers both sides, on macOS and Windows.
@@ -150,7 +150,7 @@ If your `agent-library/` lives somewhere other than `~/agent-library/`:
 
 ## Visibility (the access-level question)
 
-Three of five adapters tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
+Three of five participants tag entities as `team` visibility by default (Codex always, Copilot and Cursor by policy). Bourdon's L6 tools default to `access_level="public"`, which **filters those entities out**. For a single-user federation where you trust your own agents, you want `team`.
 
 The friendly fix shipped in v0.6.0: set an environment variable that flips the L6 default per install. Set it inside the MCP server entry so it inherits when launched as a subprocess:
 
@@ -180,7 +180,7 @@ bourdon serve --quiet
 
 # 2. Round-trip on your local stores.
 bourdon dogfood
-# Expect: PASS for each plantable adapter you have set up.
+# Expect: PASS for each plantable participant you have set up.
 
 # 3. End a Claude Code session and check the manifest refreshed.
 ls -la ~/agent-library/agents/claude-code.l5.yaml
@@ -196,7 +196,7 @@ ls -la ~/agent-library/agents/claude-code.l5.yaml
 
 The Bourdon L5 store at `~/agent-library/` is **per-machine**. If you run Claude Code on multiple machines (e.g., a macOS workstation and a Windows desktop), each machine writes its own `claude-code.l5.yaml` and they don't auto-sync.
 
-However: if both machines share a `claude-brain` (or equivalent shared source layer) via git, the `claude-code` adapter on each machine reads the *combined* logs and produces a manifest that includes cross-machine sessions. The `agent.instance` field distinguishes which physical machine ran the session. So cross-machine federation works in practice today via shared source data, even though shared L5 sync is not native in v0.6.0.
+However: if both machines share a `claude-brain` (or equivalent shared source layer) via git, the `claude-code` participant on each machine reads the *combined* logs and produces a manifest that includes cross-machine sessions. The `agent.instance` field distinguishes which physical machine ran the session. So cross-machine federation works in practice today via shared source data, even though shared L5 sync is not native in v0.6.0.
 
 ## Known limitations
 

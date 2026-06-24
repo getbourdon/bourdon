@@ -1,10 +1,10 @@
 # Contributing to Bourdon
 
-Bourdon is source-available under the Business Source License 1.1 (BSL) and in pre-alpha. Free for solo developers, internal/non-competing commercial use, research, and education; auto-converts to Apache 2.0 four years after each version is published. See [`LICENSE_FAQ.md`](LICENSE_FAQ.md) for plain-English guidance. Contributions welcome — especially adapters for agents and frameworks not yet covered.
+Bourdon is source-available under the Business Source License 1.1 (BSL) and in pre-alpha. Free for solo developers, internal/non-competing commercial use, research, and education; auto-converts to Apache 2.0 four years after each version is published. See [`LICENSE_FAQ.md`](LICENSE_FAQ.md) for plain-English guidance. Contributions welcome — especially participants for agents and frameworks not yet covered.
 
 ## Current Status
 
-v0.0.1 scaffold. Phase 1 reference orchestrator (L0 + L1) is working standalone. Federation layer (L5 + L6) and adapter plugin system are under active design.
+v0.0.1 scaffold. Phase 1 reference orchestrator (L0 + L1) is working standalone. Federation layer (L5 + L6) and participant plugin system are under active design.
 
 **If you want to build on this today, expect sharp edges.** The spec is likely to change between v0.0.x and v0.1.x as we learn from the reference implementation.
 
@@ -17,12 +17,12 @@ v0.0.1 scaffold. Phase 1 reference orchestrator (L0 + L1) is working standalone.
 
 ## Types of Contributions
 
-### Adapters (most wanted)
-Bourdon's value scales linearly with the number of agents/tools it can federate. An adapter reads a native agent's memory store and emits a normalized L5 manifest. See [`adapters/`](adapters/) for examples (once implemented) and the adapter contract spec in `spec/ADAPTER_CONTRACT.md` (coming in v0.1.0).
+### Participants (most wanted)
+Bourdon's value scales linearly with the number of agents/tools it can federate. A participant reads a native agent's memory store and emits a normalized L5 manifest. See [`participants/`](participants/) for examples (once implemented) and the participant contract spec in `spec/PARTICIPANT_CONTRACT.md` (coming in v0.1.0).
 
 Specifically wanted:
-- Cursor adapter (SQLite schema reverse-engineering) — v0 in progress at [`ryandavispro1-cmyk/cursor-spot`](https://github.com/ryandavispro1-cmyk/cursor-spot); will upstream once stable.
-- Copilot adapter (accepting the encrypted-reasoning limitation)
+- Cursor participant (SQLite schema reverse-engineering) — v0 in progress at [`ryandavispro1-cmyk/cursor-spot`](https://github.com/ryandavispro1-cmyk/cursor-spot); will upstream once stable.
+- Copilot participant (accepting the encrypted-reasoning limitation)
 - LangChain / CrewAI / AutoGen memory exporters
 - Non-agent data sources: Linear, Attio, Notion, Google Calendar, Slack, email (IMAP/MBOX), Obsidian
 
@@ -33,7 +33,7 @@ Specifically wanted:
 
 ### Documentation
 - Worked tutorials per domain (one of the USE_CASES scenarios as an end-to-end walkthrough)
-- Adapter authoring guide
+- Participant authoring guide
 - Architecture diagram improvements
 
 ### Research
@@ -80,7 +80,7 @@ python orchestrator.py
 
 Before filing:
 - Check if it's already captured in `spec/ROADMAP.md` (coming soon) or existing issues
-- If it's an adapter request, consider building it — adapters are the easiest contribution path
+- If it's a participant request, consider building it — participants are the easiest contribution path
 - If it's a philosophy/scope question, `spec/THESIS.md` is the canonical reference
 
 ## Commit Style

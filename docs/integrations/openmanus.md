@@ -1,6 +1,6 @@
 # Bourdon × OpenManus
 
-[OpenManus](https://github.com/FoundationAgents/OpenManus) is an open-source autonomous-agent framework that's MCP-native — it ships first-class support for [Model Context Protocol](https://modelcontextprotocol.io/) servers as tool sources. Bourdon's L6 federation server *is* an MCP server. That makes the integration a one-step config edit on the OpenManus side. No adapter code, no glue layer.
+[OpenManus](https://github.com/FoundationAgents/OpenManus) is an open-source autonomous-agent framework that's MCP-native — it ships first-class support for [Model Context Protocol](https://modelcontextprotocol.io/) servers as tool sources. Bourdon's L6 federation server *is* an MCP server. That makes the integration a one-step config edit on the OpenManus side. No participant code, no glue layer.
 
 After wiring this up, an OpenManus agent can recall what your Claude Code, Codex, and Cursor sessions did via Bourdon's cross-agent memory federation, all from inside its normal MCP tool surface.
 
@@ -25,7 +25,7 @@ Plus the `agent-library://` MCP resources (`agent-library://agents`, `agent-libr
 ## Prerequisites
 
 1. **Install Bourdon.** `pip install 'bourdon[server]'` (latest release; see [GitHub Releases](https://github.com/getbourdon/bourdon/releases) for the current version). The `bourdon` CLI must be on PATH for the OpenManus user — see the [PATH gotcha](#path-gotcha) note below if it isn't.
-2. **Have at least one L5 manifest.** Bourdon needs something to federate. The fastest path: enable Bourdon's Claude Code adapter via the SessionEnd hook (see [`docs/integrations/claude-code.md`](claude-code.md) or [`docs/agent-integration-status.md`](../agent-integration-status.md)) so that ending a Claude Code session writes `~/agent-library/agents/claude-code.l5.yaml`. After one session, you have something to query.
+2. **Have at least one L5 manifest.** Bourdon needs something to federate. The fastest path: enable Bourdon's Claude Code participant via the SessionEnd hook (see [`docs/integrations/claude-code.md`](claude-code.md) or [`docs/agent-integration-status.md`](../agent-integration-status.md)) so that ending a Claude Code session writes `~/agent-library/agents/claude-code.l5.yaml`. After one session, you have something to query.
 3. **Verify the L6 server starts.** Run `bourdon serve --quiet` once in a terminal. The process should start and stay attached on stdio. Press Ctrl-C to stop.
 
 ## The config block
@@ -119,7 +119,7 @@ If you want to *prevent* OpenManus from seeing certain agents' memory entirely, 
 ## Tradeoffs
 
 - **OpenManus is currently in maintenance mode.** Last merged PR was 2025-11-14. The integration shape is stable (it's a config edit, no upstream code), but if OpenManus's MCP loader changes in a future release, this doc may need an update.
-- **No Bourdon-side adapter for OpenManus yet.** Bourdon doesn't read OpenManus's session/memory state to publish an `openmanus.l5.yaml`. OpenManus is a *consumer* of Bourdon, not a *publisher* into it. If/when OpenManus's distilled-memory model stabilizes upstream, a Python adapter following [`docs/AUTHORING_AN_ADAPTER.md`](../AUTHORING_AN_ADAPTER.md) would close the loop.
+- **No Bourdon-side participant for OpenManus yet.** Bourdon doesn't read OpenManus's session/memory state to publish an `openmanus.l5.yaml`. OpenManus is a *consumer* of Bourdon, not a *publisher* into it. If/when OpenManus's distilled-memory model stabilizes upstream, a Python participant following [`docs/AUTHORING_A_PARTICIPANT.md`](../AUTHORING_A_PARTICIPANT.md) would close the loop.
 - **Recognition-first runtime is opt-in.** The `prepare_recognition_context` tool is exposed but OpenManus's default agent loop doesn't call it on every turn. If you want true concurrent recognition (the Bourdon thesis), wire it into the system prompt or pre-turn hook explicitly.
 
 ## Related
@@ -127,4 +127,4 @@ If you want to *prevent* OpenManus from seeing certain agents' memory entirely, 
 - Bourdon project: [bourdon.ai](https://bourdon.ai) · [getbourdon/bourdon](https://github.com/getbourdon/bourdon)
 - OpenManus project: [FoundationAgents/OpenManus](https://github.com/FoundationAgents/OpenManus)
 - MCP specification: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
-- Adapter authoring (if you want to ship an OpenManus → Bourdon publisher): [`docs/AUTHORING_AN_ADAPTER.md`](../AUTHORING_AN_ADAPTER.md)
+- Participant authoring (if you want to ship an OpenManus → Bourdon publisher): [`docs/AUTHORING_A_PARTICIPANT.md`](../AUTHORING_A_PARTICIPANT.md)

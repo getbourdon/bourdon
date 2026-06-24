@@ -11,8 +11,8 @@
 ## Pull requests
 
 - Aim for **one pull request per coherent change.** Mixing unrelated refactors + behavior + doc drive-bys slows review and reverts become expensive.
-- If a change naturally splits (e.g. adapter core vs. README examples), ship two PRs and reference the precursor in the follow-up description.
-- For hot fixes touching shipped adapters (**Codex**, **Cursor**, **Claude**, etc.), add or extend **narrow tests first** (`tests/test_*`) so regressions reproduce in CI — see existing patterns in **`tests/test_codex_adapter.py`**, **`tests/test_cli.py`**.
+- If a change naturally splits (e.g. participant core vs. README examples), ship two PRs and reference the precursor in the follow-up description.
+- For hot fixes touching shipped participants (**Codex**, **Cursor**, **Claude**, etc.), add or extend **narrow tests first** (`tests/test_*`) so regressions reproduce in CI — see existing patterns in **`tests/test_codex_participant.py`**, **`tests/test_cli.py`**.
 
 ## Release discipline
 
@@ -22,6 +22,6 @@ After interrupting mid-release (as with v0.6.0 follow-ups), reconcile **tag**, *
 
 ## Local verification before opening a PR
 
-- `pytest` (or scoped `pytest tests/test_codex_adapter.py` when iterating adapters).
+- `pytest` (or scoped `pytest tests/test_codex_participant.py` when iterating participants).
 - `bourdon dogfood` when touching exports or federation wiring.
 - `python scripts/mcp_smoke_test.py --assertions --isolate-federation-write-smoke --library-path "<tmp-agent-library>"`.

@@ -191,7 +191,7 @@ Work needed to make the thesis testable in daily use:
    just entity correctness. Without this, we can't measure progress
    against the thesis.
 
-4. **Auto-fire on session close** — the Claude Code adapter exists
+4. **Auto-fire on session close** — the Claude Code participant exists
    and reads memory correctly; the missing piece is wiring it to
    emit L5 to `~/agent-library/` automatically at session end so
    the federation populates without manual `bourdon codex export`

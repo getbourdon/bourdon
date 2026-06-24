@@ -52,7 +52,20 @@ def fake_home(tmp_path, monkeypatch):
 def test_detect_agents_reports_all_absent(fake_home):
     out = detect_agents(home=fake_home)
     ids = [a.id for a in out]
-    assert ids == ["claude-code", "codex", "cursor", "copilot", "cascade"]
+    # Sourced from participants.discover_participants(), sorted by agent id, with
+    # the -automations sub-surfaces excluded (the wizard wires the parent agent).
+    assert ids == [
+        "cascade",
+        "claude-code",
+        "claude-desktop-code",
+        "claude-desktop-cowork",
+        "codex",
+        "copilot",
+        "copilot-cli",
+        "copilot-vscode",
+        "cursor",
+        "openclaw",
+    ]
     assert all(not a.present for a in out)
 
 
@@ -63,16 +76,34 @@ def test_detect_agents_reports_present_when_paths_exist(fake_home):
     presence = {a.id: a.present for a in out}
     assert presence == {
         "claude-code": True,
+        "claude-desktop-code": False,
+        "claude-desktop-cowork": False,
         "codex": True,
         "cursor": False,
         "copilot": False,
+        "copilot-cli": False,
+        "copilot-vscode": False,
         "cascade": False,
+        "openclaw": False,
     }
 
 
 def test_detect_agents_ordering_is_stable(fake_home):
     out = detect_agents(home=fake_home)
-    assert [a.id for a in out] == ["claude-code", "codex", "cursor", "copilot", "cascade"]
+    # Deterministic order = agent ids sorted ascending (single source of truth is
+    # the package scan, so there is no hand-curated ordering to drift).
+    assert [a.id for a in out] == [
+        "cascade",
+        "claude-code",
+        "claude-desktop-code",
+        "claude-desktop-cowork",
+        "codex",
+        "copilot",
+        "copilot-cli",
+        "copilot-vscode",
+        "cursor",
+        "openclaw",
+    ]
 
 
 # ---------------------------------------------------------------------------

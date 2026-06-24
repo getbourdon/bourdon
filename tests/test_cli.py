@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import sqlite3
@@ -11,7 +12,7 @@ import pytest
 import yaml
 
 import cli.main as cli_main
-from cli.main import main
+from cli.main import _build_codex_hook_context, main
 
 
 @pytest.fixture(autouse=True)
@@ -242,6 +243,33 @@ def _build_fake_cursor_dir(tmp_path: Path) -> Path:
     return cursor_dir
 
 
+def _build_fake_automations_dir(tmp_path: Path) -> Path:
+    automations_dir = tmp_path / "automations"
+    automation = automations_dir / "radlab-mission-control-brief"
+    automation.mkdir(parents=True)
+    (automation / "automation.toml").write_text(
+        """\
+version = 1
+id = "radlab-mission-control-brief"
+kind = "cron"
+name = "Mission Control Brief"
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO"
+cwds = ["/Users/radman"]
+""",
+        encoding="utf-8",
+    )
+    (automation / "memory.md").write_text(
+        """\
+2026-06-03
+- ShipStable launch gates are now human dashboard actions.
+- Bourdon needs a codex-automations L5 publisher.
+""",
+        encoding="utf-8",
+    )
+    return automations_dir
+
+
 def test_cli_prepare_turn_returns_l6_recognition_from_merged_agents(tmp_path, capsys):
     library = tmp_path / "agent-library"
     _write_l5_manifest(
@@ -366,6 +394,81 @@ def test_cli_cursor_export_print_still_writes_file(tmp_path, capsys):
     assert exit_code == 0
     assert out_path.is_file()
     assert printed["agent"]["id"] == "cursor"
+
+
+def test_cli_codex_automations_export_writes_schema_valid_manifest(tmp_path, capsys):
+    import jsonschema
+
+    automations_dir = _build_fake_automations_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "export",
+            "--automations-dir",
+            str(automations_dir),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+    manifest = yaml.safe_load(out_path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        (Path(__file__).parent.parent / "spec" / "L5_schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert exit_code == 0
+    assert manifest["agent"]["id"] == "codex-automations"
+    assert manifest["recent_sessions"][0]["date"] == "2026-06-03"
+    assert any(
+        entity["name"] == "radlab-mission-control-brief"
+        for entity in manifest["known_entities"]
+    )
+    jsonschema.validate(instance=manifest, schema=schema)
+
+
+def test_cli_codex_automations_export_print_still_writes_file(tmp_path, capsys):
+    automations_dir = _build_fake_automations_dir(tmp_path)
+    out_path = tmp_path / "agent-library" / "agents" / "codex-automations.l5.yaml"
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "export",
+            "--automations-dir",
+            str(automations_dir),
+            "--out",
+            str(out_path),
+            "--print",
+        ]
+    )
+    printed = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert out_path.is_file()
+    assert printed["agent"]["id"] == "codex-automations"
+
+
+def test_cli_codex_automations_doctor_reports_counts(tmp_path, capsys):
+    automations_dir = _build_fake_automations_dir(tmp_path)
+
+    exit_code = main(
+        [
+            "codex-automations",
+            "doctor",
+            "--automations-dir",
+            str(automations_dir),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["health"]["status"] == "ok"
+    assert report["health"]["details"]["automation_count"] == 1
+    assert report["health"]["details"]["runs_extracted"] == 1
 
 
 def test_cli_deeper_context_returns_empty_when_l2_disabled(monkeypatch, capsys):
@@ -944,6 +1047,322 @@ def test_cli_compile_turn_report_out_writes_requested_report(tmp_path, capsys):
     assert written_report["items"][0]["name"] == "Bourdon"
 
 
+def test_cli_codex_hook_user_prompt_submit_injects_additional_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    hook_output = response["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "UserPromptSubmit"
+    additional_context = hook_output["additionalContext"]
+    assert "Bourdon recognition:" in additional_context
+    assert "Bourdon" in additional_context
+    assert "Bourdon turn recognition brief" not in additional_context
+    assert "Why:" not in additional_context
+    assert "score" not in additional_context
+    assert len(additional_context) <= 500
+
+
+def test_cli_compile_turn_keeps_verbose_debug_brief(tmp_path, capsys):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+
+    exit_code = main(
+        [
+            "codex",
+            "compile-turn",
+            "Do you know what Bourdon is?",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    explicit_text = report["delivery"]["explicit_text"]
+    assert "Bourdon turn recognition brief" in explicit_text
+    assert "Why:" in explicit_text
+
+
+def test_codex_hook_context_condenses_long_session_anchor():
+    long_marvin_anchor = (
+        'Picked Marvin back up (brain was built+validated; remaining all hands-on). '
+        'Ry chose "C1b wiring (no keys needed)". - **`make_servers()`** now '
+        '**env-gated per service** (`code/pipecat_app.py`): Mercury (stdio '
+        '`npx @toolsdk.ai/mcp-mercury`, read-only key).'
+    )
+
+    context = _build_codex_hook_context(
+        {
+            "items": [
+                {
+                    "name": long_marvin_anchor,
+                    "summary": long_marvin_anchor,
+                    "source_agents": ["claude-code"],
+                }
+            ]
+        },
+        max_chars=500,
+    )
+
+    # General condensation contract (no content-specific heuristics):
+    # extract a subject anchor, attach a source line, drop the low-value
+    # "Picked ..." lead clause, and stay within the live-cue length bound.
+    assert context.startswith("Bourdon recognition: Marvin:")
+    assert "Source: claude-code." in context
+    assert "Picked Marvin back up" not in context
+    assert context.rstrip().endswith("Use as context only; answer the user directly.")
+    assert len(context) <= 260
+
+
+def test_cli_codex_hook_user_prompt_submit_skips_when_no_anchor(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Recognition-first runtime for Codex CLI turns.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "What is the weather in Seattle?",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_skips_low_confidence_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "codex",
+        [
+            {
+                "name": "Platform Launch",
+                "type": "project",
+                "summary": "Low-confidence single-token overlap.",
+                "visibility": "team",
+            }
+        ],
+    )
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "launch",
+        "cwd": str(tmp_path / "workspace"),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--library-path",
+            str(library),
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_malformed_json_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_compiler_error_fails_open(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    hook_input = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Do you know what Bourdon is?",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    exit_code = main(
+        [
+            "codex",
+            "hook",
+            "user-prompt-submit",
+            "--codex-home",
+            str(codex_home),
+            "--max-chars",
+            "10",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+class _BytesStdin:
+    """Stand-in for a real console stdin: exposes a ``.buffer`` byte stream
+    (unlike io.StringIO) so the handler exercises its bytes-decode path."""
+
+    def __init__(self, data: bytes):
+        self.buffer = io.BytesIO(data)
+
+
+def test_cli_codex_hook_user_prompt_submit_non_utf8_stdin_fails_open(
+    tmp_path, monkeypatch, capsys
+):
+    # Non-UTF-8 bytes (e.g. a Windows code-page console) must NOT raise a
+    # UnicodeDecodeError traceback into the live turn (3-Star audit P0/P1).
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr("sys.stdin", _BytesStdin(b'\xff\xfe{"prompt":"caf\xe9"}'))
+
+    exit_code = main(
+        ["codex", "hook", "user-prompt-submit", "--codex-home", str(codex_home)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
+def test_cli_codex_hook_user_prompt_submit_post_processing_error_fails_open(
+    tmp_path, monkeypatch, capsys
+):
+    # A raise AFTER the compiler (to_dict / routing / print) must also degrade
+    # to exit 0 — the whole handler is now wrapped (the tail previously ran
+    # outside the guard).
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps({"prompt": "Do you know Bourdon?"}))
+    )
+
+    class _Boom:
+        def to_dict(self):
+            raise RuntimeError("post-processing blew up")
+
+    monkeypatch.setattr("cli.main.compile_codex_turn", lambda *a, **k: _Boom())
+
+    exit_code = main(
+        ["codex", "hook", "user-prompt-submit", "--codex-home", str(codex_home)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
 def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
     report_path = tmp_path / "report.yaml"
 
@@ -965,7 +1384,7 @@ def test_cli_codex_eval_fixtures_writes_report(tmp_path, capsys):
 
 
 def _build_fake_claude_code_home(fake_home: Path) -> None:
-    """Set up a minimal ~/claude-brain/ tree the Claude Code adapter can parse."""
+    """Set up a minimal ~/claude-brain/ tree the Claude Code participant can parse."""
     brain = fake_home / "claude-brain"
     projects = brain / "PROJECTS" / "ILTT"
     projects.mkdir(parents=True)
@@ -1099,6 +1518,395 @@ def test_cli_claude_code_export_includes_role_narrative(tmp_path, monkeypatch):
     manifest = yaml.safe_load(out_path.read_text(encoding="utf-8"))
     role_narrative = manifest["agent"].get("role_narrative", "")
     assert "manager" in role_narrative.lower()
+
+
+# ---- claude-code-automations export -----------------------------------------
+
+
+def _write_fake_automation(
+    home: Path,
+    automation_id: str = "weekly-pr-digest",
+    memory: str = "2026-06-03\n- ShipStable launch gate verified.\n",
+) -> Path:
+    """Build a ~/.claude/automations/<id>/{automation.toml, memory.md} fixture."""
+    automation_dir = home / ".claude" / "automations" / automation_id
+    automation_dir.mkdir(parents=True)
+    (automation_dir / "automation.toml").write_text(
+        f"""\
+version = 1
+id = "{automation_id}"
+kind = "loop"
+name = "Weekly PR Digest"
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO"
+cwds = ["/Users/radman/claudework"]
+""",
+        encoding="utf-8",
+    )
+    (automation_dir / "memory.md").write_text(memory, encoding="utf-8")
+    return automation_dir
+
+
+def test_cli_claude_code_automations_doctor_blocked_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """No automations dir -> doctor reports blocked + proposed_fix."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "doctor"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "blocked" in captured.out
+
+
+def test_cli_claude_code_automations_export_writes_to_default_path(
+    tmp_path, monkeypatch
+):
+    """With automations, writes to ~/agent-library/agents/claude-code-automations.l5.yaml."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    exit_code = main(["claude-code-automations", "export"])
+
+    assert exit_code == 0
+    expected = (
+        fake_home / "agent-library" / "agents" / "claude-code-automations.l5.yaml"
+    )
+    assert expected.is_file()
+    manifest = yaml.safe_load(expected.read_text(encoding="utf-8"))
+    assert manifest["agent"]["id"] == "claude-code-automations"
+    assert manifest["agent"]["type"] == "other"
+    entity_names = {entity["name"] for entity in manifest["known_entities"]}
+    assert "weekly-pr-digest" in entity_names
+
+
+def test_cli_claude_code_automations_export_out_override(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    _write_fake_automation(fake_home)
+
+    out_path = tmp_path / "custom" / "claude-code-automations.l5.yaml"
+    exit_code = main(
+        ["claude-code-automations", "export", "--out", str(out_path)]
+    )
+
+    assert exit_code == 0
+    assert out_path.is_file()
+
+
+def test_cli_claude_code_automations_export_no_dir_silent(
+    tmp_path, monkeypatch, capsys
+):
+    """Hook contract: missing automations dir -> exit 0, no stderr."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.err == ""
+
+
+def test_cli_claude_code_automations_export_verbose_logs_missing_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """--verbose surfaces 'no automations directory' but still exits 0."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "export", "--verbose"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "no automations" in captured.err.lower()
+
+
+# ---- claude-code-automations ingest-github (Path B) -------------------------
+
+
+def _write_ci_artifact_source(root: Path, automation_id: str = "gh-pr-digest") -> Path:
+    """Build the shape of an extracted workflow artifact: automations/<id>/..."""
+    src = root / "automations" / automation_id
+    src.mkdir(parents=True)
+    (src / "automation.toml").write_text(
+        f'id = "{automation_id}"\nname = "GH PR Digest"\n'
+        f'status = "ACTIVE"\nkind = "github-action"\nrrule = ""\ncwds = []\n',
+        encoding="utf-8",
+    )
+    (src / "memory.md").write_text(
+        "2026-06-03\n- Ran PR digest in CI run 42.\n- Found 2 flaky tests.\n",
+        encoding="utf-8",
+    )
+    return root / "automations"
+
+
+def test_cli_ingest_github_from_source_dir(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    src = _write_ci_artifact_source(tmp_path / "ci")
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--source", str(src)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_seen"] == 1
+    assert report["automations_created"] == 1
+    assert report["bullets_added"] == 2
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+    assert "Ran PR digest in CI run 42." in dest.read_text(encoding="utf-8")
+
+
+def test_cli_ingest_github_requires_a_mode(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(["claude-code-automations", "ingest-github"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "must specify one of" in captured.err.lower()
+
+
+def test_cli_ingest_github_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    # Build a workflow-artifact-shaped zip
+    payload = tmp_path / "payload"
+    _write_ci_artifact_source(payload)
+    zip_base = tmp_path / "artifact"
+    import shutil
+
+    shutil.make_archive(str(zip_base), "zip", root_dir=str(payload))
+    zip_path = Path(str(zip_base) + ".zip")
+    assert zip_path.is_file()
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--artifact-zip", str(zip_path)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    import json as _json
+
+    report = _json.loads(captured.out)
+    assert report["automations_created"] == 1
+    dest = fake_home / ".claude" / "automations" / "gh-pr-digest" / "memory.md"
+    assert dest.is_file()
+
+
+def test_cli_ingest_github_missing_artifact_zip(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--artifact-zip",
+            str(tmp_path / "nope.zip"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "artifact zip not found" in captured.err.lower()
+
+
+# ---- claude-code-automations ingest --gh-issue (Path C) ---------------------
+
+
+def _fake_gh_runner(payload_by_cmd):
+    """Build a subprocess.run stand-in keyed on the full argv tuple."""
+    from types import SimpleNamespace
+
+    def runner(cmd, capture_output=False, text=False):
+        key = tuple(cmd)
+        if key not in payload_by_cmd:
+            return SimpleNamespace(returncode=1, stdout="", stderr=f"unmocked: {key}")
+        rc, stdout, stderr = payload_by_cmd[key]
+        return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    return runner
+
+
+def test_cli_ingest_gh_issue_merges_comments(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    # Stub `gh issue view` to return a synthetic payload covering body + 2 comments.
+    import json as _json
+
+    payload = {
+        "title": "Routine: Weekly PR Audit",
+        "body": "- Initial summary on 2026-06-01.\n- Two PRs reviewed.",
+        "createdAt": "2026-06-01T15:00:00Z",
+        "comments": [
+            {
+                "body": "- 2026-06-08 run: 4 PRs reviewed.\n- ShipStable PR #213 needs follow-up.",
+                "createdAt": "2026-06-08T15:00:00Z",
+            },
+            {
+                "body": "Plain-text comment without bullets.",
+                "createdAt": "2026-06-15T15:00:00Z",
+            },
+        ],
+    }
+    expected_cmd = (
+        "gh", "issue", "view", "42",
+        "--repo", "foo/bar",
+        "--json", "title,body,comments,createdAt",
+    )
+    runner = _fake_gh_runner({expected_cmd: (0, _json.dumps(payload), "")})
+
+    # Patch the subprocess.run callable that the handler uses.
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.subprocess, "run", runner, raising=False)
+    # Also pretend gh is installed
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--gh-issue",
+            "foo/bar#42",
+            "--automation-id",
+            "weekly-pr-audit",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    report = _json.loads(captured.out)
+    assert report["automations_created"] == 1
+    # 3 source bullets (issue body has 2) + 2 from comment1 + 1 from comment2 = 5
+    assert report["bullets_added"] >= 5
+
+    memory = (
+        fake_home / ".claude" / "automations" / "weekly-pr-audit" / "memory.md"
+    ).read_text(encoding="utf-8")
+    assert "Two PRs reviewed." in memory
+    assert "ShipStable PR #213" in memory
+    assert "Plain-text comment without bullets." in memory
+    # Three distinct date sections
+    assert "2026-06-01" in memory
+    assert "2026-06-08" in memory
+    assert "2026-06-15" in memory
+
+
+def test_cli_ingest_gh_issue_requires_automation_id(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        ["claude-code-automations", "ingest-github", "--gh-issue", "foo/bar#42"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "--automation-id" in captured.err
+
+
+def test_cli_ingest_gh_issue_rejects_bad_format(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    exit_code = main(
+        [
+            "claude-code-automations",
+            "ingest-github",
+            "--gh-issue",
+            "no-hash-here",
+            "--automation-id",
+            "anything",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "owner/repo#N" in captured.err
+
+
+def test_cli_ingest_gh_issue_idempotent_on_repeat(tmp_path, monkeypatch, capsys):
+    """Re-ingesting the same issue is a no-op (merge dedupes by bullet)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+
+    import json as _json
+
+    payload = {
+        "body": "- Only line.",
+        "createdAt": "2026-06-01T00:00:00Z",
+        "comments": [],
+    }
+    expected_cmd = (
+        "gh", "issue", "view", "1",
+        "--repo", "x/y",
+        "--json", "title,body,comments,createdAt",
+    )
+    runner = _fake_gh_runner({expected_cmd: (0, _json.dumps(payload), "")})
+
+    import cli.main as cli_main
+
+    monkeypatch.setattr(cli_main.subprocess, "run", runner, raising=False)
+    monkeypatch.setattr(cli_main.shutil, "which", lambda name: "/usr/local/bin/gh", raising=False)
+
+    args = ["claude-code-automations", "ingest-github",
+            "--gh-issue", "x/y#1", "--automation-id", "only"]
+    assert main(args) == 0
+    capsys.readouterr()  # drain
+    assert main(args) == 0
+    report = _json.loads(capsys.readouterr().out)
+    # Second pass: no new bullets, no new automations created, no new sections.
+    assert report["automations_created"] == 0
+    assert report["bullets_added"] == 0
+    assert report["sections_created"] == 0
 
 
 # ---- codex eval --recognition (Stream C harness) ----------------------------
@@ -1278,3 +2086,100 @@ def test_cli_codex_eval_turn_compiler_flag_attaches_routing_metrics(tmp_path):
     assert turn_compiler["results"][0]["name"] == "direct_project"
     assert turn_compiler["results"][0]["expectation_passed"] is True
     assert "top_score" in turn_compiler["results"][0]
+
+
+# -- serve: peer federation wiring ---------------------------------------------
+
+
+def _patch_serve_runtime(monkeypatch) -> dict:
+    """Patch create_l6_server + run_l6_server so `bourdon serve` exercises its
+    peer-wiring path without actually starting an MCP server. Returns a dict
+    capturing the store the server was built from and the run() kwargs."""
+    captured: dict = {}
+
+    def fake_create(store, name="bourdon-l6", registry=None, audit=None):
+        captured["store"] = store
+        return object()
+
+    def fake_run(server, **kwargs):
+        kwargs.pop("registry", None)  # identity plumbing, not a transport kwarg
+        captured["run_kwargs"] = kwargs
+
+    monkeypatch.setattr("core.l6_server.create_l6_server", fake_create)
+    monkeypatch.setattr("core.l6_server.run_l6_server", fake_run)
+    return captured
+
+
+def _serve_library(tmp_path: Path) -> Path:
+    library = tmp_path / "agent-library"
+    _write_l5_manifest(
+        library,
+        "claude-code",
+        [{"name": "Bourdon", "type": "topic", "summary": "x", "visibility": "team"}],
+    )
+    return library
+
+
+def test_cli_serve_wires_peers_from_config(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    cfg = tmp_path / "peers.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"peers": [{"name": "pc", "url": "http://pc.tailnet:7500"}]}),
+        encoding="utf-8",
+    )
+    captured = _patch_serve_runtime(monkeypatch)
+
+    exit_code = main(
+        ["serve", "--library", str(library), "--peers-config", str(cfg), "--quiet"]
+    )
+
+    assert exit_code == 0
+    store = captured["store"]
+    assert [p.name for p in store.peers] == ["pc"]
+    assert store.peers[0].url == "http://pc.tailnet:7500/mcp"
+    assert captured["run_kwargs"]["transport"] == "stdio"
+
+
+def test_cli_serve_wires_inline_peer_flag(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    captured = _patch_serve_runtime(monkeypatch)
+
+    exit_code = main(
+        [
+            "serve",
+            "--library", str(library),
+            "--peer", "http://localhost:7501",
+            "--peers-config", str(tmp_path / "absent.yaml"),
+            "--quiet",
+        ]
+    )
+
+    assert exit_code == 0
+    store = captured["store"]
+    assert [p.url for p in store.peers] == ["http://localhost:7501/mcp"]
+
+
+def test_cli_serve_no_peers_by_default(tmp_path, monkeypatch):
+    library = _serve_library(tmp_path)
+    captured = _patch_serve_runtime(monkeypatch)
+
+    # Point --peers-config at a guaranteed-absent path so a real ~/.bourdon/
+    # peers.yaml on the dev machine can't leak into this hermetic test.
+    exit_code = main(
+        [
+            "serve",
+            "--library", str(library),
+            "--peers-config", str(tmp_path / "absent.yaml"),
+            "--quiet",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["store"].peers == []
+    assert captured["run_kwargs"] == {
+        "transport": "stdio",
+        "port": 7500,
+        # v0.9.0: default bind is loopback-only (spec/SPEC_v0.9.0.md D8).
+        "host": "127.0.0.1",
+        "allow_unauthenticated": False,
+    }

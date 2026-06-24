@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from adapters.codex import (
+from participants.codex import (
     _build_codex_native_memory_payload,
     _render_codex_federation_memory_text,
     _render_codex_native_memory_text,

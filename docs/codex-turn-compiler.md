@@ -20,7 +20,7 @@ context, MCP reads, fallback recall, and the federation library remain usable.
    mode.
 2. Resolve cwd and git repo identity by walking up to `.git` and reading
    `.git/config`; no shell command is required.
-3. Inspect Codex Stage 1 health read-only through the existing Codex adapter
+3. Inspect Codex Stage 1 health read-only through the existing Codex participant
    SQLite inspection helper.
 4. Load L6 recognition context from `agent-library/agents/*.l5.yaml` using the
    existing visibility-filtered store.

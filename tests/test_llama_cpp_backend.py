@@ -1,4 +1,4 @@
-"""Tests for adapters.llama_cpp_backend."""
+"""Tests for participants.llama_cpp_backend."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Iterable
 import httpx
 import pytest
 
-from adapters.llama_cpp_backend import LlamaCppBackend, _parse_sse_line
+from participants.llama_cpp_backend import LlamaCppBackend, _parse_sse_line
 from core.inference_protocol import InferenceBackend, Slot
 
 # ---- Test helpers -----------------------------------------------------------

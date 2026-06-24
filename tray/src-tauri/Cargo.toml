@@ -1,0 +1,30 @@
+[package]
+name = "bourdon-tray"
+version = "0.1.0"
+description = "Bourdon Desktop Tray — read-only visibility into the local cross-agent memory layer"
+authors = ["RADLAB LLC"]
+edition = "2021"
+rust-version = "1.77.2"
+license = "BSL-1.1"
+
+# The library crate is what Tauri's mobile entry-point macro targets; the
+# binary is a thin wrapper. This split is the Tauri v2 convention (see lib.rs).
+[lib]
+name = "bourdon_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# tauri-build emits the context/codegen. Verified latest stable on crates.io =
+# 2.6.2 (2026-06-06). tauri-build and tauri version independently; this is fine.
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+# Tauri v2 core. `tray-icon` feature is REQUIRED for tauri::tray::TrayIconBuilder.
+# Verified latest stable on crates.io = 2.11.2 (2026-06-06).
+tauri = { version = "2.11.2", features = ["tray-icon", "image-png", "image-ico"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Default Tauri custom-protocol feature for release builds.
+custom-protocol = ["tauri/custom-protocol"]

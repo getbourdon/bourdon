@@ -43,36 +43,83 @@ Tools exposed
 - ``commit_to_federation(agent_id, agent_type, entities, sessions, mode, ...)``
   Write-side tool. Cloud-only / webview-wrapper agents (Claude Desktop,
   ChatGPT desktop, etc.) call this to push L5 contributions when they
-  have no readable on-disk store for a Bourdon adapter to scrape.
+  have no readable on-disk store for a Bourdon participant to scrape.
+- ``export_agents()``
+  Source-attributed export of THIS machine's local agents only (LOCAL-ONLY:
+  no peer fan-out, to avoid the bidirectional-federation echo). The desktop
+  tray's federated read merges this with each peer's ``export_agents``.
 """
 
 from __future__ import annotations
 
 import argparse
+import hmac
+import ipaddress
 import logging
 import os
-import re
 import time as time_module
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.codex_turn_compiler import compile_codex_turn as _compile_codex_turn
+from core.federation_audit import DECISION_ALLOW, DECISION_DENY, FederationAudit
+from core.federation_registry import (
+    OPERATOR,
+    TIER_QUARANTINED,
+    AgentIdentity,
+    FederationRegistry,
+    get_caller,
+    reset_caller,
+    set_caller,
+)
 from core.l2 import query_l2
 from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 from core.recognition_runtime import recognition_first
+from core.redaction import SENSITIVE_PATTERNS, redact_text
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from core.l6_remote import RemoteL6Client
 
-_CONTEXT_SENSITIVE_PATTERNS = (
-    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\baccess[_-]?token\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-)
+# Back-compat alias: the MCP recognition path previously carried only 4 keyword
+# patterns and shipped JWTs / AWS / GitHub tokens in the clear to MCP callers
+# (P0-4). It now shares the core.redaction SSOT with every other surface.
+_CONTEXT_SENSITIVE_PATTERNS = SENSITIVE_PATTERNS
+
+
+def _normalized_legacy_token() -> str | None:
+    """The legacy shared peer token, with empty/whitespace normalized to None.
+
+    A set-but-empty ``BOURDON_PEER_TOKEN_SERVER`` (a routine .env slip) must be
+    treated as "no token" EVERYWHERE — both the startup gate and the per-request
+    auth (3-Star audit P1-1). Otherwise the dispatch sees a truthy-but-empty
+    token, skips the fail-closed 503, and ``hmac.compare_digest(b"", b"")`` makes
+    any caller presenting an empty ``Bearer`` token the trusted OPERATOR.
+    """
+    value = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    if value is not None and not value.strip():
+        return None
+    return value
+
+
+_ACCESS_RANK = {"public": 0, "team": 1, "private": 2}
+
+
+def _clamp_peer_access(access_level: str, include_private: bool) -> tuple[str, bool]:
+    """Clamp a peer-originated request so it can never extract PRIVATE memory.
+
+    A request arriving over federation (federation_hop > 0) must never pull this
+    machine's private entities/sessions regardless of what it asks for (3-Star
+    audit P1-2): force include_private off and cap access_level at "team". The
+    invariant is now enforced by code at the ingress boundary, not by trusting
+    the peer to ask politely.
+    """
+    capped = access_level
+    if _ACCESS_RANK.get(access_level, _ACCESS_RANK["private"]) > _ACCESS_RANK["team"]:
+        capped = "team"
+    return capped, False
 
 
 def _require_fastmcp():
@@ -91,13 +138,8 @@ def _require_fastmcp():
 
 
 def _safe_context_text(value: str, limit: int = 240) -> str:
-    text = re.sub(r"\s+", " ", value.strip())
-    if any(pattern.search(text) for pattern in _CONTEXT_SENSITIVE_PATTERNS):
-        return "[redacted credential-like text]"
-    text = re.sub(r"https?://\S+", "[link]", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    """Thin wrapper over the redaction SSOT (MCP recognition context budget)."""
+    return redact_text(value, limit=limit)
 
 
 def _recognition_prompt_context(result: Any) -> str:
@@ -156,6 +198,7 @@ def prepare_recognition_context_from_store(
         "access_level": access_level,
         "include_private": include_private,
         "recognition": result.recognition,
+        "confidence": result.confidence,
         "matched_entities": [
             {
                 "name": str(entity.get("name") or ""),
@@ -330,7 +373,12 @@ def compile_codex_turn_from_store(
     return brief.to_dict()
 
 
-def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
+def create_l6_server(
+    store: L6Store,
+    name: str = "bourdon-l6",
+    registry: FederationRegistry | None = None,
+    audit: FederationAudit | None = None,
+) -> Any:
     """
     Build a FastMCP server exposing L6 resources + tools over the given store.
 
@@ -351,12 +399,82 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
     fastmcp_cls = _require_fastmcp()
     mcp = fastmcp_cls(name)
 
+    if registry is None:
+        registry = FederationRegistry()
+    if audit is None:
+        audit = FederationAudit()
+
+    # ---- Trust-tier enforcement (v0.9.0) ---------------------------------------
+    #
+    # Caller identity arrives via the contextvar set by the HTTP auth
+    # middleware (stateless HTTP runs tool handlers inside the request task,
+    # so propagation is deterministic), with a request.state fallback for any
+    # transport mode where the contextvar didn't carry. stdio has neither and
+    # resolves to OPERATOR (trusted) — exactly v0.8.0 behavior.
+    #
+    # Quarantined callers get an allowlisted read surface filtered to their
+    # granted namespaces (spec/SPEC_v0.9.0.md D4) and staged writes (D5).
+    # Every call is audited, allow and deny alike (D7).
+
+    def _resolve_caller() -> AgentIdentity:
+        ident = get_caller()
+        if ident is not OPERATOR:
+            return ident
+        try:
+            from fastmcp.server.dependencies import get_http_request
+
+            request = get_http_request()
+        except Exception:  # noqa: BLE001 — no HTTP context => stdio => operator
+            return ident
+        if request is None:
+            return ident
+        state_ident = getattr(getattr(request, "state", None), "bourdon_identity", None)
+        if isinstance(state_ident, AgentIdentity):
+            return state_ident
+        # An HTTP request that never passed our identity middleware: fail
+        # CLOSED — treat as an unknown quarantined caller with zero grants.
+        return AgentIdentity(agent_id="unknown", tier=TIER_QUARANTINED)
+
+    def _audit(caller: AgentIdentity, op: str, namespace: str = "*",
+               decision: str = DECISION_ALLOW, detail: str | None = None) -> None:
+        audit.record(caller.agent_id, op, namespace, decision, detail)
+
+    def _denied(op: str, caller: AgentIdentity, namespace: str = "*",
+                detail: str = "tier 'quarantined' may not call this tool") -> dict:
+        _audit(caller, op, namespace, DECISION_DENY, detail)
+        return {
+            "error": "access denied",
+            "op": op,
+            "agent": caller.agent_id,
+            "tier": caller.tier,
+            "detail": detail,
+        }
+
+    def _filter_entity_matches(matches: list, caller: AgentIdentity) -> list:
+        """Drop non-granted agents from EntityMatch rows; drop empty rows."""
+        if caller.is_trusted:
+            return matches
+        kept = []
+        for m in matches:
+            agents = [a for a in m.agents if caller.may_read(a)]
+            if not agents:
+                continue
+            m.agents = agents
+            m.summaries = {a: s for a, s in m.summaries.items() if caller.may_read(a)}
+            kept.append(m)
+        return kept
+
     # ---- Resources ------------------------------------------------------------
 
     @mcp.resource("agent-library://agents")
     def list_agents_resource() -> list[str]:
         """List of all agent IDs known to the federation."""
-        return store.list_agents()
+        caller = _resolve_caller()
+        agents = store.list_agents()
+        if not caller.is_trusted:
+            agents = [a for a in agents if caller.may_read(a)]
+        _audit(caller, "resource:agents")
+        return agents
 
     @mcp.resource("agent-library://agents/{agent_id}/memory")
     def get_agent_memory_resource(agent_id: str) -> dict:
@@ -367,6 +485,11 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         unknown (MCP resources can't signal 404 cleanly, so we surface
         it in the payload).
         """
+        caller = _resolve_caller()
+        if not caller.may_read(agent_id):
+            return _denied("resource:agent-memory", caller, namespace=agent_id,
+                           detail=f"namespace {agent_id!r} not granted")
+        _audit(caller, "resource:agent-memory", agent_id)
         manifest = store.get_agent_manifest(agent_id, include_private=False)
         if manifest is None:
             return {"error": f"agent not found: {agent_id}"}
@@ -375,10 +498,11 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
     @mcp.resource("agent-library://entities/{name}")
     def get_entity_resource(name: str) -> list[dict]:
         """Cross-agent view of one entity by name."""
-        return [
-            m.to_dict()
-            for m in store.find_entity(name, include_private=False, access_level="public")
-        ]
+        caller = _resolve_caller()
+        matches = store.find_entity(name, include_private=False, access_level="public")
+        matches = _filter_entity_matches(matches, caller)
+        _audit(caller, "resource:entity")
+        return [m.to_dict() for m in matches]
 
     # ---- Tools ---------------------------------------------------------------
 
@@ -404,6 +528,11 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         dict
             ``{"agent": str, "matches": list[EntityMatch-as-dict]}``
         """
+        caller = _resolve_caller()
+        if not caller.may_read(agent):
+            return _denied("query_agent_memory", caller, namespace=agent,
+                           detail=f"namespace {agent!r} not granted")
+        _audit(caller, "query_agent_memory", agent)
         matches = [
             m
             for m in store.find_entity(
@@ -430,6 +559,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         limit: int | None = None,
         cursor: str | None = None,
         summary: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Return a page of sessions across agents (or a single agent).
@@ -454,7 +584,18 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             When true, omit ``key_actions`` and ``files_touched`` from
             each session row. Useful for timeline/dashboard callers that
             only need date + agent + project focus.
+        federation_hop : int, optional
+            Internal depth guard. Peer L6 servers pass ``1`` so a federated
+            query answers from the local store only — federation is depth-1
+            by contract (#139). End clients leave this at ``0``.
         """
+        caller = _resolve_caller()
+        if not caller.is_trusted and agent is not None and not caller.may_read(agent):
+            denial = _denied("list_recent_work", caller, namespace=agent,
+                             detail=f"namespace {agent!r} not granted")
+            denial.update({"sessions": [], "next_cursor": None, "has_more": False})
+            return denial
+        _audit(caller, "list_recent_work", agent or "*")
         cutoff: datetime | None = None
         if since:
             try:
@@ -470,11 +611,17 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
                     cutoff = datetime.combine(parsed, _time.min)
                 except ValueError:
                     logger.warning("Invalid 'since' value: %s", since)
+        if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
         try:
-            if store.peers and not cursor:
+            if store.peers and not cursor and federation_hop <= 0:
                 # Federated path: merge local + peer sessions. Cursoring across
                 # peers is not supported in v0; a non-None cursor falls back to
                 # local-only paging (where the cursor encoding is valid).
+                # Peer-originated calls (federation_hop > 0) take the local
+                # branch below — fanning out again would recurse (#139).
                 page = await store.list_recent_work_federated(
                     since=cutoff,
                     agent=agent,
@@ -508,6 +655,9 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
                 "next_cursor": None,
                 "has_more": False,
             }
+        rows = page.sessions
+        if not caller.is_trusted:
+            rows = [s for s in rows if caller.may_read(s.agent)]
         return {
             "since": since,
             "agent": agent,
@@ -516,7 +666,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
             "limit": limit,
             "cursor": cursor,
             "summary": summary,
-            "sessions": [s.to_dict(summary=summary) for s in page.sessions],
+            "sessions": [s.to_dict(summary=summary) for s in rows],
             "next_cursor": page.next_cursor,
             "has_more": page.has_more,
         }
@@ -526,6 +676,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         name: str,
         access_level: str = "public",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Find an entity by name across all agents.
@@ -537,12 +688,29 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         When the server has peer L6 servers configured (``--peer`` flag),
         the result also merges matches from each peer's library, tagging
         peer-sourced agents as ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
-        matches = await store.find_entity_federated(
-            name,
-            include_private=include_private,
-            access_level=access_level,
-        )
+        caller = _resolve_caller()
+        _audit(caller, "find_entity")
+        if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
+            matches = store.find_entity(
+                name,
+                include_private=include_private,
+                access_level=access_level,
+            )
+        else:
+            matches = await store.find_entity_federated(
+                name,
+                include_private=include_private,
+                access_level=access_level,
+            )
+        matches = _filter_entity_matches(matches, caller)
         return {
             "name": name,
             "access_level": access_level,
@@ -551,15 +719,65 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         }
 
     @mcp.tool()
-    async def list_agents() -> dict:
+    async def list_agents(federation_hop: int = 0) -> dict:
         """
         List agent IDs known to this L6 server, plus any peers' agents.
 
         Peer-sourced agents are NOT prefix-tagged here — call sites that need
         provenance use the more detailed ``find_entity`` / ``get_cross_agent_summary``
         tools where each agent is tagged ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
-        return {"agents": await store.list_agents_federated()}
+        caller = _resolve_caller()
+        if federation_hop > 0:
+            agents = sorted(store.list_agents())
+        else:
+            agents = await store.list_agents_federated()
+        if not caller.is_trusted:
+            agents = [a for a in agents if caller.may_read(a)]
+        _audit(caller, "list_agents")
+        return {"agents": agents}
+
+    @mcp.tool()
+    def export_agents() -> dict:
+        """Export THIS server's LOCAL agents only, source-attributed for the tray.
+
+        Returns the ``bourdon.agents/v1`` envelope for this machine's own
+        ``*.l5.yaml`` manifests -- each agent redacted and tagged
+        ``source=<this machine>`` / ``source_kind="local"``.
+
+        Critically, this tool does NOT fan out to peers. The federated merge
+        (local + every peer's ``export_agents``) happens caller-side in
+        :meth:`core.l6_store.L6Store.export_agents_federated`, which re-tags
+        each peer's agents with that peer's name. Keeping this tool local-only
+        is what prevents the bidirectional-federation echo: when peer A calls
+        peer B's ``export_agents``, B returns only B's agents, never A's agents
+        bounced back.
+        """
+        from core.agents_export import export_local_agents, resolve_local_name
+
+        caller = _resolve_caller()
+        # Egress visibility clamp (3-Star audit P0-1): PRIVATE session content
+        # must never cross the federation wire. A trusted peer may see team;
+        # a quarantined caller only public. The local tray reads private via
+        # export_agents_federated (default access), not through this tool.
+        egress_access = "team" if caller.is_trusted else "public"
+        envelope = export_local_agents(
+            store.library_path / "agents",
+            resolve_local_name(),
+            access_level=egress_access,
+        )
+        if not caller.is_trusted:
+            envelope["agents"] = [
+                a
+                for a in envelope.get("agents", [])
+                if caller.may_read(str(a.get("id") or ""))
+            ]
+        _audit(caller, "export_agents")
+        return envelope
 
     @mcp.tool()
     def commit_to_federation(
@@ -615,7 +833,66 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         dict with the write summary (counts added/updated/total, path,
         agent identity, last_updated). On invalid input, returns a
         structured error response with an ``error`` key.
+
+        Quarantined callers (v0.9.0): the write is STAGED under
+        ``<library>/staging/<caller>/`` instead of touching the live store,
+        and only the caller's own ``agent_id`` namespace is writable.
+        Staged content is invisible to every read until the operator runs
+        ``bourdon staging promote <agent>``.
+
+        DURABILITY (issue #134): commits are durable only on commit-only
+        slugs (``claude-desktop-chat``, ``clyde``, other self-authoring
+        agents). Reader-backed manifests (``claude-code``, ``codex``,
+        ``cursor``, ...) are REGENERATED from their native stores by
+        ``bourdon export-all`` / the per-agent export hooks, which discards
+        rows previously merged in via this tool. Commit under your own
+        self-authoring agent_id, not a reader's.
         """
+        caller = _resolve_caller()
+        if not caller.is_trusted:
+            if agent_id != caller.agent_id:
+                return _denied(
+                    "commit_to_federation",
+                    caller,
+                    namespace=agent_id,
+                    detail=(
+                        "quarantined members may only write their own "
+                        f"namespace ({caller.agent_id!r})"
+                    ),
+                )
+            try:
+                for row in entities or []:
+                    if not isinstance(row, dict) or not str(row.get("name") or "").strip():
+                        raise ValueError("each entity needs a non-empty 'name'")
+                for row in sessions or []:
+                    if not isinstance(row, dict) or not str(row.get("date") or "").strip():
+                        raise ValueError("each session needs a non-empty ISO-8601 'date'")
+                from core.federation_staging import merge_into_staged
+
+                path = merge_into_staged(
+                    store.library_path,
+                    caller.agent_id,
+                    agent_id,
+                    entities,
+                    sessions,
+                    agent_type=agent_type,
+                    instance=instance,
+                    role_narrative=role_narrative,
+                )
+            except ValueError as exc:
+                return {"error": str(exc), "agent_id": agent_id, "mode": mode}
+            _audit(caller, "commit_to_federation", agent_id, detail="staged")
+            return {
+                "staged": True,
+                "agent_id": agent_id,
+                "path": str(path),
+                "note": (
+                    "quarantined write staged for review; an operator must run "
+                    "`bourdon staging promote " + agent_id + "` before it "
+                    "propagates to the federation"
+                ),
+            }
+        _audit(caller, "commit_to_federation", agent_id)
         try:
             return store.commit_l5(
                 agent_id=agent_id,
@@ -638,6 +915,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         project: str,
         access_level: str = "public",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Aggregate everything the federation knows about a project.
@@ -646,12 +924,30 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         ``project_focus`` references it, and entity matches. When peers are
         configured (``--peer`` flag), peer libraries are merged in with
         agents tagged as ``peer:<peer-name>:<agent>``.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
-        summary = await store.get_cross_agent_summary_federated(
-            project,
-            include_private=include_private,
-            access_level=access_level,
-        )
+        caller = _resolve_caller()
+        if not caller.is_trusted:
+            return _denied("get_cross_agent_summary", caller)
+        _audit(caller, "get_cross_agent_summary")
+        if federation_hop > 0:
+            access_level, include_private = _clamp_peer_access(
+                access_level, include_private
+            )
+            summary = store.get_cross_agent_summary(
+                project,
+                include_private=include_private,
+                access_level=access_level,
+            )
+        else:
+            summary = await store.get_cross_agent_summary_federated(
+                project,
+                include_private=include_private,
+                access_level=access_level,
+            )
         return summary.to_dict()
 
     @mcp.tool()
@@ -659,6 +955,7 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         prompt: str,
         access_level: str = "team",
         include_private: bool = False,
+        federation_hop: int = 0,
     ) -> dict:
         """
         Return immediate recognition and a bounded prompt-context fragment.
@@ -673,8 +970,16 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         are merged into ``matched_entities`` with agents tagged
         ``peer:<peer-name>:<agent>``. Slow / dead peers are dropped and
         reported in ``peer_latencies_us`` so the response is bounded.
+
+        ``federation_hop`` is an internal depth guard: peer L6 servers pass
+        ``1`` so the query answers from the local store only (depth-1
+        federation, #139). End clients leave it at ``0``.
         """
-        if store.peers:
+        caller = _resolve_caller()
+        if not caller.is_trusted:
+            return _denied("prepare_recognition_context", caller)
+        _audit(caller, "prepare_recognition_context")
+        if store.peers and federation_hop <= 0:
             return await prepare_recognition_context_federated(
                 store,
                 prompt,
@@ -704,6 +1009,10 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         federation context into a compact prompt fragment without depending on
         native Stage 1 summarization.
         """
+        caller = _resolve_caller()
+        if not caller.is_trusted:
+            return _denied("compile_codex_turn", caller)
+        _audit(caller, "compile_codex_turn")
         return compile_codex_turn_from_store(
             store,
             prompt,
@@ -727,6 +1036,10 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         retrieval. If L2 is disabled or unavailable, the returned context is
         empty.
         """
+        caller = _resolve_caller()
+        if not caller.is_trusted:
+            return _denied("get_deeper_context", caller)
+        _audit(caller, "get_deeper_context")
         return await get_deeper_context_for_prompt(
             prompt,
             access_level=access_level,
@@ -766,6 +1079,16 @@ def _parse_args() -> argparse.Namespace:
         help="Port for HTTP transport (ignored for stdio, default: 7500)",
     )
     parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind host for HTTP transport (default: 127.0.0.1 — loopback only). "
+            "Use 0.0.0.0 for cross-host / Tailnet federation; non-loopback "
+            "binds require auth configured (bourdon agent add / "
+            "BOURDON_PEER_TOKEN_SERVER) or the server refuses to start."
+        ),
+    )
+    parser.add_argument(
         "--peer",
         action="append",
         default=[],
@@ -797,7 +1120,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_peers(
+def load_peers(
     config_path: Path,
     inline_urls: list[str],
 ) -> list[RemoteL6Client]:
@@ -806,6 +1129,10 @@ def _load_peers(
     Returns an empty list if no peers are configured. Import of
     :class:`RemoteL6Client` is local so importing this module without the
     ``[federation]`` extras stays cheap.
+
+    Shared by both serve entry points: ``python -m core.l6_server`` (``main``)
+    and ``bourdon serve`` (``cli.main._handle_serve``). Public so the CLI can
+    reuse the exact same flag + config-file resolution.
     """
     from core.l6_remote import RemoteL6Client
 
@@ -838,15 +1165,35 @@ def _load_peers(
     return peers
 
 
-def _build_auth_middleware():
-    """Starlette middleware enforcing Authorization: Bearer <token>.
+def _is_loopback_host(host: str) -> bool:
+    """Whether a bind host is loopback-only."""
+    if host in ("localhost",):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
-    Token is read from env ``BOURDON_PEER_TOKEN_SERVER`` at process start.
-    If the env var is unset and the server is launched without
-    ``--allow-unauthenticated``, the middleware refuses every request with
-    503 — failing closed is the safer default.
+
+def _build_auth_middleware(registry: FederationRegistry):
+    """Starlette middleware enforcing Authorization: Bearer <token> (v0.9.0).
+
+    Two token classes authenticate, both compared constant-time:
+
+    - **Per-agent tokens** from the federation registry
+      (``bourdon agent add`` / ``~/.bourdon/federation.yaml``). Resolve to
+      that agent's :class:`AgentIdentity` (tier + grants). Revoked members
+      get 401 — the registry re-reads on mtime change, so ``bourdon revoke``
+      takes effect on a running server without a restart.
+    - **The legacy shared token** (env ``BOURDON_PEER_TOKEN_SERVER``),
+      mapped to the trusted ``operator`` identity. This is the v0.8.0
+      migration path: existing PC<->Mac peering keeps working unchanged.
+
+    If neither auth source is configured and the server was launched without
+    ``--allow-unauthenticated``, every request gets 503 — fail closed.
+    Token material never appears in any log or response body.
     """
-    expected = os.environ.get("BOURDON_PEER_TOKEN_SERVER")
+    legacy = _normalized_legacy_token()
 
     try:
         from starlette.middleware.base import BaseHTTPMiddleware
@@ -856,12 +1203,13 @@ def _build_auth_middleware():
 
     class _BearerAuth(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if expected is None:
+            if legacy is None and not registry.is_configured():
                 return JSONResponse(
                     {
                         "error": (
-                            "Server has no BOURDON_PEER_TOKEN_SERVER set and was "
-                            "launched without --allow-unauthenticated."
+                            "Server has no auth configured (no registered agents "
+                            "via `bourdon agent add` and no BOURDON_PEER_TOKEN_SERVER) "
+                            "and was launched without --allow-unauthenticated."
                         )
                     },
                     status_code=503,
@@ -870,17 +1218,145 @@ def _build_auth_middleware():
             if not header.lower().startswith("bearer "):
                 return JSONResponse({"error": "missing Bearer token"}, status_code=401)
             token = header.split(" ", 1)[1].strip()
-            if token != expected:
-                return JSONResponse({"error": "invalid Bearer token"}, status_code=401)
-            return await call_next(request)
+            identity: AgentIdentity | None = None
+            # Require BOTH a configured legacy token and a non-empty presented
+            # token before the constant-time compare, so an empty Bearer can
+            # never match (defense in depth alongside the normalization above).
+            if legacy and token and hmac.compare_digest(
+                token.encode("utf-8"), legacy.encode("utf-8")
+            ):
+                identity = OPERATOR
+            if identity is None:
+                identity = registry.authenticate(token)
+            if identity is None:
+                # Deliberately does not distinguish invalid vs revoked, and
+                # never echoes the presented token.
+                return JSONResponse(
+                    {"error": "invalid or revoked Bearer token"}, status_code=401
+                )
+            request.state.bourdon_identity = identity
+            ctx_token = set_caller(identity)
+            try:
+                return await call_next(request)
+            finally:
+                reset_caller(ctx_token)
 
     return _BearerAuth
+
+
+def _build_operator_identity_middleware():
+    """Middleware for ``--allow-unauthenticated`` (loopback-only) serving.
+
+    Binds the trusted operator identity to every request so the tier
+    enforcement layer treats local unauthenticated callers exactly like the
+    stdio transport. Without this, the fail-closed resolver would quarantine
+    them.
+    """
+    try:
+        from starlette.middleware.base import BaseHTTPMiddleware
+    except ImportError as exc:  # pragma: no cover -- starlette ships with fastmcp
+        raise RuntimeError("starlette is required for HTTP transport") from exc
+
+    class _OperatorIdentity(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.bourdon_identity = OPERATOR
+            ctx_token = set_caller(OPERATOR)
+            try:
+                return await call_next(request)
+            finally:
+                reset_caller(ctx_token)
+
+    return _OperatorIdentity
+
+
+def run_l6_server(
+    server: Any,
+    *,
+    transport: str = "stdio",
+    port: int = 7500,
+    host: str = "127.0.0.1",
+    allow_unauthenticated: bool = False,
+    registry: FederationRegistry | None = None,
+) -> None:
+    """Run an already-created L6 MCP server under the requested transport.
+
+    Shared by both serve entry points (``python -m core.l6_server`` and
+    ``bourdon serve``) so they get identical transport, bind host, and
+    Bearer-auth behavior.
+
+    - ``stdio`` (default): blocks until the connecting MCP client disconnects.
+    - ``http``: always run under uvicorn so the bind ``host`` is ours to set.
+
+    v0.9.0 bind/auth contract (spec/SPEC_v0.9.0.md D8):
+
+    - Default bind is **127.0.0.1** (loopback). This is a breaking change
+      from v0.8.0's ``0.0.0.0`` default — Tailnet / cross-host peers must
+      pass ``--host 0.0.0.0`` explicitly.
+    - A non-loopback bind REQUIRES auth configured (>=1 active registered
+      agent, or the legacy ``BOURDON_PEER_TOKEN_SERVER``). Otherwise the
+      server **exits non-zero at startup** instead of serving.
+    - ``--allow-unauthenticated`` is honored on loopback binds only; combined
+      with a non-loopback host the server refuses to start. There is no
+      anonymous-access code path on a network-reachable bind.
+    - HTTP serves **stateless** streamable-HTTP: every request is handled in
+      its own task, so the auth middleware's caller identity deterministically
+      reaches the tool handlers. Peer clients already open per-call sessions.
+    """
+    if transport == "stdio":
+        server.run()  # fastmcp default: stdio
+        return
+
+    # HTTP transport: always via uvicorn so we control the bind host + the
+    # middleware stack. (Both authed and unauth paths bind `host`.)
+    try:
+        import uvicorn
+        from starlette.middleware import Middleware
+    except ImportError as exc:
+        raise RuntimeError(
+            "uvicorn + starlette are required for HTTP transport. "
+            "Install via: pip install 'bourdon[server,federation]'"
+        ) from exc
+
+    if registry is None:
+        registry = FederationRegistry()
+    auth_configured = _normalized_legacy_token() is not None or (
+        registry.has_active_agents()
+    )
+    if not _is_loopback_host(host):
+        if allow_unauthenticated:
+            raise SystemExit(
+                f"refusing to start: --allow-unauthenticated with non-loopback "
+                f"bind {host!r}. Anonymous access is loopback-only; register an "
+                "agent token (`bourdon agent add <id>`) or set "
+                "BOURDON_PEER_TOKEN_SERVER to serve on this interface."
+            )
+        if not auth_configured:
+            raise SystemExit(
+                f"refusing to start: bind {host!r} is network-reachable but no "
+                "auth is configured. Register an agent token "
+                "(`bourdon agent add <id>`) or set BOURDON_PEER_TOKEN_SERVER, "
+                "or bind 127.0.0.1."
+            )
+
+    if allow_unauthenticated:
+        logger.warning(
+            "Serving HTTP transport WITHOUT auth on %s:%d (--allow-unauthenticated, "
+            "loopback-only). Local callers get trusted operator access.",
+            host,
+            port,
+        )
+        ident_cls = _build_operator_identity_middleware()
+        app = server.http_app(middleware=[Middleware(ident_cls)], stateless_http=True)
+    else:
+        auth_cls = _build_auth_middleware(registry)
+        app = server.http_app(middleware=[Middleware(auth_cls)], stateless_http=True)
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    peers = _load_peers(args.peers_config, args.peer)
+    peers = load_peers(args.peers_config, args.peer)
     logger.info(
         "Bourdon L6 server starting -- library=%s, transport=%s, peers=%d",
         args.library,
@@ -891,40 +1367,16 @@ def main() -> None:
         logger.info("  peer: %s -> %s", p.name, p.url)
     store = L6Store(args.library, peers=peers)
     logger.info("Loaded %d agent(s): %s", len(store.list_agents()), store.list_agents())
-    server = create_l6_server(store)
-    if args.transport == "stdio":
-        server.run()  # fastmcp default: stdio
-        return
-
-    # HTTP transport ----------------------------------------------------------
-    if args.allow_unauthenticated:
-        logger.warning(
-            "Serving HTTP transport WITHOUT auth (--allow-unauthenticated). "
-            "Restrict to localhost / Tailnet only."
-        )
-        try:
-            server.run(transport="http", port=args.port)
-        except TypeError:
-            logger.warning(
-                "This fastmcp version does not accept transport='http'; falling back to stdio."
-            )
-            server.run()
-        return
-
-    # Authenticated HTTP path: build the Starlette ASGI app, wrap with bearer
-    # middleware, run under uvicorn ourselves so we own the middleware stack.
-    try:
-        import uvicorn
-        from starlette.middleware import Middleware
-    except ImportError as exc:
-        raise RuntimeError(
-            "uvicorn + starlette are required for HTTP transport. "
-            "Install via: pip install 'bourdon[server,federation]'"
-        ) from exc
-
-    auth_cls = _build_auth_middleware()
-    app = server.http_app(middleware=[Middleware(auth_cls)])
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    registry = FederationRegistry()
+    server = create_l6_server(store, registry=registry)
+    run_l6_server(
+        server,
+        transport=args.transport,
+        port=args.port,
+        host=args.host,
+        allow_unauthenticated=args.allow_unauthenticated,
+        registry=registry,
+    )
 
 
 if __name__ == "__main__":

@@ -15,6 +15,20 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_federation_state(tmp_path, monkeypatch):
+    """Point the v0.9.0 federation registry + audit log at tmp paths.
+
+    Without this, any test that builds an L6 server would append audit
+    entries to the developer's real ~/.bourdon/audit.jsonl and read their
+    real federation.yaml.
+    """
+    monkeypatch.setenv(
+        "BOURDON_FEDERATION_CONFIG", str(tmp_path / "federation.yaml")
+    )
+    monkeypatch.setenv("BOURDON_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+
+
 @pytest.fixture
 def isolated_memory_dirs(tmp_path, monkeypatch):
     """

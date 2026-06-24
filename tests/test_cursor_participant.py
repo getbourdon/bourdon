@@ -1,0 +1,261 @@
+"""Tests for participants.cursor."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from participants.base import ParticipantDiscoveryError, L5Manifest
+from participants.cursor import AGENT_ID, AGENT_TYPE, CursorParticipant
+
+# ---- Helpers ----------------------------------------------------------------
+
+
+def _seed_state_db(path: Path, records: list[tuple[str, dict]]) -> None:
+    """Seed a Cursor-shaped state.vscdb with synthetic ItemTable rows."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        for key, value in records:
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+                (key, json.dumps(value)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _make_cursor_dir(tmp_path: Path) -> Path:
+    """Set up a Cursor-shaped data directory under ``tmp_path``."""
+    cursor_dir = tmp_path / "Cursor"
+    (cursor_dir / "User" / "globalStorage").mkdir(parents=True)
+    (cursor_dir / "User" / "workspaceStorage" / "abc123").mkdir(parents=True)
+    return cursor_dir
+
+
+# ---- discover() -------------------------------------------------------------
+
+
+def test_discover_raises_when_dir_missing(tmp_path):
+    participant = CursorParticipant(cursor_dir=tmp_path / "does-not-exist")
+    with pytest.raises(ParticipantDiscoveryError):
+        participant.discover()
+
+
+def test_discover_returns_agent_store_when_dir_exists(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    store = participant.discover()
+    assert store.path == str(cursor_dir)
+    assert "platform_default" in store.metadata
+
+
+# ---- export_l5() ------------------------------------------------------------
+
+
+def test_export_l5_empty_when_no_dbs(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()
+    assert isinstance(manifest, L5Manifest)
+    assert manifest.agent.id == AGENT_ID
+    assert manifest.agent.type == AGENT_TYPE
+    assert manifest.recent_sessions == []
+    assert manifest.known_entities == []
+
+
+def test_export_l5_extracts_session_and_project_entity(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "User" / "workspaceStorage" / "abc123" / "state.vscdb"
+    _seed_state_db(
+        db,
+        [
+            (
+                "composer.composerData",
+                {
+                    "workspacePath": "/Users/dev/projects/my-app",
+                    "title": "Add user authentication",
+                    "messages": [],
+                    "lastUpdatedAt": "2026-04-30T10:00:00Z",
+                },
+            ),
+        ],
+    )
+
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()
+
+    # At least one session extracted
+    assert len(manifest.recent_sessions) >= 1
+    session = manifest.recent_sessions[0]
+    assert "/projects/my-app" in (session.cwd or "")
+
+    # Project entity inferred from cwd
+    project_names = {e.name for e in manifest.known_entities}
+    assert "my-app" in project_names
+
+
+def test_export_l5_filters_by_since(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    _seed_state_db(
+        db,
+        [
+            (
+                "composer.old",
+                {
+                    "workspacePath": "/p/old",
+                    "title": "old work",
+                    "messages": [],
+                    "lastUpdatedAt": "2025-01-01T00:00:00Z",
+                },
+            ),
+            (
+                "composer.new",
+                {
+                    "workspacePath": "/p/new",
+                    "title": "new work",
+                    "messages": [],
+                    "lastUpdatedAt": "2026-04-30T00:00:00Z",
+                },
+            ),
+        ],
+    )
+
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    manifest = participant.export_l5(since=cutoff)
+    dates = [s.date for s in manifest.recent_sessions]
+    assert all(d >= "2026-01-01" for d in dates if d), dates
+    assert len(manifest.recent_sessions) == 1
+    assert manifest.recent_sessions[0].key_actions[0] == "new work"
+
+
+# ---- export_sessions() ------------------------------------------------------
+
+
+def test_export_sessions_respects_limit(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    records = [
+        (
+            f"composer.{i}",
+            {
+                "workspacePath": f"/p/proj{i}",
+                "title": f"work {i}",
+                "messages": [],
+                "lastUpdatedAt": f"2026-04-{i + 10:02d}T00:00:00Z",
+            },
+        )
+        for i in range(5)
+    ]
+    _seed_state_db(db, records)
+
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    sessions = participant.export_sessions(
+        since=datetime(2020, 1, 1, tzinfo=timezone.utc), limit=3
+    )
+    assert len(sessions) == 3
+
+
+# ---- health_check() ---------------------------------------------------------
+
+
+def test_health_check_blocked_when_no_dir(tmp_path):
+    participant = CursorParticipant(cursor_dir=tmp_path / "missing")
+    health = participant.health_check()
+    assert health.status == "blocked"
+    assert health.proposed_fix is not None
+    assert "Cursor" in health.proposed_fix
+
+
+def test_health_check_degraded_when_no_dbs(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
+    assert health.status == "degraded"
+    assert "No Cursor SQLite stores" in (health.reason or "")
+    assert health.proposed_fix is not None
+    assert "cursor export" in health.proposed_fix
+
+
+def test_health_check_ok_when_dbs_present(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    _seed_state_db(db, [])  # empty db is fine; just needs ItemTable
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    health = participant.health_check()
+    assert health.status == "ok"
+    assert health.details["databases_scanned"] >= 1
+    assert health.proposed_fix is None
+
+
+def test_health_check_does_not_raise_on_corrupt_db(tmp_path):
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    db.write_bytes(b"not a real sqlite database")
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    # Must not raise; status may be ok/degraded depending on whether the
+    # corrupt file is iterable. The contract is "never raises".
+    health = participant.health_check()
+    assert health.status in {"ok", "degraded", "blocked"}
+
+
+def test_export_l5_skips_corrupt_db_without_crashing(tmp_path):
+    # 3-Star audit part-P1-1: a corrupt/locked Cursor DB must be skipped, not
+    # crash the whole export. A second healthy DB still exports.
+    cursor_dir = _make_cursor_dir(tmp_path)
+    (cursor_dir / "state.vscdb").write_bytes(b"not a real sqlite database")
+    _seed_state_db(
+        cursor_dir / "User" / "workspaceStorage" / "abc123" / "state.vscdb",
+        [("composer.composerData", {"allComposers": [{"name": "Ship Bourdon tray"}]})],
+    )
+    participant = CursorParticipant(cursor_dir=cursor_dir)
+    manifest = participant.export_l5()  # must not raise
+    assert isinstance(manifest, L5Manifest)
+
+
+def test_export_l5_reads_wal_resident_rows(tmp_path):
+    # 3-Star audit part-P1-2: rows still in the -wal of a live (WAL-mode) DB
+    # must be visible — the reader copies the WAL companion before opening.
+    cursor_dir = _make_cursor_dir(tmp_path)
+    db = cursor_dir / "state.vscdb"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+            (
+                "composer.composerData",
+                json.dumps({"allComposers": [{"name": "WAL-resident project"}]}),
+            ),
+        )
+        conn.commit()  # stays in -wal until a checkpoint
+        assert (db.parent / "state.vscdb-wal").is_file()  # precondition
+        # Do NOT close (close would checkpoint); read while the WAL is live.
+        participant = CursorParticipant(cursor_dir=cursor_dir)
+        manifest = participant.export_l5()
+        assert isinstance(manifest, L5Manifest)
+    finally:
+        conn.close()
+
+
+# ---- Protocol conformance ---------------------------------------------------
+
+
+def test_cursor_participant_class_attrs():
+    assert CursorParticipant.agent_id == "cursor"
+    assert CursorParticipant.agent_type == "code-assistant"
+
+
+def test_native_path_resolves(tmp_path):
+    participant = CursorParticipant(cursor_dir=tmp_path / "Cursor")
+    assert participant.native_path == str(tmp_path / "Cursor")

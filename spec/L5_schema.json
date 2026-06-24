@@ -130,7 +130,7 @@
           "format": "date"
         },
         "cwd": {
-          "description": "Working directory of the session. Optional but highly useful for developer-tool adapters.",
+          "description": "Working directory of the session. Optional but highly useful for developer-tool participants.",
           "type": "string",
           "maxLength": 512
         },
@@ -190,7 +190,7 @@
           "format": "date"
         },
         "valid_to": {
-          "description": "ISO 8601 date this entity stopped being active. Adapters typically populate this when an entity is tagged 'archived' or 'canceled'. Absent (or null) means the entity is still active as of last_updated. Federation queries that filter by current time treat missing valid_to as 'still valid'.",
+          "description": "ISO 8601 date this entity stopped being active. Participants typically populate this when an entity is tagged 'archived' or 'canceled'. Absent (or null) means the entity is still active as of last_updated. Federation queries that filter by current time treat missing valid_to as 'still valid'.",
           "type": "string",
           "format": "date"
         },

@@ -20,12 +20,20 @@ from typing import Any
 
 import yaml
 
-from adapters.codex import (
+from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
+from core.recognition_contract import (
+    DOMAIN_STOPWORDS_CODEX,
+    TOKEN_RE,
+    MatchTier,
+    match_tier,
+    meaningful_terms,
+    recognition_confidence,
+)
+from participants.codex import (
     _inspect_codex_state_db,
     _resolve_codex_home,
     _safe_native_memory_text,
 )
-from core.l6_store import DEFAULT_LIBRARY_PATH, L6Store
 
 SCHEMA_VERSION = "codex-turn-brief/v1"
 STRATEGY = "turn_compiled"
@@ -41,7 +49,7 @@ EXHAUSTED_PATHS = [
     "sync_native_only",
 ]
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_TOKEN_RE = TOKEN_RE  # shared recognition-contract tokenizer (single source)
 _GENERIC_NAMES = {
     "memory",
     "memories",
@@ -53,47 +61,8 @@ _GENERIC_NAMES = {
     "repo",
     "repository",
 }
-_PROMPT_STOPWORDS = {
-    "a",
-    "about",
-    "again",
-    "am",
-    "an",
-    "and",
-    "anything",
-    "are",
-    "as",
-    "at",
-    "be",
-    "can",
-    "do",
-    "for",
-    "from",
-    "how",
-    "i",
-    "is",
-    "it",
-    "keep",
-    "like",
-    "me",
-    "new",
-    "of",
-    "on",
-    "or",
-    "please",
-    "remind",
-    "should",
-    "tell",
-    "the",
-    "there",
-    "to",
-    "was",
-    "we",
-    "what",
-    "whats",
-    "with",
-    "working",
-}
+# Stopwords now live in the shared recognition contract (canonical STOPWORDS +
+# codex's opt-in DOMAIN_STOPWORDS_CODEX), consumed via meaningful_terms().
 
 
 @dataclass(frozen=True)
@@ -218,6 +187,7 @@ def compile_codex_turn(
     cwd_path = _resolve_cwd(cwd)
     cwd_text = str(cwd_path) if cwd_path else None
     repo = _detect_repo(cwd_path)
+    scoring_cwd = None if cwd_path and _is_home_like_cwd(cwd_path) else cwd_path
     resolved_codex_home = Path(codex_home) if codex_home else _resolve_codex_home()
     resolved_library = Path(library_path) if library_path else DEFAULT_LIBRARY_PATH
 
@@ -231,9 +201,9 @@ def compile_codex_turn(
         manifest,
         resolved_codex_home,
     )
-    scored = _score_candidates(candidates, prompt_text, cwd_path, repo)
+    scored = _score_candidates(candidates, prompt_text, scoring_cwd, repo)
     items = _rank_items(scored, item_limit)
-    routing = _routing_decision(items, scored, repo, native_stage1)
+    routing = _routing_decision(items, scored, repo, native_stage1, prompt)
     trace = _recognition_trace(items, scored, repo, native_stage1, routing)
 
     explicit_text = _render_explicit_text(items, repo, native_stage1, char_limit)
@@ -305,9 +275,20 @@ def _detect_repo(cwd: Path | None) -> RepoIdentity:
         return RepoIdentity()
     root = _find_git_root(cwd)
     if root is None:
+        if _is_home_like_cwd(cwd):
+            return RepoIdentity()
         return RepoIdentity(name=cwd.name or None, root=None, remote=None)
     remote = _read_git_origin(root)
     return RepoIdentity(name=root.name, root=str(root), remote=remote)
+
+
+def _is_home_like_cwd(cwd: Path) -> bool:
+    try:
+        cwd_resolved = cwd.resolve(strict=False)
+        home_resolved = Path.home().resolve(strict=False)
+    except OSError:
+        return False
+    return cwd_resolved == home_resolved
 
 
 def _find_git_root(path: Path) -> Path | None:
@@ -424,6 +405,8 @@ def _gather_candidates(
         thread_name = str(record.get("thread_name") or "").strip()
         if not thread_name or thread_name == "(untitled)":
             continue
+        if _is_prompt_echo_thread(thread_name, prompt):
+            continue
         source = "codex_rollout" if record.get("has_rollout") else "codex_state"
         candidates.append(
             _Candidate(
@@ -533,6 +516,18 @@ def _collect_lightweight_session_records(
             }
         )
     return records
+
+
+def _is_prompt_echo_thread(thread_name: str, prompt: str) -> bool:
+    title_terms = _meaningful_prompt_terms(thread_name)
+    prompt_terms = _meaningful_prompt_terms(prompt)
+    if not prompt_terms:
+        return False
+    if title_terms == prompt_terms:
+        return True
+    if len(title_terms) <= len(prompt_terms) + 3:
+        return title_terms[-len(prompt_terms) :] == prompt_terms
+    return False
 
 
 def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -763,28 +758,36 @@ def _is_vague_continuation_prompt(prompt: str) -> bool:
     return normalized in {"what should i do", "what should i do next"}
 
 
+# codex's score weight per shared match tier (the tier DECISION is the
+# contract's; codex keeps its own weighting). The TOKEN_OVERLAP weight is
+# computed from the overlap count below.
+_TIER_PROMPT_SCORE = {
+    MatchTier.EXACT: 40.0,
+    MatchTier.NAME_SUBSTRING: 36.0,
+    MatchTier.TOKEN_SUBSEQUENCE: 30.0,
+}
+
+
 def _prompt_match_score(candidate: _Candidate, prompt: str) -> tuple[float, str]:
-    prompt_lower = prompt.lower()
-    prompt_tokens = _tokens(prompt)
     prompt_terms = _meaningful_prompt_terms(prompt)
     names = [candidate.name] + candidate.aliases + candidate.project_focus
     best = 0.0
     best_name = ""
     for name in names:
-        name_lower = name.lower().strip()
-        if not name_lower:
+        if not name.strip():
             continue
-        name_tokens = _tokens(name)
-        if prompt_lower == name_lower:
-            score = 40.0
-        elif name_lower in prompt_lower:
-            score = 36.0
-        elif _contains_subsequence(prompt_tokens, name_tokens):
-            score = 30.0
-        else:
-            name_terms = [token for token in name_tokens if token not in _PROMPT_STOPWORDS]
+        # The shared contract decides HOW (and whether) this name matched, so the
+        # token-boundary guard is consistent across engines — e.g. "iltt" no
+        # longer matches inside "iltted" via a raw substring (3-Star tests-P1-1).
+        tier = match_tier(prompt, name, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
+        if tier in _TIER_PROMPT_SCORE:
+            score = _TIER_PROMPT_SCORE[tier]
+        elif tier == MatchTier.TOKEN_OVERLAP:
+            name_terms = meaningful_terms(name, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
             overlap = len(set(prompt_terms) & set(name_terms))
             score = min(24.0, overlap * 12.0)
+        else:
+            score = 0.0
         if score > best:
             best = score
             best_name = name
@@ -794,11 +797,9 @@ def _prompt_match_score(candidate: _Candidate, prompt: str) -> tuple[float, str]
 
 
 def _meaningful_prompt_terms(prompt: str) -> list[str]:
-    return [
-        token
-        for token in _tokens(prompt)
-        if token not in _PROMPT_STOPWORDS and len(token) > 2
-    ]
+    # Canonical stopwords + codex's opt-in domain words (branch/pr/codex/...),
+    # symmetric len>=3 filter — all from the shared recognition contract.
+    return meaningful_terms(prompt, extra_stopwords=DOMAIN_STOPWORDS_CODEX)
 
 
 def _cwd_score(
@@ -958,6 +959,7 @@ def _routing_decision(
     scored: list[tuple[_Candidate, float, dict[str, float], str]],
     repo: RepoIdentity,
     native_stage1: str,
+    prompt: str,
 ) -> dict[str, Any]:
     if not items:
         return {
@@ -971,7 +973,12 @@ def _routing_decision(
         }
 
     top_item = items[0]
-    confidence = _confidence(top_item.score)
+    # Confidence is the shared tier-driven bucket (parity stage 4): same bucket
+    # on every surface for the same (prompt, anchor). codex's richer score still
+    # drives RANKING + surface selection below; it no longer moves the bucket.
+    top_candidate = scored[0][0]
+    anchor_names = [top_candidate.name, *top_candidate.aliases, *top_candidate.project_focus]
+    confidence = recognition_confidence(prompt, anchor_names)
     surfaces = _recommended_surfaces(top_item, repo, native_stage1)
     suppressed = _suppressed_surfaces(native_stage1, confidence)
     return {
@@ -985,12 +992,6 @@ def _routing_decision(
     }
 
 
-def _confidence(score: float) -> str:
-    if score >= 50:
-        return "high"
-    if score >= 25:
-        return "medium"
-    return "low"
 
 
 def _recommended_surfaces(

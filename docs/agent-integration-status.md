@@ -1,7 +1,7 @@
 # Agent Integration Status
 
 This page tracks the operational Bourdon layer available for each agent. It is
-the current implementation map, not the long-term adapter wishlist.
+the current implementation map, not the long-term participant wishlist.
 
 ## Claude Code
 
@@ -13,7 +13,8 @@ Status: export hook available.
 
 ## Codex
 
-Status: SQLite-backed fallback and turn preparation available.
+Status: SQLite-backed fallback and turn preparation available; Codex CLI live
+hook available.
 
 - `bourdon codex doctor` diagnoses `~/.codex/state_5.sqlite`, stale-index fallback,
   and fallback recall.
@@ -21,6 +22,10 @@ Status: SQLite-backed fallback and turn preparation available.
   back to `session_index.jsonl` on older Codex installs.
 - `bourdon codex prepare-turn` refreshes Codex fallback memory surfaces and emits
   prompt-ready recognition context.
+- `bourdon codex hook user-prompt-submit` implements the Codex CLI
+  `UserPromptSubmit` hook contract and injects compact `additionalContext`
+  for high-confidence recognition turns. See
+  [`integrations/codex-cli.md`](integrations/codex-cli.md).
 - `bourdon codex sync-native --from-library` sources `bourdon_fallback.md` from
   the federation library (`~/agent-library/agents/*.l5.yaml`) instead of local
   Codex history. Required on a fresh machine where Codex has no local sessions
@@ -33,10 +38,10 @@ Status: SQLite-backed fallback and turn preparation available.
 
 ## Cursor
 
-Status: adapter available; `bourdon cursor export` is the native SQLite export
+Status: participant available; `bourdon cursor export` is the native SQLite export
 path.
 
-- `CursorAdapter` reads Cursor's SQLite state through a read-only temp copy.
+- `CursorParticipant` reads Cursor's SQLite state through a read-only temp copy.
 - `bourdon cursor export` writes `~/agent-library/agents/cursor.l5.yaml`.
 - **Setup walkthrough:** [`docs/integrations/cursor.md`](integrations/cursor.md) (MCP in Cursor IDE + export).
 - The existing short-index memory-cycle scripts remain available for manually
@@ -46,7 +51,7 @@ path.
 
 Status: blocked pending confirmed native memory store path/schema.
 
-- No Cline adapter should be added until its durable local memory source is
+- No Cline participant should be added until its durable local memory source is
   known.
 - Until then, Cline can consume Bourdon through the generic MCP or shell
   surfaces: `prepare_recognition_context` or `bourdon prepare-turn`.
@@ -69,15 +74,15 @@ an MCP source.
 - OpenManus consumes Bourdon by default via read tools and can **publish**
   federation updates through `commit_to_federation` whenever the orchestrator
   surfaces that MCP surface to its model loop (same pattern documented in
-  `docs/AUTHORING_AN_ADAPTER.md` for other cloud-first agents).
+  `docs/AUTHORING_A_PARTICIPANT.md` for other cloud-first agents).
 
 ## Cascade (Windsurf)
 
-Status: adapter available; `bourdon cascade export` is the convention-file
+Status: participant available; `bourdon cascade export` is the convention-file
 export path.
 
 - Cascade has no standardized on-disk session state (similar to Copilot). The
-  adapter reads from a **convention-based memory file** at
+  participant reads from a **convention-based memory file** at
   `~/.cascade-bourdon/memory.md` that Cascade maintains at session end.
 - `bourdon cascade init` creates `~/.cascade-bourdon/memory.md` with a starter
   template. Edit the YAML front-matter to add entities and sessions.
@@ -85,7 +90,7 @@ export path.
   writes `~/agent-library/agents/cascade.l5.yaml`.
 - `bourdon cascade doctor` diagnoses the memory file and reports entity/session
   counts, front-matter validity, and health status.
-- Credential redaction uses the canonical pattern set from `adapters/codex.py`,
+- Credential redaction uses the canonical pattern set from `participants/codex.py`,
   extended with Cascade-specific patterns (`secret`, `sk_test_*`). See
   [`SECURITY.md`](../SECURITY.md) for the full runtime security model.
 - Current role: agentic pair-programmer with multi-step planning for L6
@@ -93,11 +98,11 @@ export path.
 
 ## GitHub Copilot
 
-Status: adapter available; `bourdon copilot export` is the convention-file
+Status: participant available; `bourdon copilot export` is the convention-file
 export path.
 
 - GitHub Copilot has no accessible on-disk session index (cloud-side reasoning,
-  no session JSONL). The adapter reads from a **convention-based memory file**
+  no session JSONL). The participant reads from a **convention-based memory file**
   at `~/.copilot-bourdon/memory.md` that users or Copilot Chat can maintain.
 - `bourdon copilot init` creates `~/.copilot-bourdon/memory.md` with a starter
   template. Edit the YAML front-matter to add entities and sessions.
@@ -186,13 +191,18 @@ BOURDON_PEER_TOKEN=$TOKEN_MAC \
 Or declare peers in `~/.bourdon/peers.yaml` (see
 [`config/peers.example.yaml`](../config/peers.example.yaml)).
 
-### Auth defaults
+### Auth defaults (v0.9.0)
 
-- HTTP transport requires `BOURDON_PEER_TOKEN_SERVER` to be set; missing
-  token + missing `--allow-unauthenticated` flag returns 503 to every
-  request (fails closed).
-- `--allow-unauthenticated` exists as an explicit escape hatch for
-  localhost-only testing. Don't use it on Tailscale-exposed ports.
+- **Per-agent Bearer tokens** via `bourdon agent add <id>` (hashed at rest,
+  shown once, revocable with `bourdon revoke`). Each token resolves to that
+  member's identity + trust tier; see [`docs/security-model.md`](security-model.md).
+- The legacy shared token (`BOURDON_PEER_TOKEN_SERVER`) still authenticates
+  and maps to the trusted operator identity (migration path). No auth source
+  configured + no `--allow-unauthenticated` returns 503 to every request
+  (fails closed).
+- Default bind is `127.0.0.1` (**changed from 0.0.0.0 in v0.9.0**).
+  Non-loopback binds refuse to start without auth configured;
+  `--allow-unauthenticated` is loopback-only.
 - Client-side: default env is `BOURDON_PEER_TOKEN`; per-peer override via
   `token_env:` in `peers.yaml`.
 
@@ -207,9 +217,24 @@ Or declare peers in `~/.bourdon/peers.yaml` (see
 | `prepare_recognition_context` | sync (~1.2 ms) | local fires first, peers queried in parallel with per-peer timeout (default 200 ms). Peer-matched entities merged with `peer:<name>:<agent>` tags. Slow/dead peers dropped. See `peer_latencies_us` in the response. |
 | `commit_to_federation` | local | local-only; peers commit to their own libraries |
 
+## OpenClaw (v0.9.0 — quarantined class)
+
+- **Read-side adapter:** `participants/openclaw.py` — network-shaped (reads the
+  instance's local HTTP API, not on-disk artifacts). Hard handshake gate:
+  refuses instances unpatched for CVE-2026-25253 (< 2026.1.29) or with auth
+  disabled. `bourdon openclaw export` writes INTO STAGING; promote with
+  `bourdon staging promote openclaw`.
+- **Live federation member:** register with `bourdon agent add openclaw`
+  (quarantined by default; trusted requires `--i-understand-the-risk`), grant
+  namespaces with `bourdon grant`. Guide:
+  [`docs/integrations/openclaw.md`](integrations/openclaw.md).
+- The OpenClaw-side ClawHub plugin (`bourdon-openclaw`) is a separate,
+  complementary surface.
+
 ### Out of scope for v0
 
-- Peer auth rotation / multi-tenant ACLs (Phase 1.7).
+- ~~Peer auth rotation~~ — shipped in v0.9.0 (`bourdon agent rotate`).
+  Multi-tenant ACLs remain out of scope.
 - Conflict resolution beyond "newest wins" (Phase 1.7).
 - Per-peer rate limiting / circuit breaking.
 - Cross-peer pagination cursor (cursored calls fall back to local-only paging).

@@ -44,7 +44,7 @@ It's idempotent — running it twice is safe. `--non-interactive` uses defaults;
 bourdon doctor
 ```
 
-Each adapter reports `ok` / `degraded` / `blocked`. Anything not `ok` carries a `proposed_fix` line with the exact command to run next. Example:
+Each participant reports `ok` / `degraded` / `blocked`. Anything not `ok` carries a `proposed_fix` line with the exact command to run next. Example:
 
 ```yaml
 - agent: codex
@@ -102,11 +102,11 @@ Self-contained walkthrough. Stages synthetic agent-library content in a tempdir,
 Every now and then:
 
 ```bash
-bourdon export-all    # refresh all adapter manifests
+bourdon export-all    # refresh all participant manifests
 bourdon doctor        # check health, get fix proposals if anything drifts
 ```
 
-The Claude Code `SessionEnd` hook wired by `bourdon setup` already keeps `claude-code.l5.yaml` fresh, so the explicit `export-all` is mostly relevant when you add a new adapter or want to force a refresh.
+The Claude Code `SessionEnd` hook wired by `bourdon setup` already keeps `claude-code.l5.yaml` fresh, so the explicit `export-all` is mostly relevant when you add a new participant or want to force a refresh.
 
 ---
 
@@ -116,7 +116,7 @@ The Claude Code `SessionEnd` hook wired by `bourdon setup` already keeps `claude
 |---|---|
 | `bourdon: command not found` after install | Check `pip` installed into a venv on `$PATH`. `pipx install bourdon` avoids this. |
 | `bourdon doctor` says everything is `ok` but recognition isn't firing | Codex routes name-triggered prompts (`"what is X"`) to its training corpus — try a contextual prompt: `"what am I working on"`. See [GitHub issue #80](https://github.com/getbourdon/bourdon/issues/80). |
-| `bourdon doctor` says `degraded` after setup | The `proposed_fix` line tells you the exact command. Usually a single re-run of `bourdon setup` or an adapter `init`. |
+| `bourdon doctor` says `degraded` after setup | The `proposed_fix` line tells you the exact command. Usually a single re-run of `bourdon setup` or a participant `init`. |
 | `~/.codex/memories/MEMORY.md` exists but Codex doesn't seem to read it | Confirm you're using the actual OpenAI Codex desktop app, not chatgpt.com. The two have different memory backends. See the [2026-05-26 cross-machine test report](https://github.com/getbourdon/bourdon/blob/main/web/index.html#the-cross-machine-test) for the surface-mismatch story. |
 | `bourdon sync push` errors `rsync: command not found` | Install rsync (`brew install rsync` on Mac; comes with most Linux distros; WSL/Cygwin on Windows). |
 | Malformed YAML frontmatter warnings during `export-all` | The warning now names the offending file (post-2026-05-26). Open it; the `---` fences must wrap valid YAML. |
@@ -131,4 +131,4 @@ For anything else, file an issue at [github.com/getbourdon/bourdon/issues](https
 - **[THESIS.md](../spec/THESIS.md)** — the full long-form thesis document.
 - **[RELATED_WORK.md](../spec/RELATED_WORK.md)** — how Bourdon's vocabulary maps onto Mem0, Zep, Letta, Cognee, Memora.
 - **[FINDINGS_JOURNAL.md](../spec/FINDINGS_JOURNAL.md)** — running log of cross-account / cross-machine validation runs.
-- **[AUTHORING_AN_ADAPTER.md](AUTHORING_AN_ADAPTER.md)** — building your own adapter for an agent Bourdon doesn't ship.
+- **[AUTHORING_A_PARTICIPANT.md](AUTHORING_A_PARTICIPANT.md)** — building your own participant for an agent Bourdon doesn't ship.

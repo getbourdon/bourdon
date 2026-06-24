@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<!--
+  Bourdon Desktop Tray — Phase 0 main window.
+  Licensed under the Business Source License 1.1 (repo root LICENSE; the tray is
+  server-side of the MIT/BSL boundary).
+
+  Design: a compact tray popover. The OVERVIEW is deliberately quiet — just the
+  agents and their pulse. Click an agent to drill into its DEEP REPORT (full
+  role, capabilities, complete session history). Progressive disclosure keeps the
+  surface calm while the depth stays one click away.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bourdon</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <!-- Official Bourdon mark (organ-pipe "b" / drone motif) -->
+        <svg class="mark" viewBox="68 56 252 280" width="19" height="19" aria-hidden="true">
+          <g fill="#c17c74">
+            <rect x="80" y="250" width="16" height="70" />
+            <rect x="104" y="220" width="16" height="100" />
+            <rect x="128" y="185" width="16" height="135" />
+            <rect x="152" y="150" width="16" height="170" />
+            <rect x="176" y="115" width="16" height="205" />
+            <rect x="194" y="70" width="22" height="250" />
+            <path d="M216 198 C 258 182, 304 200, 304 244 C 304 286, 262 314, 216 318 L216 258 C 238 256, 256 248, 256 234 C 256 220, 240 218, 216 230 Z" />
+          </g>
+        </svg>
+        <span class="brand-name">Bourdon</span>
+      </div>
+      <div class="topbar-right">
+        <span class="health-badge" id="health-badge" data-health="grey">
+          <span class="health-dot"></span>
+          <span class="health-text" id="health-text">Reading…</span>
+        </span>
+        <button class="icon-btn" id="refresh-btn" title="Re-read memory" aria-label="Refresh">
+          ↻
+        </button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- States toggled by main.js: loading / error / empty / overview / detail -->
+      <section id="state-loading" class="state-panel">
+        <p class="muted center">Reading the local memory layer…</p>
+      </section>
+
+      <section id="state-error" class="state-panel hidden">
+        <h2 class="state-title error-title">Can't read memory</h2>
+        <p class="muted" id="error-detail"></p>
+        <pre class="diag" id="error-command"></pre>
+      </section>
+
+      <section id="state-empty" class="state-panel hidden">
+        <h2 class="state-title">No agents yet</h2>
+        <p class="muted">
+          Bourdon makes your AI tools' memory <strong>shared</strong> and
+          <strong>visible</strong>. None are publishing here yet.
+        </p>
+        <p>
+          <a
+            href="https://github.com/getbourdon/bourdon#readme"
+            target="_blank"
+            rel="noopener"
+            class="docs-link"
+            >Publish an agent →</a
+          >
+        </p>
+        <p class="muted small" id="empty-source"></p>
+      </section>
+
+      <!-- OVERVIEW: quiet agent list -->
+      <section id="state-overview" class="state-panel hidden">
+        <div class="list-head">
+          <span class="list-title">Agents</span>
+          <span class="count-chip" id="agent-count">0</span>
+        </div>
+        <div id="agent-list" class="agent-list"></div>
+      </section>
+
+      <!-- DETAIL: per-agent deep report -->
+      <section id="state-detail" class="state-panel hidden">
+        <button class="back-btn" id="back-btn">‹ Agents</button>
+        <div id="detail-body"></div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <div class="scope-toggle" role="group" aria-label="Scope">
+        <button class="scope-seg active" id="scope-local">This machine</button>
+        <button class="scope-seg" id="scope-federated">Federated</button>
+      </div>
+      <span class="scope-status" id="scope-status"></span>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>

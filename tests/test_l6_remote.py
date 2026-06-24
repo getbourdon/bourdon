@@ -117,7 +117,7 @@ async def test_list_agents_extracts_agents_field() -> None:
     _wire_fake_session(c, fake)
     agents = await c.list_agents()
     assert agents == ["claude-code", "codex"]
-    assert fake.calls == [("list_agents", {})]
+    assert fake.calls == [("list_agents", {"federation_hop": 1})]
 
 
 @pytest.mark.asyncio
@@ -146,7 +146,12 @@ async def test_find_entity_forwards_args_and_returns_matches() -> None:
     assert fake.calls == [
         (
             "find_entity",
-            {"name": "Bourdon", "access_level": "team", "include_private": False},
+            {
+                "name": "Bourdon",
+                "access_level": "team",
+                "include_private": False,
+                "federation_hop": 1,
+            },
         )
     ]
 
@@ -240,3 +245,39 @@ async def test_unknown_tool_name_raises() -> None:
     c = RemoteL6Client(url="http://x:7500", name="x", token_env="")
     with pytest.raises(ValueError, match="unknown peer tool"):
         await c._call_tool("not_a_real_tool", {})
+
+
+# ---------------------------------------------------------------------------
+# Depth-1 federation contract (#139)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_fanout_queries_send_federation_hop() -> None:
+    """Every fan-out-capable query must declare itself as hop 1.
+
+    Without this, bidirectional peering (A lists B, B lists A) recurses until
+    fd exhaustion — issue #139. ``export_agents`` is exempt: its server tool
+    is local-only by construction.
+    """
+    c = RemoteL6Client(url="http://x:7500", name="x", token_env="")
+    fake = FakeSession(
+        responses={
+            "list_agents": {"agents": []},
+            "find_entity": {"matches": []},
+            "list_recent_work": {"sessions": [], "has_more": False, "next_cursor": None},
+            "get_cross_agent_summary": {},
+            "prepare_recognition_context": {},
+        }
+    )
+    _wire_fake_session(c, fake)
+
+    await c.list_agents()
+    await c.find_entity("Bourdon")
+    await c.list_recent_work()
+    await c.get_cross_agent_summary("Bourdon")
+    await c.prepare_recognition_context("hi")
+
+    assert len(fake.calls) == 5
+    for name, args in fake.calls:
+        assert args.get("federation_hop") == 1, f"{name} did not send federation_hop=1"

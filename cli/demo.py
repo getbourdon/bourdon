@@ -21,7 +21,7 @@ What actually runs:
   5. Leave the tempdir on disk and tell the user where to look.
 
 The federation -> render machinery is the production code path
-(``L6Store.build_recognition_manifest`` and the codex adapter's
+(``L6Store.build_recognition_manifest`` and the codex participant's
 ``_render_codex_federation_memory_text``). Only the input library is
 synthetic.
 """
@@ -206,7 +206,7 @@ def run_demo(
 ) -> dict[str, object]:
     """Execute the demo end-to-end. Returns a dict describing the outcome."""
     # Defer the heavy imports until run-time so `bourdon --help` stays snappy.
-    from adapters.codex import _render_codex_federation_memory_text
+    from participants.codex import _render_codex_federation_memory_text
 
     # mkdtemp returns a tempdir we own; we explicitly rmtree() at the end
     # only when keep_tempdir is False. Avoids private-API gymnastics around

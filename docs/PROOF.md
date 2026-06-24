@@ -132,15 +132,15 @@ Claude Desktop should invoke one of:
 | `bourdon serve` says `agents: 0 loaded` | No L5 manifests in `~/agent-library/agents/` | Run `bourdon claude-code export` (or the equivalent for whatever you want to federate) |
 | Claude Desktop never shows Bourdon tools after restart | The `command` in the MCP config isn't on Claude Desktop's PATH | Use an absolute path to the `bourdon` binary in the venv |
 | Bourdon tools appear but agent says "I don't have data" | The tools work but the agent isn't using them | Ask more explicitly: *"Call the Bourdon MCP tool `list_recent_work` and tell me what it returns."* |
-| Tools return empty results | Visibility filtering — entities tagged `team` or `private` are filtered at default `public` access | Pass `access_level="team"` in the tool call. See [`docs/agent-integration-status.md`](agent-integration-status.md) for which adapters default to which visibility |
-| Anything else | `bourdon dogfood` for the round-trip smoke test, `bourdon doctor` for adapter health | Both commands write actionable notes |
+| Tools return empty results | Visibility filtering — entities tagged `team` or `private` are filtered at default `public` access | Pass `access_level="team"` in the tool call. See [`docs/agent-integration-status.md`](agent-integration-status.md) for which participants default to which visibility |
+| Anything else | `bourdon dogfood` for the round-trip smoke test, `bourdon doctor` for participant health | Both commands write actionable notes |
 
 ## Variations
 
 - **Reader = Cursor:** Cursor's MCP config story is evolving; see [`docs/integrations/`](integrations/) for the current setup.
 - **Reader = OpenManus:** Already documented in [`docs/integrations/openmanus.md`](integrations/openmanus.md).
 - **Reader = any MCP-aware client:** The Bourdon L6 server exposes a standard MCP surface (resources + tools). Any client that speaks MCP can wire it the same way as Claude Desktop above. The transport choices are `stdio` (default, fewer moving parts) and `http` (`bourdon serve --transport http --port 7500`).
-- **Writer = Codex / Cursor / Copilot / Cascade:** Each adapter has its own export command (`bourdon codex export`, `bourdon cursor export`, etc.) and adapter-specific quirks. See [`docs/agent-integration-status.md`](agent-integration-status.md).
+- **Writer = Codex / Cursor / Copilot / Cascade:** Each participant has its own export command (`bourdon codex export`, `bourdon cursor export`, etc.) and participant-specific quirks. See [`docs/agent-integration-status.md`](agent-integration-status.md).
 - **Multi-writer:** Run all the export commands you have access to. The L6 server federates whatever lands in `~/agent-library/agents/`. The reader sees a unified view.
 
 ## Why this is the gating criterion

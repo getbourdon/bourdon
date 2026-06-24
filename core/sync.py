@@ -160,17 +160,18 @@ def _is_l5_manifest(rel: Path) -> bool:
 
 
 def _write_filtered_manifest(src: Path, dest: Path, access_level: str) -> None:
-    """Read an L5 manifest, filter by visibility, write to dest.
+    """Read an L5 manifest, filter by visibility, write the filtered copy to dest.
 
-    On parse failure logs at WARNING and copies the file unchanged so a
-    broken manifest doesn't block the rest of the sync (parallels the
-    no-frontmatter-on-parse-error behavior in the adapters per #79).
+    Fails CLOSED (3-Star audit P1-1): if the manifest can't be read, can't be
+    parsed, or isn't a mapping, it is SKIPPED (dest is not written) rather than
+    copied unchanged. Copying the raw file would push the manifest's PRIVATE
+    entries straight past the visibility filter to the destination/peer. An
+    unfilterable manifest is omitted from the push, never shipped in the clear.
     """
     try:
         text = src.read_text(encoding="utf-8")
     except OSError as exc:
-        logger.warning("sync: cannot read %s (%s); copying unchanged", src, exc)
-        shutil.copy2(src, dest)
+        logger.warning("sync: cannot read %s (%s); SKIPPING (not pushed)", src, exc)
         return
 
     try:
@@ -178,15 +179,15 @@ def _write_filtered_manifest(src: Path, dest: Path, access_level: str) -> None:
     except yaml.YAMLError as exc:
         detail = str(exc).replace("\n", " ")[:200]
         logger.warning(
-            "sync: %s has malformed YAML (%s); copying unchanged",
+            "sync: %s has malformed YAML (%s); SKIPPING (not pushed) — cannot "
+            "visibility-filter an unparseable manifest",
             src,
             detail,
         )
-        shutil.copy2(src, dest)
         return
 
     if not isinstance(parsed, dict):
-        shutil.copy2(src, dest)
+        logger.warning("sync: %s is not a YAML mapping; SKIPPING (not pushed)", src)
         return
 
     filtered = filter_l5_manifest(parsed, access_level)

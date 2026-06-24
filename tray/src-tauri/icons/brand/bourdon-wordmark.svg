@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 100" fill="none">
+  <g transform="translate(0, 6) scale(0.22)">
+    <g fill="#C17C74">
+      <rect x="80" y="250" width="16" height="70"></rect>
+      <rect x="83" y="306" width="10" height="3" fill="#f7f1e8"></rect>
+      <rect x="104" y="220" width="16" height="100"></rect>
+      <rect x="107" y="306" width="10" height="3" fill="#f7f1e8"></rect>
+      <rect x="128" y="185" width="16" height="135"></rect>
+      <rect x="131" y="306" width="10" height="3" fill="#f7f1e8"></rect>
+      <rect x="152" y="150" width="16" height="170"></rect>
+      <rect x="155" y="306" width="10" height="3" fill="#f7f1e8"></rect>
+      <rect x="176" y="115" width="16" height="205"></rect>
+      <rect x="179" y="306" width="10" height="3" fill="#f7f1e8"></rect>
+      <rect x="194" y="70" width="22" height="250"></rect>
+      <rect x="199" y="306" width="14" height="3" fill="#f7f1e8"></rect>
+      <path d="M216 198 C 258 182, 304 200, 304 244 C 304 286, 262 314, 216 318 L216 258 C 238 256, 256 248, 256 234 C 256 220, 240 218, 216 230 Z"></path>
+    </g>
+  </g>
+
+  <text x="100" y="73" font-family="Geist, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, sans-serif" font-size="52" font-weight="600" letter-spacing="-1.4" fill="#c17c74">bourdon</text>
+</svg>
