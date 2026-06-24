@@ -42,6 +42,7 @@ from adapters.copilot import (
     init_memory_file,
 )
 from adapters.cursor import CursorAdapter
+from core.cascade_turn_compiler import compile_cascade_turn
 from core.claude_turn_compiler import compile_claude_turn
 from core.codex_context import (
     filter_manifest_for_access,
@@ -882,6 +883,31 @@ def _handle_claude_code_compile_turn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_cascade_compile_turn(args: argparse.Namespace) -> int:
+    try:
+        brief = compile_cascade_turn(
+            args.prompt,
+            cwd=getattr(args, "cwd", None),
+            windsurf_data_dir=getattr(args, "windsurf_data_dir", None),
+            library_path=getattr(args, "library_path", None),
+            access_level=args.access_level,
+            max_items=args.max_items,
+            max_chars=args.max_chars,
+            delivery=args.delivery,
+        )
+    except ValueError as exc:
+        print(f"compile-turn: {exc}", file=sys.stderr)
+        return 2
+
+    data = brief.to_dict()
+    _write_yaml_if_requested(data, args.report_out)
+    if args.format == "json":
+        print(json.dumps(data, indent=2, sort_keys=False))
+    else:
+        _print_yaml(data)
+    return 0
+
+
 def _fixture_adapter() -> CodexAdapter:
     tmpdir = tempfile.TemporaryDirectory()
     sources = create_sample_codex_sources(Path(tmpdir.name) / "home")
@@ -1354,6 +1380,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing memory.md.",
     )
     cascade_init_cmd.set_defaults(func=_handle_cascade_init)
+
+    cascade_compile_turn_cmd = cascade_subparsers.add_parser(
+        "compile-turn",
+        help="Compile a turn-scoped Cascade recognition brief",
+    )
+    cascade_compile_turn_cmd.add_argument("prompt")
+    cascade_compile_turn_cmd.add_argument("--cwd")
+    cascade_compile_turn_cmd.add_argument(
+        "--library-path",
+        help="Override the agent-library root (default: ~/agent-library).",
+    )
+    cascade_compile_turn_cmd.add_argument("--windsurf-data-dir", help=argparse.SUPPRESS)
+    cascade_compile_turn_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    cascade_compile_turn_cmd.add_argument("--max-items", type=int, default=6)
+    cascade_compile_turn_cmd.add_argument("--max-chars", type=int, default=1800)
+    cascade_compile_turn_cmd.add_argument(
+        "--format",
+        choices=("yaml", "json"),
+        default="yaml",
+    )
+    cascade_compile_turn_cmd.add_argument(
+        "--delivery",
+        choices=("explicit", "mcp", "memory-md", "fallback", "all"),
+        default="all",
+    )
+    cascade_compile_turn_cmd.add_argument("--report-out")
+    cascade_compile_turn_cmd.set_defaults(func=_handle_cascade_compile_turn)
 
     # ---- top-level doctor / export-all --------------------------------------
     doctor_cmd = subparsers.add_parser(

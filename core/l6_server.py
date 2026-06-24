@@ -57,6 +57,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.cascade_turn_compiler import compile_cascade_turn as _compile_cascade_turn
 from core.claude_turn_compiler import compile_claude_turn as _compile_claude_turn
 from core.codex_turn_compiler import compile_codex_turn as _compile_codex_turn
 from core.l2 import query_l2
@@ -341,6 +342,27 @@ def compile_claude_turn_from_store(
 ) -> dict[str, Any]:
     """Return a Claude Code turn-scoped recognition brief using this server's store."""
     brief = _compile_claude_turn(
+        prompt,
+        cwd=cwd,
+        library_path=store.library_path,
+        access_level=access_level,
+        max_items=max_items,
+        max_chars=max_chars,
+        delivery="all",
+    )
+    return brief.to_dict()
+
+
+def compile_cascade_turn_from_store(
+    store: L6Store,
+    prompt: str,
+    cwd: str | None = None,
+    access_level: str = "team",
+    max_items: int = 6,
+    max_chars: int = 1800,
+) -> dict[str, Any]:
+    """Return a Cascade turn-scoped recognition brief using this server's store."""
+    brief = _compile_cascade_turn(
         prompt,
         cwd=cwd,
         library_path=store.library_path,
@@ -752,6 +774,31 @@ def create_l6_server(store: L6Store, name: str = "bourdon-l6") -> Any:
         (``MEMORY.md``) being healthy.
         """
         return compile_claude_turn_from_store(
+            store,
+            prompt,
+            cwd=cwd,
+            access_level=access_level,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
+
+    @mcp.tool()
+    def compile_cascade_turn(
+        prompt: str,
+        cwd: str | None = None,
+        access_level: str = "team",
+        max_items: int = 6,
+        max_chars: int = 1800,
+    ) -> dict:
+        """
+        Compile a turn-scoped Cascade (Windsurf) recognition brief.
+
+        The Cascade analogue of ``compile_codex_turn``: it ranks prompt, cwd/repo
+        identity, local Windsurf state (Cascade editor sessions, active plans and
+        workflows), and L6 federation context into a compact prompt fragment
+        without depending on the convention file or native state being present.
+        """
+        return compile_cascade_turn_from_store(
             store,
             prompt,
             cwd=cwd,
