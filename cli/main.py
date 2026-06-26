@@ -282,6 +282,34 @@ def _default_recognition_golden_path() -> Path:
     )
 
 
+def _handle_audit_leaks(args: argparse.Namespace) -> int:
+    """Static scan of published L5 manifests for credential + visibility leaks.
+
+    Read-only. With --strict, exits 1 if any finding is present (the CI / pre-
+    commit gate); otherwise exits 0 and just reports.
+    """
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+    from core.leak_audit import audit_library
+
+    library = Path(args.library) if getattr(args, "library", None) else DEFAULT_LIBRARY_PATH
+    report = audit_library(library)
+    data = report.to_dict()
+    if getattr(args, "summary", False):
+        data = {k: v for k, v in data.items() if k != "findings"}
+    _write_yaml_if_requested(data, getattr(args, "report_out", None))
+    _print_yaml(data)
+
+    if not report.clean:
+        print(
+            f"audit leaks: {len(report.findings)} finding(s) across "
+            f"{report.files_scanned} manifest(s) in {library}",
+            file=sys.stderr,
+        )
+        if getattr(args, "strict", False):
+            return 1
+    return 0
+
+
 def _handle_cursor_export(args: argparse.Namespace) -> int:
     """Hook-safe: silent on success, returns 0 in all failure modes."""
     verbose = getattr(args, "verbose", False)
@@ -3413,6 +3441,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit raw JSONL (machine-readable) instead of the table",
     )
     audit_cmd.set_defaults(func=_handle_audit)
+
+    audit_leaks_cmd = subparsers.add_parser(
+        "audit-leaks",
+        help="Static scan of published L5 manifests for credential + visibility leaks",
+    )
+    audit_leaks_cmd.add_argument(
+        "--library",
+        help="Path to agent-library (default: ~/agent-library)",
+    )
+    audit_leaks_cmd.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 if any leak is found (CI / pre-commit gate).",
+    )
+    audit_leaks_cmd.add_argument(
+        "--summary",
+        action="store_true",
+        help="Omit per-finding detail; print counts only.",
+    )
+    audit_leaks_cmd.add_argument("--report-out")
+    audit_leaks_cmd.set_defaults(func=_handle_audit_leaks)
 
     openclaw_cmd = subparsers.add_parser(
         "openclaw",

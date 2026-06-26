@@ -50,6 +50,14 @@ jobs:
           python -m cli.main recognition eval --summary \
             --min-micro-f1 1.0 --min-macro-f1 1.0 --max-p95-us 5000
 
+      - name: Federation leak audit (credential + visibility leaks)
+        # Library-wide guarantee that no published L5 manifest leaks a credential
+        # or a private-tagged entity. Scans whatever the test fixtures / smoke
+        # exports produced under ~/agent-library; --strict fails the build on any
+        # finding. A clean tree (no library yet) passes trivially.
+        run: |
+          python -m cli.main audit-leaks --summary --strict
+
       - name: Run smoke test (orchestrator against bundled example data)
         working-directory: core
         run: |
