@@ -6,7 +6,9 @@ Design documents for the Bourdon memory protocol.
 
 - **[`THESIS.md`](THESIS.md)** — Founding principles. Start here to understand *why* Bourdon exists and what it argues. Recognition > retrieval, concurrent language > call-and-repeat, cognition-modeled > database-modeled.
 
-- **[`ARCHITECTURE_v0.1.md`](ARCHITECTURE_v0.1.md)** — Full technical architecture for the L0-L4 personal memory stack plus L5-L6 federation layer. Includes the timing model (the product's core innovation), file structure, system prompt injection order, and open technical questions.
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — **Current** technical architecture: the L0–L4 personal memory stack, the L5–L6 federation layer, the recognition-first runtime as implemented in `core/`, and the participant contract. Start here for how Bourdon actually works today.
+
+- **[`ARCHITECTURE_v0.1.md`](ARCHITECTURE_v0.1.md)** — *Historical.* The original April-2026 Clyde/NeuroLayer design doc that introduced the L0–L4 timing model. Superseded by `ARCHITECTURE.md`; retained for provenance.
 
 - **[`USE_CASES.md`](USE_CASES.md)** — Eight worked domain scenarios demonstrating the universal scope: developer workflows, customer support, chemistry, poetry, architecture, physics, project management, education. Shows how the same L0-L6 architecture applies across domains with different entity types.
 

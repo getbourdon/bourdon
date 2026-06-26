@@ -38,6 +38,13 @@ from pathlib import Path
 from typing import Any
 
 from core.redaction import redact_text
+from participants._sqlite_base import (
+    epoch_to_iso_date,
+    friendly_label,
+    project_key_from_cwd,
+    table_exists,
+    try_open_readonly,
+)
 from participants.base import (
     SPEC_VERSION,
     AgentInfo,
@@ -99,12 +106,19 @@ _GENERIC_PROJECT_NAMES = frozenset(
 def default_native_path(home: Path | None = None) -> Path:
     """Conventional Hermes home used by the setup wizard's detection.
 
-    Honors ``$HERMES_HOME`` first (Hermes' own override), then ``~/.hermes``.
+    Resolution order:
+      1. An explicit ``home`` argument wins — the setup wizard passes
+         ``home=<fake or real home>`` for hermetic, testable detection, so this
+         must take precedence over ambient env to keep detection deterministic.
+      2. Otherwise ``$HERMES_HOME`` (Hermes' own override) if set.
+      3. Otherwise ``~/.hermes``.
     """
+    if home is not None:
+        return home / ".hermes"
     env = os.environ.get("HERMES_HOME")
     if env:
         return Path(env).expanduser()
-    return (home or Path.home()) / ".hermes"
+    return Path.home() / ".hermes"
 
 
 def _resolve_hermes_home(base_home: Path | None = None) -> Path | None:
@@ -122,28 +136,21 @@ def _bounded(value: str, limit: int = 240) -> str:
 
 
 def _epoch_to_iso_date(value: Any) -> str | None:
-    """Hermes stores started_at/ended_at as float epoch seconds."""
-    if value is None:
-        return None
-    try:
-        return (
-            datetime.fromtimestamp(float(value), tz=timezone.utc).date().isoformat()
-        )
-    except (ValueError, OSError, OverflowError):
-        return None
+    """Hermes stores started_at/ended_at as float epoch seconds.
+
+    Thin wrapper over the shared ``_sqlite_base.epoch_to_iso_date`` so the rest
+    of this module (and its tests) keep a stable local name.
+    """
+    return epoch_to_iso_date(value)
 
 
 def _project_key_from_cwd(cwd: str | None) -> str | None:
-    if not cwd:
-        return None
-    name = Path(cwd).name.strip().lower()
-    if name in _GENERIC_PROJECT_NAMES:
-        return None
-    return name
+    """Project key from a cwd, treating Hermes' generic dirs as no-project."""
+    return project_key_from_cwd(cwd, generic_names=_GENERIC_PROJECT_NAMES)
 
 
 def _friendly_label(key: str) -> str:
-    return re.sub(r"[-_]+", " ", key).strip().title()
+    return friendly_label(key)
 
 
 # -- SQLite (read-only) --------------------------------------------------------
@@ -152,24 +159,20 @@ def _friendly_label(key: str) -> str:
 def _open_state_db(state_db: Path) -> sqlite3.Connection:
     """Open state.db read-only so a live Hermes write-lock can't block us.
 
-    ``mode=ro`` (no ``immutable=1``): we must respect SQLite locking and read the
-    ``-wal`` sidecar of a live, actively-writing Hermes. ``immutable=1`` would tell
-    SQLite the file never changes -- skipping locks and ignoring the WAL -- which
-    risks stale reads or SQLITE_CORRUPT mid-write. Parity with the other
-    participants (codex/copilot), which all open ``mode=ro`` alone.
+    Delegates to the shared ``try_open_readonly`` (``mode=ro``, no ``immutable=1``):
+    we must respect SQLite locking and read the ``-wal`` sidecar of a live,
+    actively-writing Hermes -- ``immutable=1`` would skip locks and ignore the WAL,
+    risking stale reads / SQLITE_CORRUPT. Raises ``sqlite3.Error`` on failure
+    (callers that need the never-raises contract use ``try_open_readonly`` directly).
     """
-    uri = f"file:{state_db}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-    conn.row_factory = sqlite3.Row
+    conn = try_open_readonly(state_db)
+    if conn is None:
+        raise sqlite3.Error(f"cannot open {state_db} read-only")
     return conn
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-        (name,),
-    ).fetchone()
-    return row is not None
+    return table_exists(conn, name)
 
 
 def _collect_session_rows(

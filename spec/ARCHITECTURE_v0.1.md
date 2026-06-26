@@ -1,5 +1,22 @@
 # Clyde Memory Architecture v1
 ### Tiered Human-Inspired Memory for Local AI Systems
+
+> **⚠️ HISTORICAL DOCUMENT — superseded by [`ARCHITECTURE.md`](ARCHITECTURE.md).**
+>
+> This is the *original* April-2026 internal design doc, written for **Clyde**
+> (a RADLAB local AI swarm) under the working name **NeuroLayer**, before the
+> project was renamed **Continuo** and then **Bourdon**. It describes the L0–L4
+> personal-memory timing model that became Bourdon's foundation, but it predates
+> the L5/L6 federation layer, the MCP server, the participant contract, and the
+> multi-agent reality that ships today. Several specifics here are no longer
+> accurate (Ollama-only, UltraRAG-as-L2-backend, "RADLAB Internal"
+> classification, NeuroLayer packaging).
+>
+> It is retained for **provenance** — the timing thesis in §5 is still the heart
+> of the system. For the current architecture (L0–L6, federation, MCP,
+> recognition runtime as implemented in `core/`), read
+> [`ARCHITECTURE.md`](ARCHITECTURE.md). For the *why*, read [`THESIS.md`](THESIS.md).
+
 **Author:** Ryan Davis — RADLAB LLC  
 **Project:** Clyde (Local AI Swarm — OpenAI Agents SDK + Ollama)  
 **Status:** Draft v1.0 — April 14, 2026  
