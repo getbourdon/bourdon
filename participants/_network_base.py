@@ -302,6 +302,23 @@ class NetworkParticipant:
                 details={"participant": self.participant_slug},
                 proposed_fix="Check connectivity, then re-run `bourdon export-all`.",
             )
+        except Exception as exc:  # noqa: BLE001 -- health_check must NEVER raise (contract)
+            # Defense in depth for the whole NetworkParticipant category: an
+            # adapter's fetch_payload should only raise ParticipantAuthError /
+            # NetworkUnavailable, but if one leaks anything else (e.g. an
+            # unhandled parse error) health_check must still return a status, not
+            # propagate. Report it as blocked so it surfaces loudly.
+            return HealthStatus(
+                status="blocked",
+                reason=f"unexpected error resolving payload: {exc}",
+                details={"participant": self.participant_slug},
+                proposed_fix=(
+                    f"{self.participant_slug} raised an unexpected error during "
+                    "health_check; its fetch_payload should only raise "
+                    "ParticipantAuthError / NetworkUnavailable. File an issue with "
+                    "this reason string."
+                ),
+            )
         cached = self._cache.read()
         details: dict[str, Any] = {
             "participant": self.participant_slug,

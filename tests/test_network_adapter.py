@@ -219,3 +219,96 @@ def test_repo_from_item():
     ) == "a/b"
     assert _repo_from_item({"repository_url": "garbage"}) is None
     assert _repo_from_item({}) is None
+
+
+# ---- malformed-response / health_check-never-raises -------------------------
+
+
+class _FakeResp:
+    """Minimal urlopen() stand-in: a context manager whose read() returns body."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_github_get_non_json_body_is_network_unavailable(monkeypatch):
+    """A 200 with a non-JSON body (captive portal / proxy HTML) must degrade to
+    NetworkUnavailable -- NOT escape as a raw JSONDecodeError, which would crash
+    health_check (the protocol's 'health_check must not raise')."""
+    import urllib.request
+
+    from participants.github_copilot import _github_get
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *a, **k: _FakeResp(b"<html>captive portal</html>")
+    )
+    with pytest.raises(NetworkUnavailable):
+        _github_get("/x", "tok")
+
+
+def test_health_check_degraded_not_raised_on_non_json_body(tmp_path: Path, monkeypatch):
+    """End-to-end: the reference adapter's real fetch_payload hits a non-JSON
+    body -> health_check returns degraded, never propagates."""
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *a, **k: _FakeResp(b"<html>proxy splash</html>")
+    )
+    p = GitHubCopilotParticipant(auth_provider=lambda: "tok", cache_root=tmp_path)
+    health = p.health_check()  # must not raise
+    assert health.status == "degraded"
+
+
+def test_health_check_never_raises_on_unexpected_fetch_error(tmp_path: Path):
+    """Base-class defense in depth: if an adapter's fetch_payload leaks something
+    other than ParticipantAuthError / NetworkUnavailable, health_check must still
+    return a status (blocked), not propagate -- the contract is absolute."""
+    p, _ = _make(tmp_path, raise_exc=ValueError("kaboom"), ttl=-1)
+    health = p.health_check()  # must not raise
+    assert health.status == "blocked"
+    assert "kaboom" in health.reason
+
+
+def _http_error(code: int, *, rate_remaining: str | None = None):
+    import email.message
+    import urllib.error
+
+    hdrs = email.message.Message()
+    if rate_remaining is not None:
+        hdrs["X-RateLimit-Remaining"] = rate_remaining
+    return urllib.error.HTTPError("http://api.github.test/x", code, "err", hdrs, None)
+
+
+def test_github_get_rate_limited_403_is_network_unavailable(monkeypatch):
+    """403 + X-RateLimit-Remaining: 0 is a transient rate-limit, not a bad token:
+    it must degrade (NetworkUnavailable -> cache fallback), not falsely tell the
+    user to fix their credential."""
+    import urllib.request
+
+    from participants.github_copilot import _github_get
+
+    err = _http_error(403, rate_remaining="0")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(err))
+    with pytest.raises(NetworkUnavailable):
+        _github_get("/x", "tok")
+
+
+def test_github_get_genuine_403_is_auth_error(monkeypatch):
+    """A 403 WITHOUT a rate-limit signal is a real auth/scope failure -> blocked."""
+    import urllib.request
+
+    from participants.github_copilot import _github_get
+
+    err = _http_error(403)  # no X-RateLimit-Remaining header
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(err))
+    with pytest.raises(ParticipantAuthError):
+        _github_get("/x", "tok")

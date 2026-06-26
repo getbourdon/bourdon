@@ -198,10 +198,16 @@ class NetworkParticipant:
 3. **Authentication boundary.** Credentials come from an injected
    `AuthProvider` (a zero-arg callable resolving an OS-keychain / env-var token
    lazily at call time). They are **never** read from or written to an L5
-   manifest, never logged, never cached. A missing/invalid token surfaces as
-   `health_check() -> blocked` (not degraded) — a bad token is a user problem to
-   fix, and stale cache must **never mask** it (`ParticipantAuthError` always
-   propagates, even when a cache exists).
+   manifest, never logged, never cached. Token handling distinguishes two cases:
+   - An **invalid** token (the server rejects it — 401, or 403 without a
+     rate-limit signal) always surfaces as `health_check() -> blocked`, and
+     stale cache must **never mask** it: `ParticipantAuthError` propagates even
+     when a cache exists. A bad token is a user problem to fix.
+   - A **missing** token (none resolvable) blocks only when there is *no* cache;
+     when a cache exists the base serves it as `degraded` (stale, loudly) — the
+     data is the user's own, already-fetched state, surfaced openly rather than
+     hidden. (A transient rate-limit is **not** an auth failure — it is
+     `NetworkUnavailable`, i.e. degraded with cache fallback.)
 
 ### Documentation requirements (per network adapter)
 

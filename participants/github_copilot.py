@@ -124,6 +124,13 @@ def _github_get(path: str, token: str, *, timeout: float = 10.0) -> Any:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        # A rate-limited token is fine -- the condition is transient. GitHub
+        # signals it with 429, or 403 + X-RateLimit-Remaining: 0. Classify those
+        # as NetworkUnavailable (degraded, cache-fallback) rather than telling the
+        # user their credential is broken. Only a genuine auth failure blocks.
+        remaining = (exc.headers or {}).get("X-RateLimit-Remaining")
+        if exc.code == 429 or (exc.code == 403 and str(remaining) == "0"):
+            raise NetworkUnavailable(f"GitHub API {exc.code}: rate-limited") from exc
         if exc.code in (401, 403):
             raise ParticipantAuthError(
                 f"GitHub API {exc.code}: token invalid or lacks scope"
@@ -134,6 +141,13 @@ def _github_get(path: str, token: str, *, timeout: float = 10.0) -> Any:
         raise NetworkUnavailable(f"GitHub API {exc.code}: {exc.reason}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise NetworkUnavailable(f"GitHub API unreachable: {exc}") from exc
+    except ValueError as exc:
+        # A 200 with a non-JSON body (captive portal / proxy splash HTML) is a
+        # degraded-network condition, not a hard crash. Covers json.JSONDecodeError
+        # and a bad utf-8 decode -- both ValueError subclasses -- so _github_get
+        # only ever raises ParticipantAuthError or NetworkUnavailable, which
+        # health_check handles. Otherwise it would escape and crash health_check.
+        raise NetworkUnavailable(f"GitHub API returned a non-JSON body: {exc}") from exc
 
 
 # -- Participant ---------------------------------------------------------------
