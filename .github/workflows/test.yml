@@ -46,6 +46,9 @@ jobs:
         # rather than slipping through. Latency p95 is held to a generous 5ms
         # ceiling (the substrate is ~tens of microseconds; this only catches a
         # pathological regression, not normal CI-runner noise).
+        # shell: bash so the backslash line-continuation parses on Windows too
+        # (default Windows shell is PowerShell, which does not understand `\`).
+        shell: bash
         run: |
           python -m cli.main recognition eval --summary \
             --min-micro-f1 1.0 --min-macro-f1 1.0 --max-p95-us 5000
@@ -55,6 +58,7 @@ jobs:
         # or a private-tagged entity. Scans whatever the test fixtures / smoke
         # exports produced under ~/agent-library; --strict fails the build on any
         # finding. A clean tree (no library yet) passes trivially.
+        shell: bash
         run: |
           python -m cli.main audit-leaks --summary --strict
 
