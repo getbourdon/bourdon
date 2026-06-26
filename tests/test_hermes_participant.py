@@ -14,7 +14,6 @@ from participants.base import (
     SPEC_VERSION,
     BourdonParticipant,
     HealthStatus,
-    L5Manifest,
     ParticipantDiscoveryError,
     Visibility,
 )
@@ -245,6 +244,42 @@ def test_health_never_raises_on_corrupt_db(tmp_path: Path) -> None:
     p = HermesParticipant(hermes_home=home)
     hs = p.health_check()  # must not raise
     assert hs.status in {"ok", "degraded", "blocked"}
+
+
+# ---------------------------------------------------------------------------
+# CLI handlers (hook contract: never traceback when there's nothing to publish)
+# ---------------------------------------------------------------------------
+
+
+def test_hermes_export_handler_returns_0_when_nothing_to_federate(tmp_path) -> None:
+    """`bourdon hermes export` is wired as a SessionEnd hook; a missing/empty
+    ~/.hermes makes export_l5 -> discover() raise ParticipantDiscoveryError, and
+    the handler must swallow it and exit 0 (not dump a traceback)."""
+    import argparse
+
+    from cli.main import _handle_hermes_export
+
+    empty = tmp_path / "no-hermes-here"  # never created -> no sources
+    out = tmp_path / "hermes.l5.yaml"
+    ns = argparse.Namespace(
+        hermes_home=str(empty),
+        since=None,
+        access_level="team",
+        out=str(out),
+        print_manifest=False,
+        verbose=False,
+    )
+    assert _handle_hermes_export(ns) == 0
+    assert not out.exists()  # nothing written when there is nothing to federate
+
+
+def test_hermes_doctor_handler_never_crashes_on_missing_home(tmp_path) -> None:
+    import argparse
+
+    from cli.main import _handle_hermes_doctor
+
+    ns = argparse.Namespace(hermes_home=str(tmp_path / "no-hermes-here"), report_out=None)
+    assert _handle_hermes_doctor(ns) == 0
 
 
 # ---------------------------------------------------------------------------

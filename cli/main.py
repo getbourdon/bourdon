@@ -675,9 +675,24 @@ def _default_hermes_l5_path() -> Path:
 def _handle_hermes_export(args: argparse.Namespace) -> int:
     from participants.hermes import HermesParticipant
 
+    verbose = getattr(args, "verbose", False)
     hermes_home = Path(args.hermes_home) if getattr(args, "hermes_home", None) else None
-    participant = HermesParticipant(hermes_home=hermes_home)
-    manifest = participant.export_l5(since=_parse_since(args.since))
+    try:
+        participant = HermesParticipant(hermes_home=hermes_home)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon hermes export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(f"bourdon hermes export: no data ({exc}), skipping", file=sys.stderr)
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon hermes export: failed ({exc}), skipping", file=sys.stderr)
+        return 0
     data = filter_manifest_for_access(manifest, access_level=args.access_level)
     out_path = Path(args.out) if args.out else _default_hermes_l5_path()
     write_l5_dict(data, out_path)
@@ -690,8 +705,25 @@ def _handle_hermes_doctor(args: argparse.Namespace) -> int:
     from participants.hermes import HermesParticipant
 
     hermes_home = Path(args.hermes_home) if getattr(args, "hermes_home", None) else None
-    participant = HermesParticipant(hermes_home=hermes_home)
-    health = participant.health_check()
+    try:
+        participant = HermesParticipant(hermes_home=hermes_home)
+        health = participant.health_check()
+    except Exception as exc:  # noqa: BLE001 -- diagnostic must not crash
+        report = {
+            "health": {
+                "status": "blocked",
+                "reason": str(exc),
+                "details": {},
+                "proposed_fix": (
+                    "Hermes participant could not be initialized. Ensure ~/.hermes/ "
+                    "exists (or set $HERMES_HOME)."
+                ),
+            },
+            "native_path": None,
+        }
+        _write_yaml_if_requested(report, getattr(args, "report_out", None))
+        _print_yaml(report)
+        return 0
     report = {
         "health": {
             "status": health.status,

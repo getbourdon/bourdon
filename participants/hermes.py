@@ -35,7 +35,7 @@ import sqlite3
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from core.redaction import redact_text
 from participants.base import (
@@ -91,10 +91,6 @@ DEFAULT_POLICY = VisibilityPolicy(
 _GENERIC_PROJECT_NAMES = frozenset(
     {"", "root", "home", "tmp", "temp", "desktop", "documents", "downloads", "src"}
 )
-
-# Source rows in `sessions` whose conversations are gateway/messaging surfaces.
-# Kept for capability reporting + per-source session counts.
-_KNOWN_SOURCES = ("cli", "tui", "slack", "telegram", "discord", "whatsapp", "signal")
 
 
 # -- Path resolution -----------------------------------------------------------
@@ -154,8 +150,15 @@ def _friendly_label(key: str) -> str:
 
 
 def _open_state_db(state_db: Path) -> sqlite3.Connection:
-    """Open state.db read-only so a live Hermes write-lock can't block us."""
-    uri = f"file:{state_db}?mode=ro&immutable=1"
+    """Open state.db read-only so a live Hermes write-lock can't block us.
+
+    ``mode=ro`` (no ``immutable=1``): we must respect SQLite locking and read the
+    ``-wal`` sidecar of a live, actively-writing Hermes. ``immutable=1`` would tell
+    SQLite the file never changes -- skipping locks and ignoring the WAL -- which
+    risks stale reads or SQLITE_CORRUPT mid-write. Parity with the other
+    participants (codex/copilot), which all open ``mode=ro`` alone.
+    """
+    uri = f"file:{state_db}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=2.0)
     conn.row_factory = sqlite3.Row
     return conn
