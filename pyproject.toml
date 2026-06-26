@@ -101,6 +101,7 @@ copilot-cli = "participants.copilot_cli:CopilotCliParticipant"
 copilot-vscode = "participants.copilot_vscode:CopilotVscodeParticipant"
 copilot-automations = "participants.copilot_automations:CopilotAutomationsParticipant"
 openclaw = "participants.openclaw:OpenClawParticipant"  # quarantined class (spec/SPEC_v0.9.0.md R4)
+github-copilot = "participants.github_copilot:GitHubCopilotParticipant"  # v0.3 network adapter (#127)
 hermes = "participants.hermes:HermesParticipant"
 # clyde = "participants.clyde:ClydeParticipant"     # native publisher lives in ~/.clyde/, not here
 # clair = "participants.clair:ClairParticipant"     # same pattern -- native publisher

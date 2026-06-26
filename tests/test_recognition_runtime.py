@@ -516,7 +516,7 @@ async def test_hydrate_l1_runs_reads_concurrently(tmp_path):
     real_read = Path.read_text
 
     def slow_read(self, *a, **k):  # noqa: ANN001
-        time.sleep(0.05)
+        time.sleep(0.1)
         return real_read(self, *a, **k)
 
     start = time.monotonic()
@@ -527,8 +527,11 @@ async def test_hydrate_l1_runs_reads_concurrently(tmp_path):
     elapsed = time.monotonic() - start
 
     assert "A doc" in out and "D doc" in out
-    # 4 x 50ms serial = 200ms; concurrent should be well under 150ms.
-    assert elapsed < 0.15, f"reads not concurrent: {elapsed:.3f}s"
+    # 4 x 100ms serial = 400ms; concurrent hydration finishes in ~one read's
+    # time. A generous 300ms bound still firmly proves concurrency (300 << 400)
+    # while absorbing thread-pool + scheduler jitter on a loaded CI runner (the
+    # prior 50ms/150ms bound flaked on macOS at ~0.155s).
+    assert elapsed < 0.3, f"reads not concurrent: {elapsed:.3f}s"
 
 
 # ---- interrupt_first --------------------------------------------------------
