@@ -55,12 +55,15 @@ jobs:
 
       - name: Federation leak audit (credential + visibility leaks)
         # Library-wide guarantee that no published L5 manifest leaks a credential
-        # or a private-tagged entity. Scans whatever the test fixtures / smoke
-        # exports produced under ~/agent-library; --strict fails the build on any
-        # finding. A clean tree (no library yet) passes trivially.
+        # or a private-tagged entity. Points at a committed clean reference
+        # library so the auditor always scans a real manifest (the default
+        # ~/agent-library is empty on a CI runner). --strict fails on any finding;
+        # --require-files fails if zero manifests were scanned, so a future
+        # path/rename regression can't turn this gate back into a trivial pass.
         shell: bash
         run: |
-          python -m cli.main audit-leaks --summary --strict
+          python -m cli.main audit-leaks --summary --strict --require-files \
+            --library tests/fixtures/leak_audit_library
 
       - name: Run smoke test (orchestrator against bundled example data)
         working-directory: core

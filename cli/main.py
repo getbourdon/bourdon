@@ -299,6 +299,14 @@ def _handle_audit_leaks(args: argparse.Namespace) -> int:
     _write_yaml_if_requested(data, getattr(args, "report_out", None))
     _print_yaml(data)
 
+    if getattr(args, "require_files", False) and report.files_scanned == 0:
+        print(
+            f"audit leaks: no manifests found under {library} "
+            "(--require-files): nothing was actually scanned.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not report.clean:
         print(
             f"audit leaks: {len(report.findings)} finding(s) across "
@@ -3459,6 +3467,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--summary",
         action="store_true",
         help="Omit per-finding detail; print counts only.",
+    )
+    audit_leaks_cmd.add_argument(
+        "--require-files",
+        action="store_true",
+        help=(
+            "Exit 1 if zero manifests were scanned. Guards against a CI gate "
+            "that trivially 'passes' because it pointed at an empty library."
+        ),
     )
     audit_leaks_cmd.add_argument("--report-out")
     audit_leaks_cmd.set_defaults(func=_handle_audit_leaks)
