@@ -95,9 +95,10 @@ hermes hooks list          # review matcher + consent status
 hermes hooks test SessionEnd   # fire against a synthetic payload
 ```
 
-The export is read-only against `state.db` (opened `mode=ro&immutable=1`), so it
-will never disturb a live Hermes process holding a write lock, and it exits
-cleanly even when there is nothing new to publish.
+The export is read-only against `state.db` (opened `mode=ro`), so it will never
+disturb a live Hermes process holding a write lock — while still respecting
+SQLite locking and the `-wal` sidecar so a concurrently-writing Hermes is read
+correctly — and it exits cleanly even when there is nothing new to publish.
 
 ## Read the federation from inside Hermes (MCP)
 

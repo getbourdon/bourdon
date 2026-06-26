@@ -35,7 +35,7 @@ import sqlite3
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from core.redaction import redact_text
 from participants._sqlite_base import (
@@ -99,10 +99,6 @@ _GENERIC_PROJECT_NAMES = frozenset(
     {"", "root", "home", "tmp", "temp", "desktop", "documents", "downloads", "src"}
 )
 
-# Source rows in `sessions` whose conversations are gateway/messaging surfaces.
-# Kept for capability reporting + per-source session counts.
-_KNOWN_SOURCES = ("cli", "tui", "slack", "telegram", "discord", "whatsapp", "signal")
-
 
 # -- Path resolution -----------------------------------------------------------
 
@@ -163,8 +159,11 @@ def _friendly_label(key: str) -> str:
 def _open_state_db(state_db: Path) -> sqlite3.Connection:
     """Open state.db read-only so a live Hermes write-lock can't block us.
 
-    Raises ``sqlite3.Error`` on failure (callers that need the never-raises
-    contract use ``try_open_readonly`` directly).
+    Delegates to the shared ``try_open_readonly`` (``mode=ro``, no ``immutable=1``):
+    we must respect SQLite locking and read the ``-wal`` sidecar of a live,
+    actively-writing Hermes -- ``immutable=1`` would skip locks and ignore the WAL,
+    risking stale reads / SQLITE_CORRUPT. Raises ``sqlite3.Error`` on failure
+    (callers that need the never-raises contract use ``try_open_readonly`` directly).
     """
     conn = try_open_readonly(state_db)
     if conn is None:
