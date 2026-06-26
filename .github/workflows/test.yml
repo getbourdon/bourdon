@@ -40,6 +40,16 @@ jobs:
         run: |
           python -m pytest tests/ -v --tb=short
 
+      - name: Recognition quality gate (precision/recall/F1 vs golden dataset)
+        # Defends the recognition thesis as a number: a commit that regresses
+        # recognition quality below the golden-dataset bar fails here, visibly,
+        # rather than slipping through. Latency p95 is held to a generous 5ms
+        # ceiling (the substrate is ~tens of microseconds; this only catches a
+        # pathological regression, not normal CI-runner noise).
+        run: |
+          python -m cli.main recognition eval --summary \
+            --min-micro-f1 1.0 --min-macro-f1 1.0 --max-p95-us 5000
+
       - name: Run smoke test (orchestrator against bundled example data)
         working-directory: core
         run: |

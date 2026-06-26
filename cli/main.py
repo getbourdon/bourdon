@@ -230,6 +230,58 @@ def _handle_deeper_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_recognition_eval(args: argparse.Namespace) -> int:
+    """Score recognition against a labeled golden dataset (precision/recall/F1).
+
+    Exit code is meaningful for CI: 0 when the report clears the configured
+    thresholds, 1 when it regresses below them (so a quality drop fails the
+    pipeline instead of shipping).
+    """
+    from core.recognition_eval import load_cases, run_eval
+
+    dataset = (
+        Path(args.dataset)
+        if getattr(args, "dataset", None)
+        else _default_recognition_golden_path()
+    )
+    try:
+        cases = load_cases(dataset)
+    except (OSError, ValueError) as exc:
+        print(f"recognition eval: cannot load {dataset}: {exc}", file=sys.stderr)
+        return 2
+
+    report = run_eval(cases)
+    data = report.to_dict()
+    if getattr(args, "summary", False):
+        data = {k: v for k, v in data.items() if k != "cases"}
+    _write_yaml_if_requested(data, getattr(args, "report_out", None))
+    _print_yaml(data)
+
+    passed = report.meets(
+        min_micro_f1=getattr(args, "min_micro_f1", 0.0) or 0.0,
+        min_macro_f1=getattr(args, "min_macro_f1", 0.0) or 0.0,
+        max_p95_us=getattr(args, "max_p95_us", None),
+    )
+    if not passed:
+        print(
+            "recognition eval: FAILED thresholds "
+            f"(micro_f1={report.micro_f1:.3f}, macro_f1={report.macro_f1:.3f}, "
+            f"p95={report.latency_p95_us:.0f}us)",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _default_recognition_golden_path() -> Path:
+    """The bundled golden dataset, resolved relative to the repo root."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / "BENCHMARKS"
+        / "recognition_golden_v1.yaml"
+    )
+
+
 def _handle_cursor_export(args: argparse.Namespace) -> int:
     """Hook-safe: silent on success, returns 0 in all failure modes."""
     verbose = getattr(args, "verbose", False)
@@ -2766,6 +2818,45 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deeper_context_cmd.add_argument("--report-out")
     deeper_context_cmd.set_defaults(func=_handle_deeper_context)
+
+    # ---- recognition (eval harness) -----------------------------------------
+    recognition = subparsers.add_parser(
+        "recognition", help="Recognition-runtime tools (eval harness)"
+    )
+    recognition_subparsers = recognition.add_subparsers(dest="recognition_command")
+    recognition_eval_cmd = recognition_subparsers.add_parser(
+        "eval",
+        help="Score recognition against a labeled golden dataset (precision/recall/F1)",
+    )
+    recognition_eval_cmd.add_argument(
+        "--dataset",
+        help="Path to a golden YAML dataset (default: bundled recognition_golden_v1.yaml)",
+    )
+    recognition_eval_cmd.add_argument(
+        "--summary",
+        action="store_true",
+        help="Omit per-case detail; print aggregate metrics only.",
+    )
+    recognition_eval_cmd.add_argument(
+        "--min-micro-f1",
+        type=float,
+        default=0.0,
+        help="CI gate: exit 1 if micro F1 is below this (default: 0.0 = no gate).",
+    )
+    recognition_eval_cmd.add_argument(
+        "--min-macro-f1",
+        type=float,
+        default=0.0,
+        help="CI gate: exit 1 if macro F1 is below this (default: 0.0 = no gate).",
+    )
+    recognition_eval_cmd.add_argument(
+        "--max-p95-us",
+        type=float,
+        default=None,
+        help="CI gate: exit 1 if recognition p95 latency exceeds this (microseconds).",
+    )
+    recognition_eval_cmd.add_argument("--report-out")
+    recognition_eval_cmd.set_defaults(func=_handle_recognition_eval)
 
     cursor = subparsers.add_parser("cursor", help="Cursor-specific commands")
     cursor_subparsers = cursor.add_subparsers(dest="cursor_command")
