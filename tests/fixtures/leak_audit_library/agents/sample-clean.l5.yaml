@@ -1,0 +1,45 @@
+# Clean reference manifest for the CI federation leak-audit gate.
+#
+# The gate runs `bourdon audit-leaks --strict --require-files` against this
+# directory so the auditor always exercises a real, on-disk manifest (the
+# default ~/agent-library is empty on a CI runner -> the gate used to scan zero
+# files and pass trivially). Every free-text field below -- including the ones
+# the auditor walks that an allowlist used to skip (agent.role_narrative, session
+# cwd + files_touched) -- is deliberately clean. If an edit here introduces a
+# credential shape or a private-tagged row, the gate must go red.
+spec_version: "0.1"
+agent:
+  id: sample
+  type: code-assistant
+  role_narrative: >-
+    Reference assistant used only by the leak-audit CI fixture. Operates on
+    public sample data; carries no credentials and no private memory.
+  spec_version_compat: "0.1"
+last_updated: "2026-06-26T00:00:00Z"
+capabilities:
+  - state_db
+  - memories_dir
+known_entities:
+  - name: Bourdon
+    type: project
+    summary: Cross-agent memory federation; recognition-first runtime.
+    visibility: team
+    tags: [project, active]
+  - name: Concise answers
+    type: preference
+    summary: Prefers terse, high-signal responses.
+    visibility: team
+recent_sessions:
+  - date: "2026-06-24"
+    project_focus: [bourdon]
+    cwd: /projects/bourdon
+    files_touched:
+      - core/leak_audit.py
+      - tests/test_leak_audit.py
+    key_actions:
+      - Hardened the federation leak auditor to scan every federated string.
+    visibility: team
+visibility_policy:
+  default: team
+  private_tags: [personal, financial, credential, secret, health, family, legal]
+  team_tags: [project, active]

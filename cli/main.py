@@ -230,6 +230,94 @@ def _handle_deeper_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_recognition_eval(args: argparse.Namespace) -> int:
+    """Score recognition against a labeled golden dataset (precision/recall/F1).
+
+    Exit code is meaningful for CI: 0 when the report clears the configured
+    thresholds, 1 when it regresses below them (so a quality drop fails the
+    pipeline instead of shipping).
+    """
+    from core.recognition_eval import load_cases, run_eval
+
+    dataset = (
+        Path(args.dataset)
+        if getattr(args, "dataset", None)
+        else _default_recognition_golden_path()
+    )
+    try:
+        cases = load_cases(dataset)
+    except (OSError, ValueError) as exc:
+        print(f"recognition eval: cannot load {dataset}: {exc}", file=sys.stderr)
+        return 2
+
+    report = run_eval(cases)
+    data = report.to_dict()
+    if getattr(args, "summary", False):
+        data = {k: v for k, v in data.items() if k != "cases"}
+    _write_yaml_if_requested(data, getattr(args, "report_out", None))
+    _print_yaml(data)
+
+    passed = report.meets(
+        min_micro_f1=getattr(args, "min_micro_f1", 0.0) or 0.0,
+        min_macro_f1=getattr(args, "min_macro_f1", 0.0) or 0.0,
+        max_p95_us=getattr(args, "max_p95_us", None),
+    )
+    if not passed:
+        print(
+            "recognition eval: FAILED thresholds "
+            f"(micro_f1={report.micro_f1:.3f}, macro_f1={report.macro_f1:.3f}, "
+            f"p95={report.latency_p95_us:.0f}us)",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _default_recognition_golden_path() -> Path:
+    """The bundled golden dataset, resolved relative to the repo root."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / "BENCHMARKS"
+        / "recognition_golden_v1.yaml"
+    )
+
+
+def _handle_audit_leaks(args: argparse.Namespace) -> int:
+    """Static scan of published L5 manifests for credential + visibility leaks.
+
+    Read-only. With --strict, exits 1 if any finding is present (the CI / pre-
+    commit gate); otherwise exits 0 and just reports.
+    """
+    from core.l6_store import DEFAULT_LIBRARY_PATH
+    from core.leak_audit import audit_library
+
+    library = Path(args.library) if getattr(args, "library", None) else DEFAULT_LIBRARY_PATH
+    report = audit_library(library)
+    data = report.to_dict()
+    if getattr(args, "summary", False):
+        data = {k: v for k, v in data.items() if k != "findings"}
+    _write_yaml_if_requested(data, getattr(args, "report_out", None))
+    _print_yaml(data)
+
+    if getattr(args, "require_files", False) and report.files_scanned == 0:
+        print(
+            f"audit leaks: no manifests found under {library} "
+            "(--require-files): nothing was actually scanned.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not report.clean:
+        print(
+            f"audit leaks: {len(report.findings)} finding(s) across "
+            f"{report.files_scanned} manifest(s) in {library}",
+            file=sys.stderr,
+        )
+        if getattr(args, "strict", False):
+            return 1
+    return 0
+
+
 def _handle_cursor_export(args: argparse.Namespace) -> int:
     """Hook-safe: silent on success, returns 0 in all failure modes."""
     verbose = getattr(args, "verbose", False)
@@ -2837,6 +2925,45 @@ def _build_parser() -> argparse.ArgumentParser:
     deeper_context_cmd.add_argument("--report-out")
     deeper_context_cmd.set_defaults(func=_handle_deeper_context)
 
+    # ---- recognition (eval harness) -----------------------------------------
+    recognition = subparsers.add_parser(
+        "recognition", help="Recognition-runtime tools (eval harness)"
+    )
+    recognition_subparsers = recognition.add_subparsers(dest="recognition_command")
+    recognition_eval_cmd = recognition_subparsers.add_parser(
+        "eval",
+        help="Score recognition against a labeled golden dataset (precision/recall/F1)",
+    )
+    recognition_eval_cmd.add_argument(
+        "--dataset",
+        help="Path to a golden YAML dataset (default: bundled recognition_golden_v1.yaml)",
+    )
+    recognition_eval_cmd.add_argument(
+        "--summary",
+        action="store_true",
+        help="Omit per-case detail; print aggregate metrics only.",
+    )
+    recognition_eval_cmd.add_argument(
+        "--min-micro-f1",
+        type=float,
+        default=0.0,
+        help="CI gate: exit 1 if micro F1 is below this (default: 0.0 = no gate).",
+    )
+    recognition_eval_cmd.add_argument(
+        "--min-macro-f1",
+        type=float,
+        default=0.0,
+        help="CI gate: exit 1 if macro F1 is below this (default: 0.0 = no gate).",
+    )
+    recognition_eval_cmd.add_argument(
+        "--max-p95-us",
+        type=float,
+        default=None,
+        help="CI gate: exit 1 if recognition p95 latency exceeds this (microseconds).",
+    )
+    recognition_eval_cmd.add_argument("--report-out")
+    recognition_eval_cmd.set_defaults(func=_handle_recognition_eval)
+
     cursor = subparsers.add_parser("cursor", help="Cursor-specific commands")
     cursor_subparsers = cursor.add_subparsers(dest="cursor_command")
 
@@ -3424,6 +3551,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit raw JSONL (machine-readable) instead of the table",
     )
     audit_cmd.set_defaults(func=_handle_audit)
+
+    audit_leaks_cmd = subparsers.add_parser(
+        "audit-leaks",
+        help="Static scan of published L5 manifests for credential + visibility leaks",
+    )
+    audit_leaks_cmd.add_argument(
+        "--library",
+        help="Path to agent-library (default: ~/agent-library)",
+    )
+    audit_leaks_cmd.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 if any leak is found (CI / pre-commit gate).",
+    )
+    audit_leaks_cmd.add_argument(
+        "--summary",
+        action="store_true",
+        help="Omit per-finding detail; print counts only.",
+    )
+    audit_leaks_cmd.add_argument(
+        "--require-files",
+        action="store_true",
+        help=(
+            "Exit 1 if zero manifests were scanned. Guards against a CI gate "
+            "that trivially 'passes' because it pointed at an empty library."
+        ),
+    )
+    audit_leaks_cmd.add_argument("--report-out")
+    audit_leaks_cmd.set_defaults(func=_handle_audit_leaks)
 
     openclaw_cmd = subparsers.add_parser(
         "openclaw",
