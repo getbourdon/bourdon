@@ -78,12 +78,55 @@ def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
         if agent_id.endswith("-automations"):
             continue
         label = getattr(cls, "display_name", None) or _humanize(agent_id)
+        # Network-shaped participants (v0.3 contract) don't have a filesystem
+        # presence -- their default_native_path returns an API root (a str), and
+        # "presence" means "is a credential resolvable", not "does a path exist".
+        # Detect them structurally so detection never calls .exists() on a str.
+        if getattr(cls, "is_network", False) or _is_network_participant(cls):
+            present, hint = _detect_network_presence(cls)
+            detections.append(
+                AgentDetection(id=agent_id, label=label, present=present, hint_path=hint)
+            )
+            continue
         native = getattr(cls, "default_native_path", None)
         path = native(h) if native is not None else h / f".{agent_id}"
+        # A network participant that slipped the guard would return a str here;
+        # guard the .exists() call so detection can't crash the wizard.
+        present = bool(getattr(path, "exists", lambda: False)()) if isinstance(path, Path) else False
+        hint_path = path if isinstance(path, Path) else (h / f".{agent_id}")
         detections.append(
-            AgentDetection(id=agent_id, label=label, present=path.exists(), hint_path=path)
+            AgentDetection(id=agent_id, label=label, present=present, hint_path=hint_path)
         )
     return detections
+
+
+def _is_network_participant(cls: type) -> bool:
+    """Structural check: a participant whose base is NetworkParticipant."""
+    try:
+        from participants._network_base import NetworkParticipant
+
+        return isinstance(cls, type) and issubclass(cls, NetworkParticipant)
+    except Exception:  # noqa: BLE001 -- detection must never crash
+        return False
+
+
+def _detect_network_presence(cls: type) -> tuple[bool, Path]:
+    """Presence for a network participant = a token is resolvable now.
+
+    Returns (present, hint_path). The hint_path is a synthetic marker under
+    ~/.cache/bourdon for the surface, used only for display when absent.
+    """
+    from participants._network_base import default_cache_root
+
+    slug = getattr(cls, "participant_slug", getattr(cls, "agent_id", "network"))
+    hint = default_cache_root() / str(slug)
+    try:
+        instance = cls()  # type: ignore[call-arg]
+        provider = getattr(instance, "_auth_provider", None)
+        token = provider() if callable(provider) else None
+        return bool(token), hint
+    except Exception:  # noqa: BLE001 -- detection must never crash the wizard
+        return False, hint
 
 
 # ---------------------------------------------------------------------------

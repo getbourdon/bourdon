@@ -41,6 +41,13 @@ def fake_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
+    # Neutralize network-participant token detection so presence is hermetic
+    # regardless of the CI runner's gh login / GITHUB_TOKEN env.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "participants.github_copilot.gh_token_provider", lambda: None, raising=False
+    )
     return home
 
 
@@ -64,6 +71,7 @@ def test_detect_agents_reports_all_absent(fake_home):
         "copilot-cli",
         "copilot-vscode",
         "cursor",
+        "github-copilot",
         "openclaw",
     ]
     assert all(not a.present for a in out)
@@ -84,6 +92,7 @@ def test_detect_agents_reports_present_when_paths_exist(fake_home):
         "copilot-cli": False,
         "copilot-vscode": False,
         "cascade": False,
+        "github-copilot": False,
         "openclaw": False,
     }
 
@@ -102,6 +111,7 @@ def test_detect_agents_ordering_is_stable(fake_home):
         "copilot-cli",
         "copilot-vscode",
         "cursor",
+        "github-copilot",
         "openclaw",
     ]
 
