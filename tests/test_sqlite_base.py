@@ -41,6 +41,29 @@ def test_open_readonly_can_read(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_open_readonly_default_reads_concurrent_commits(tmp_path: Path) -> None:
+    """The default (immutable=False) opens plain ``mode=ro``, so a row a live
+    writer commits *after* the read connection opens is still visible. Opening
+    with ``immutable=True`` would pin the main db file and ignore the WAL, missing
+    the later commit -- exactly the stale-read hazard the default avoids."""
+    db_path = tmp_path / "live.db"
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE t(id INTEGER)")
+    writer.execute("INSERT INTO t VALUES(1)")
+    writer.commit()
+
+    ro = open_readonly(db_path)  # default: immutable=False
+    writer.execute("INSERT INTO t VALUES(2)")  # committed AFTER ro opened
+    writer.commit()
+    try:
+        seen = {r[0] for r in ro.execute("SELECT id FROM t ORDER BY id").fetchall()}
+    finally:
+        ro.close()
+        writer.close()
+    assert seen == {1, 2}
+
+
 def test_open_readonly_rejects_writes(tmp_path: Path) -> None:
     db_path = tmp_path / "x.db"
     _make_db(db_path)

@@ -30,13 +30,18 @@ logger = logging.getLogger(__name__)
 # -- Read-only connection ------------------------------------------------------
 
 
-def open_readonly(db_path: Path, *, immutable: bool = True, timeout: float = 2.0) -> sqlite3.Connection:
+def open_readonly(db_path: Path, *, immutable: bool = False, timeout: float = 2.0) -> sqlite3.Connection:
     """Open a SQLite DB read-only via URI so a live writer is never disturbed.
 
-    ``immutable=1`` tells SQLite the file will not change for the life of the
-    connection, which skips locking entirely — the right call for a one-shot
-    export snapshot. Pass ``immutable=False`` if the DB may be concurrently
-    written and you want SQLite's normal read locking (``mode=ro`` only).
+    Default is plain ``mode=ro``: it still cannot write, but it respects SQLite
+    locking and reads the ``-wal`` sidecar, so a live, *actively-writing* agent is
+    read correctly. This matches every other participant (codex/copilot) and is
+    the safe default.
+
+    ``immutable=True`` adds ``immutable=1``, which tells SQLite the file will not
+    change for the life of the connection — it skips locking entirely AND ignores
+    the WAL. Only opt in for a genuinely static snapshot or read-only media;
+    against a concurrently-written DB it risks stale reads or ``SQLITE_CORRUPT``.
 
     The connection uses ``sqlite3.Row`` so callers can index by column name.
     Raises ``sqlite3.Error`` only on genuine open failure; callers that want the
@@ -50,7 +55,7 @@ def open_readonly(db_path: Path, *, immutable: bool = True, timeout: float = 2.0
 
 
 def try_open_readonly(
-    db_path: Path, *, immutable: bool = True, timeout: float = 2.0
+    db_path: Path, *, immutable: bool = False, timeout: float = 2.0
 ) -> Optional[sqlite3.Connection]:
     """Like :func:`open_readonly` but returns ``None`` instead of raising.
 

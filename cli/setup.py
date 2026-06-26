@@ -79,7 +79,12 @@ def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
             continue
         label = getattr(cls, "display_name", None) or _humanize(agent_id)
         native = getattr(cls, "default_native_path", None)
-        path = native(h) if native is not None else h / f".{agent_id}"
+        # Pass the original ``home`` (None in production), NOT the collapsed ``h``:
+        # a participant's default_native_path may consult an env override when
+        # home is None (e.g. Hermes honors $HERMES_HOME). Collapsing to
+        # Path.home() first would force the "explicit home wins" branch and make
+        # the wizard's detection/hint disagree with the data path it actually reads.
+        path = native(home) if native is not None else h / f".{agent_id}"
         detections.append(
             AgentDetection(id=agent_id, label=label, present=path.exists(), hint_path=path)
         )
