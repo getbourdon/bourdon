@@ -18,6 +18,7 @@ First-party participants:
     - copilot_vscode         -- GitHub Copilot VS Code GUI (transcripts + memory-tool)
     - copilot_automations    -- GitHub Copilot automations (convention-based memory)
     - cascade                -- Cascade / Windsurf (convention-based memory.md)
+    - hermes                 -- Hermes Agent / Nous Research (state.db sessions + memories/)
 
 Planned / native publishers:
     - clyde  -- RADLAB Clyde (native publisher, not external participant)

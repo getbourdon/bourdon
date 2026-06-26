@@ -64,6 +64,7 @@ def test_detect_agents_reports_all_absent(fake_home):
         "copilot-cli",
         "copilot-vscode",
         "cursor",
+        "hermes",
         "openclaw",
     ]
     assert all(not a.present for a in out)
@@ -84,6 +85,7 @@ def test_detect_agents_reports_present_when_paths_exist(fake_home):
         "copilot-cli": False,
         "copilot-vscode": False,
         "cascade": False,
+        "hermes": False,
         "openclaw": False,
     }
 
@@ -102,6 +104,7 @@ def test_detect_agents_ordering_is_stable(fake_home):
         "copilot-cli",
         "copilot-vscode",
         "cursor",
+        "hermes",
         "openclaw",
     ]
 
