@@ -22,9 +22,12 @@ it as a pre-commit hook, a CI gate (``--strict`` -> non-zero exit on any
 finding), or an ad-hoc ``bourdon audit leaks`` check.
 
 Design parity with the rest of the codebase: credential detection reuses
-``core.redaction.contains_secret`` (the single source of truth), and visibility
-resolution reuses the same tag rules participants apply, so the auditor can
-never drift from what it is auditing.
+``core.redaction.contains_secret`` (the single source of truth) and scans *every*
+federated string rather than a curated key list -- so it cannot silently forget a
+field as the schema grows. Visibility resolution unions the manifest's own
+declared ``private_tags`` with the known private-tag families, so a participant's
+custom private tag is honored too. The auditor cannot drift from -- or
+under-scan -- what it is auditing.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 import yaml
 
@@ -60,8 +63,12 @@ PRIVATE_TAG_FAMILIES = frozenset(
     }
 )
 
-# Manifest fields whose free-text values we scan for credential shapes.
-_SCANNED_TEXT_KEYS = ("name", "summary", "key_actions", "project_focus", "aliases")
+# Top-level manifest keys NOT walked for credential shapes. ``visibility_policy``
+# legitimately enumerates private-tag *family names* (e.g. "credential",
+# "secret") and a future custom policy could name a tag like "password" -- those
+# are policy declarations, not federated content, so scanning them would be a
+# false positive. Everything else is fair game.
+_CREDENTIAL_SCAN_SKIP_KEYS = frozenset({"visibility_policy"})
 
 
 class LeakKind(str, Enum):
@@ -114,83 +121,121 @@ class AuditReport:
 # -- Visibility resolution (mirrors participant tag rules) ---------------------
 
 
-def _resolves_private(thing: dict[str, Any]) -> bool:
+def _resolves_private(
+    thing: dict[str, Any], private_tags: Iterable[str] = PRIVATE_TAG_FAMILIES
+) -> bool:
     """True if a tag forces this entity/session to private, OR it self-declares
     private. This is the condition under which it must NOT be in a federated
-    manifest."""
+    manifest. ``private_tags`` is the effective private-tag set (the hardcoded
+    families unioned with the manifest's own declared ``private_tags``)."""
     if not isinstance(thing, dict):
         return False
+    private = {str(t).lower() for t in private_tags}
     tags = thing.get("tags") or []
-    if isinstance(tags, list) and PRIVATE_TAG_FAMILIES.intersection(
-        str(t).lower() for t in tags
-    ):
+    if isinstance(tags, list) and private.intersection(str(t).lower() for t in tags):
         return True
     return str(thing.get("visibility") or "").lower() == "private"
+
+
+def _effective_private_tags(manifest: dict[str, Any]) -> set[str]:
+    """The hardcoded private-tag families UNION the manifest's own declared
+    ``visibility_policy.private_tags``.
+
+    The backstop must not assume every emitter uses the same tag vocabulary: a
+    participant that declares a custom private tag (the exact case this backstop
+    exists for) would otherwise sail past a hardcoded set."""
+    declared: list[str] = []
+    policy = manifest.get("visibility_policy")
+    if isinstance(policy, dict):
+        raw = policy.get("private_tags") or []
+        if isinstance(raw, list):
+            declared = [str(t).lower() for t in raw]
+    return set(PRIVATE_TAG_FAMILIES).union(declared)
 
 
 # -- Credential scanning -------------------------------------------------------
 
 
-def _iter_text_values(thing: dict[str, Any]) -> Iterable[tuple[str, str]]:
-    """Yield (subkey, text) for each scannable free-text field of an entity/session."""
-    for key in _SCANNED_TEXT_KEYS:
-        val = thing.get(key)
-        if isinstance(val, str):
-            yield key, val
-        elif isinstance(val, list):
-            for i, item in enumerate(val):
-                if isinstance(item, str):
-                    yield f"{key}[{i}]", item
+def _iter_all_strings(obj: Any, path: str = "") -> Iterable[tuple[str, str]]:
+    """Yield ``(json-path, text)`` for EVERY string anywhere in ``obj``.
+
+    The auditor scans every federated string, not a curated key list. A security
+    backstop must not be able to *forget* a field: the prior allowlist silently
+    skipped ``agent.role_narrative``, session ``cwd`` and ``files_touched`` --
+    each a real, redaction-targeted leak vector. Walking the whole tree makes the
+    coverage total by construction and self-maintaining as the schema grows."""
+    if isinstance(obj, str):
+        yield (path or "<root>"), obj
+    elif isinstance(obj, dict):
+        for key, val in obj.items():
+            child = f"{path}.{key}" if path else str(key)
+            yield from _iter_all_strings(val, child)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            yield from _iter_all_strings(item, f"{path}[{i}]")
 
 
-def _scan_collection(
+def _scan_credentials(
+    manifest: dict[str, Any], agent_file: str, findings: list[Finding]
+) -> None:
+    """Walk every federated string (minus the policy declaration) for secrets."""
+    scannable = {
+        k: v for k, v in manifest.items() if k not in _CREDENTIAL_SCAN_SKIP_KEYS
+    }
+    for location, text in _iter_all_strings(scannable):
+        if contains_secret(text):
+            findings.append(
+                Finding(
+                    kind=LeakKind.CREDENTIAL,
+                    agent_file=agent_file,
+                    location=location,
+                    detail="value matches a credential pattern (should have been redacted)",
+                )
+            )
+
+
+def _scan_visibility(
     agent_file: str,
     collection: Any,
     collection_name: str,
+    private_tags: Iterable[str],
     findings: list[Finding],
 ) -> None:
-    """Scan a known_entities / recent_sessions list for both leak classes."""
+    """Flag any entity/session that resolves to PRIVATE but rides in the manifest."""
     if not isinstance(collection, list):
         return
     for idx, thing in enumerate(collection):
         if not isinstance(thing, dict):
             continue
-        base = f"{collection_name}[{idx}]"
-        # Visibility leak: private thing sitting in a federated manifest.
-        if _resolves_private(thing):
+        if _resolves_private(thing, private_tags):
             ident = thing.get("name") or thing.get("date") or "?"
             singular = "entity" if collection_name == "known_entities" else "session"
             findings.append(
                 Finding(
                     kind=LeakKind.VISIBILITY,
                     agent_file=agent_file,
-                    location=base,
+                    location=f"{collection_name}[{idx}]",
                     detail=(
                         f"{singular} {ident!r} resolves to PRIVATE "
                         "but is present in a federated manifest"
                     ),
                 )
             )
-        # Credential leak: any text field that matches a secret shape.
-        for subkey, text in _iter_text_values(thing):
-            if contains_secret(text):
-                findings.append(
-                    Finding(
-                        kind=LeakKind.CREDENTIAL,
-                        agent_file=agent_file,
-                        location=f"{base}.{subkey}",
-                        detail="value matches a credential pattern (should have been redacted)",
-                    )
-                )
 
 
 def audit_manifest(manifest: dict[str, Any], agent_file: str) -> list[Finding]:
-    """Scan a single parsed L5 manifest. Never raises."""
+    """Scan a single parsed L5 manifest for both leak classes. Never raises."""
     findings: list[Finding] = []
     if not isinstance(manifest, dict):
         return findings
-    _scan_collection(agent_file, manifest.get("known_entities"), "known_entities", findings)
-    _scan_collection(agent_file, manifest.get("recent_sessions"), "recent_sessions", findings)
+    private_tags = _effective_private_tags(manifest)
+    _scan_visibility(
+        agent_file, manifest.get("known_entities"), "known_entities", private_tags, findings
+    )
+    _scan_visibility(
+        agent_file, manifest.get("recent_sessions"), "recent_sessions", private_tags, findings
+    )
+    _scan_credentials(manifest, agent_file, findings)
     return findings
 
 

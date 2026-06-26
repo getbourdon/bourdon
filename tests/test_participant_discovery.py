@@ -35,6 +35,7 @@ EXPECTED_AGENT_IDS = [
     "cursor",
     "cursor-automations",
     "github-copilot",
+    "hermes",
     "openclaw",
 ]
 

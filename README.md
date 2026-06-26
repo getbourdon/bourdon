@@ -90,7 +90,7 @@ Cross-agent federation:
   L6 — Federation Library       aggregates all L5s, exposed as MCP server
 ```
 
-See [`spec/ARCHITECTURE_v0.1.md`](spec/ARCHITECTURE_v0.1.md) for the full architecture doc.
+See [`spec/ARCHITECTURE.md`](spec/ARCHITECTURE.md) for the full architecture doc.
 
 ## Quick Start (one command)
 

@@ -299,6 +299,14 @@ def _handle_audit_leaks(args: argparse.Namespace) -> int:
     _write_yaml_if_requested(data, getattr(args, "report_out", None))
     _print_yaml(data)
 
+    if getattr(args, "require_files", False) and report.files_scanned == 0:
+        print(
+            f"audit leaks: no manifests found under {library} "
+            "(--require-files): nothing was actually scanned.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not report.clean:
         print(
             f"audit leaks: {len(report.findings)} finding(s) across "
@@ -746,6 +754,76 @@ def _handle_cascade_init(args: argparse.Namespace) -> int:
 
 
 # -- Top-level doctor / export-all --------------------------------------------
+
+
+def _default_hermes_l5_path() -> Path:
+    return Path.home() / "agent-library" / "agents" / "hermes.l5.yaml"
+
+
+def _handle_hermes_export(args: argparse.Namespace) -> int:
+    from participants.hermes import HermesParticipant
+
+    verbose = getattr(args, "verbose", False)
+    hermes_home = Path(args.hermes_home) if getattr(args, "hermes_home", None) else None
+    try:
+        participant = HermesParticipant(hermes_home=hermes_home)
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon hermes export: init failed: {exc}", file=sys.stderr)
+        return 0
+    try:
+        manifest = participant.export_l5(since=_parse_since(args.since))
+    except ParticipantDiscoveryError as exc:
+        if verbose:
+            print(f"bourdon hermes export: no data ({exc}), skipping", file=sys.stderr)
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- hook contract
+        if verbose:
+            print(f"bourdon hermes export: failed ({exc}), skipping", file=sys.stderr)
+        return 0
+    data = filter_manifest_for_access(manifest, access_level=args.access_level)
+    out_path = Path(args.out) if args.out else _default_hermes_l5_path()
+    write_l5_dict(data, out_path)
+    if args.print_manifest:
+        _print_yaml(data)
+    return 0
+
+
+def _handle_hermes_doctor(args: argparse.Namespace) -> int:
+    from participants.hermes import HermesParticipant
+
+    hermes_home = Path(args.hermes_home) if getattr(args, "hermes_home", None) else None
+    try:
+        participant = HermesParticipant(hermes_home=hermes_home)
+        health = participant.health_check()
+    except Exception as exc:  # noqa: BLE001 -- diagnostic must not crash
+        report = {
+            "health": {
+                "status": "blocked",
+                "reason": str(exc),
+                "details": {},
+                "proposed_fix": (
+                    "Hermes participant could not be initialized. Ensure ~/.hermes/ "
+                    "exists (or set $HERMES_HOME)."
+                ),
+            },
+            "native_path": None,
+        }
+        _write_yaml_if_requested(report, getattr(args, "report_out", None))
+        _print_yaml(report)
+        return 0
+    report = {
+        "health": {
+            "status": health.status,
+            "reason": health.reason,
+            "details": health.details,
+            "proposed_fix": health.proposed_fix,
+        },
+        "native_path": participant.native_path,
+    }
+    _write_yaml_if_requested(report, getattr(args, "report_out", None))
+    _print_yaml(report)
+    return 0
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
@@ -3182,6 +3260,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cascade_init_cmd.set_defaults(func=_handle_cascade_init)
 
+    # ---- hermes -------------------------------------------------------------
+    hermes = subparsers.add_parser("hermes", help="Hermes Agent-specific commands")
+    hermes_subparsers = hermes.add_subparsers(dest="hermes_command")
+
+    hermes_export_cmd = hermes_subparsers.add_parser(
+        "export",
+        help="Build a Hermes L5 manifest from ~/.hermes (state.db + memories/)",
+    )
+    hermes_export_cmd.add_argument("--hermes-home", help=argparse.SUPPRESS)
+    hermes_export_cmd.add_argument("--out")
+    hermes_export_cmd.add_argument("--since")
+    hermes_export_cmd.add_argument(
+        "--access-level",
+        choices=("public", "team", "private"),
+        default="team",
+    )
+    hermes_export_cmd.add_argument(
+        "--print",
+        dest="print_manifest",
+        action="store_true",
+        help="Print the exported manifest after writing it.",
+    )
+    hermes_export_cmd.set_defaults(func=_handle_hermes_export)
+
+    hermes_doctor_cmd = hermes_subparsers.add_parser(
+        "doctor",
+        help="Diagnose the Hermes home (state.db + memories/)",
+    )
+    hermes_doctor_cmd.add_argument("--hermes-home", help=argparse.SUPPRESS)
+    hermes_doctor_cmd.add_argument("--report-out")
+    hermes_doctor_cmd.set_defaults(func=_handle_hermes_doctor)
+
     # ---- top-level doctor / export-all --------------------------------------
     doctor_cmd = subparsers.add_parser(
         "doctor",
@@ -3459,6 +3569,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--summary",
         action="store_true",
         help="Omit per-finding detail; print counts only.",
+    )
+    audit_leaks_cmd.add_argument(
+        "--require-files",
+        action="store_true",
+        help=(
+            "Exit 1 if zero manifests were scanned. Guards against a CI gate "
+            "that trivially 'passes' because it pointed at an empty library."
+        ),
     )
     audit_leaks_cmd.add_argument("--report-out")
     audit_leaks_cmd.set_defaults(func=_handle_audit_leaks)

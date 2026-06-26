@@ -35,7 +35,6 @@ from typing import Optional
 
 from participants import discover_participants
 
-
 # ---------------------------------------------------------------------------
 # Agent detection
 # ---------------------------------------------------------------------------
@@ -89,9 +88,14 @@ def detect_agents(home: Optional[Path] = None) -> list[AgentDetection]:
             )
             continue
         native = getattr(cls, "default_native_path", None)
-        path = native(h) if native is not None else h / f".{agent_id}"
-        # A network participant that slipped the guard would return a str here;
-        # guard the .exists() call so detection can't crash the wizard.
+        # Pass the original ``home`` (None in production), NOT the collapsed ``h``:
+        # a participant's default_native_path may consult an env override when
+        # home is None (e.g. Hermes honors $HERMES_HOME). Collapsing to
+        # Path.home() first would force the "explicit home wins" branch and make
+        # the wizard's detection/hint disagree with the data path it actually reads.
+        path = native(home) if native is not None else h / f".{agent_id}"
+        # A network participant that slipped the structural guard would return a
+        # str here; guard the .exists() call so detection can't crash the wizard.
         present = bool(getattr(path, "exists", lambda: False)()) if isinstance(path, Path) else False
         hint_path = path if isinstance(path, Path) else (h / f".{agent_id}")
         detections.append(
@@ -300,7 +304,8 @@ def init_cascade_memory_if_missing(
     home: Optional[Path] = None,
 ) -> Optional[Path]:
     """Create ``~/.cascade-bourdon/memory.md`` template if missing."""
-    from participants.cascade import default_cascade_dir, init_memory_file as cascade_init
+    from participants.cascade import default_cascade_dir
+    from participants.cascade import init_memory_file as cascade_init
 
     h = home or Path.home()
     target_dir = default_cascade_dir() if not home else h / ".cascade-bourdon"

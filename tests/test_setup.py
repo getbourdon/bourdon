@@ -72,6 +72,7 @@ def test_detect_agents_reports_all_absent(fake_home):
         "copilot-vscode",
         "cursor",
         "github-copilot",
+        "hermes",
         "openclaw",
     ]
     assert all(not a.present for a in out)
@@ -93,8 +94,29 @@ def test_detect_agents_reports_present_when_paths_exist(fake_home):
         "copilot-vscode": False,
         "cascade": False,
         "github-copilot": False,
+        "hermes": False,
         "openclaw": False,
     }
+
+
+def test_detect_agents_hermes_honors_env_when_home_is_none(tmp_path, monkeypatch):
+    """Production calls detect_agents(home=None). Hermes detection must then honor
+    $HERMES_HOME so the wizard's hint/presence agrees with the data path the
+    participant actually reads. Regression: detect_agents used to collapse
+    home -> Path.home() *before* calling default_native_path, forcing the
+    "explicit home wins" branch and silently ignoring the env override."""
+    fake = tmp_path / "home"
+    fake.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake)
+    custom = tmp_path / "custom_hermes"
+    custom.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(custom))
+
+    dets = {d.id: d for d in detect_agents(home=None)}
+    assert dets["hermes"].hint_path == custom
+    assert dets["hermes"].present is True
+    # A non-Hermes agent has no env override, so it still anchors on home.
+    assert dets["codex"].hint_path == fake / ".codex"
 
 
 def test_detect_agents_ordering_is_stable(fake_home):
@@ -112,6 +134,7 @@ def test_detect_agents_ordering_is_stable(fake_home):
         "copilot-vscode",
         "cursor",
         "github-copilot",
+        "hermes",
         "openclaw",
     ]
 

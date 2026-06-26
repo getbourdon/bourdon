@@ -18,15 +18,16 @@ to the expected set, and aggregates:
   * confidence accuracy        -- when a case labels an expected bucket, the
     fraction of matched top-anchors whose bucket agreed
 
-The harness is pure + synchronous-friendly (hydration is awaited internally via
-`asyncio.run`) and never raises on a single bad case -- a case that errors is
-recorded with `error` set and scored as a miss, so one malformed row can't sink
-the whole run. That keeps it safe as a CI gate.
+The harness is pure + synchronous: it scores *recognition* (which is synchronous
+by design), and simply closes the optional un-awaited hydration coroutine rather
+than spinning an event loop -- so it is safe to call from sync code OR from
+inside a running loop. It never raises on a single bad case -- a case that errors
+is recorded with `error` set and scored as a miss, so one malformed row can't
+sink the whole run. That keeps it safe as a CI gate.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import statistics
 import time
@@ -213,17 +214,15 @@ def run_case(case: EvalCase) -> CaseResult:
         )
         latency_us = (time.perf_counter() - t0) * 1_000_000
 
-        # Drain hydration so we don't leak an un-awaited coroutine. We don't
-        # score hydration content here -- this harness scores *recognition*.
+        # We score *recognition*, not hydration, so we don't run the hydration
+        # coroutine -- we just close it to avoid a "coroutine was never awaited"
+        # warning. close() touches no event loop, so this is safe whether the
+        # caller is synchronous or already inside a running loop (asyncio.run()
+        # would raise "cannot be called from a running event loop" there).
         hydration = result.hydration
-        if hydration is not None:
-            async def _drain() -> None:
-                try:
-                    await hydration
-                except Exception:  # noqa: BLE001
-                    pass
-
-            asyncio.run(_drain())
+        close = getattr(hydration, "close", None)
+        if callable(close):
+            close()
 
         matched = [str(e.get("name") or "") for e in result.matched_entities]
         matched = [m for m in matched if m]
