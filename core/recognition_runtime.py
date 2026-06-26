@@ -49,7 +49,12 @@ from typing import Any, Awaitable, Optional
 
 from core.codex_context import filter_manifest_for_access
 from core.inference_protocol import InferenceBackend
-from core.recognition_contract import MatchTier, match_tier, recognition_confidence
+from core.recognition_contract import (
+    MatchTier,
+    match_tier,
+    recognition_confidence,
+    tokenize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +83,27 @@ class RecognitionResult:
 
     confidence: str = "none"
     """The shared recognition-contract confidence bucket (none/low/medium/high)
-    for the top match — tier-driven, so it AGREES with the codex/cursor surfaces
-    for the same (prompt, anchor) (parity stage 4). "none" when nothing matched."""
+    for the TOP match only — tier-driven, so it AGREES with the codex/cursor
+    surfaces for the same (prompt, top anchor) (parity stage 4). "none" when
+    nothing matched.
+
+    This is intentionally the top-anchor bucket and nothing else: it is part of
+    the cross-surface parity contract (see tests/test_recognition_parity.py),
+    where all three engines must emit the same single bucket for a prompt. When
+    recognition surfaces multiple entities, do NOT read this as the confidence of
+    the 2nd/3rd match — use ``entity_confidences`` for per-entity buckets."""
+
+    entity_confidences: dict[str, str] = field(default_factory=dict)
+    """Per-entity confidence buckets, keyed by entity name, for EVERY matched
+    entity (not just the top one). Same none/low/medium/high contract scale as
+    ``confidence``. Empty when nothing matched.
+
+    Why this exists: ``build_recognition_string`` can state 2+ entities in one
+    breath ("You're asking about A and B -- I have both."), but ``confidence``
+    only describes the top anchor. A caller that wants to hedge a weakly-matched
+    secondary entity ("...though I'm less sure about B") reads its bucket here.
+    The top entity's bucket here always equals ``confidence``."""
+
 
     hydration: Optional[Awaitable[str]] = None
     """An awaitable that resolves to the L1-hydrated detail string. The caller
@@ -128,6 +152,19 @@ def detect_entities(user_msg: str, manifest: dict) -> list[dict]:
     """
     if not isinstance(manifest, dict):
         return []
+    # Prefilter: tokenize the prompt ONCE into a set. Every match tier the gate
+    # accepts (>= TOKEN_SUBSEQUENCE) requires the candidate's tokens to appear as
+    # a contiguous run inside the prompt's tokens, which implies every candidate
+    # token is present in the prompt's token set. So a candidate whose token set
+    # is NOT a subset of the prompt's token set can never reach the gate -- we
+    # skip the (re-tokenizing, up to 3x) match_tier call for it entirely.
+    #
+    # This is a sound necessary condition, never sufficient: anything that passes
+    # the prefilter still goes through the full match_tier ladder, so match
+    # SEMANTICS are unchanged. The win is on manifests with many entities, where
+    # the hot path drops from O(entities x prompt-retokenize) to one prompt
+    # tokenization plus cheap set-subset checks.
+    prompt_token_set = frozenset(tokenize(user_msg))
     matches: list[dict] = []
     for entity in manifest.get("known_entities") or []:
         if not isinstance(entity, dict):
@@ -140,11 +177,22 @@ def detect_entities(user_msg: str, manifest: dict) -> list[dict]:
         for alias in aliases:
             if isinstance(alias, str):
                 candidates.append(alias)
+        # Prefilter each candidate: keep only those whose token set is a subset
+        # of the prompt's. Empty-token candidates (e.g. punctuation-only) can
+        # never match the gate, so they're filtered out here too.
+        prefiltered = [
+            c
+            for c in candidates
+            if (c_tokens := frozenset(tokenize(c)))
+            and c_tokens <= prompt_token_set
+        ]
+        if not prefiltered:
+            continue
         # Shared match decision: a candidate must appear as a contiguous token
         # subsequence (or stronger tier) in the prompt — the contract's ladder,
         # which carries the short-name guard ("ILTTed" never matches "ILTT").
         if any(
-            match_tier(user_msg, c) >= MatchTier.TOKEN_SUBSEQUENCE for c in candidates
+            match_tier(user_msg, c) >= MatchTier.TOKEN_SUBSEQUENCE for c in prefiltered
         ):
             matches.append(entity)
     return matches
@@ -232,8 +280,6 @@ async def hydrate_l1(
     if not l1_dir.is_dir():
         return ""
 
-    loop = asyncio.get_event_loop()
-
     def _read_one(entity: dict) -> str:
         name = entity.get("name")
         if not isinstance(name, str) or not name:
@@ -255,8 +301,13 @@ async def hydrate_l1(
             return ""
 
     try:
+        # asyncio.to_thread offloads each blocking file read onto the default
+        # thread pool without us touching the event loop directly. This avoids
+        # the deprecated get_event_loop()/run_in_executor() dance (which can
+        # raise on Python 3.12+ when no loop is bound to the calling context)
+        # and keeps hydration off the recognition-critical path.
         docs = await asyncio.gather(
-            *[loop.run_in_executor(None, _read_one, e) for e in matches]
+            *[asyncio.to_thread(_read_one, e) for e in matches]
         )
     except Exception as exc:  # noqa: BLE001 -- never crash hydration
         logger.warning("L1 hydration crashed: %s", exc)
@@ -320,6 +371,17 @@ def recognition_first(
     ]
     confidence = recognition_confidence(user_msg, _anchor_names)
 
+    # Per-entity confidence for EVERY matched entity (not just the top one), so a
+    # caller that surfaces 2+ entities can hedge a weak secondary match. The top
+    # entity's bucket here equals `confidence` by construction (same inputs).
+    entity_confidences: dict[str, str] = {}
+    for _ent in matches:
+        _name = str(_ent.get("name", ""))
+        if not _name:
+            continue
+        _names = [_name] + [str(a) for a in _ent.get("aliases", []) or []]
+        entity_confidences[_name] = recognition_confidence(user_msg, _names)
+
     async def _hydration_with_timeout() -> str:
         try:
             return await asyncio.wait_for(
@@ -339,6 +401,7 @@ def recognition_first(
         matched_entities=matches,
         hydration=_hydration_with_timeout(),
         confidence=confidence,
+        entity_confidences=entity_confidences,
     )
 
 
