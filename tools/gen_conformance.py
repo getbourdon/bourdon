@@ -31,10 +31,15 @@ import json
 import sys
 from pathlib import Path
 
-# The oracle. Import the real implementation -- never reimplement here.
-from core.redaction import REDACTED, contains_secret, redact_text
-
+# Make the repo root importable so this runs standalone (`python tools/gen_conformance.py`)
+# from any cwd and in a CI lane that has NOT `pip install -e .`'d the package -- the drift
+# gate only needs the checked-out tree (core.redaction is stdlib-only).
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+# The oracle. Import the real implementation -- never reimplement here.
+from core.redaction import REDACTED, contains_secret, redact_text  # noqa: E402
+
 CONFORMANCE = REPO_ROOT / "conformance"
 
 CONFORMANCE_VERSION = "1.0.0"  # bump on any fixture change (see manifest.json doc)

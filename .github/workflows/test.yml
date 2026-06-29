@@ -88,3 +88,12 @@ jobs:
         # once there's a coherent lint baseline to hold to.
         run: |
           ruff check . || echo "::warning::ruff reported issues (non-fatal in v0.0.x)"
+      - name: Conformance drift gate (parity fixtures match the oracle)
+        # The TS mirror asserts against conformance/*. Regenerate from the live
+        # Python oracle and fail if a committed fixture changed but wasn't
+        # re-committed -- this is what stops the two implementations drifting.
+        # Stdlib-only (core.redaction), so no package install needed.
+        run: |
+          python tools/gen_conformance.py
+          git diff --exit-code -- conformance/ \
+            || { echo "::error::conformance fixtures are stale -- run 'python tools/gen_conformance.py' and commit"; exit 1; }
