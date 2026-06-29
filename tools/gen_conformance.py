@@ -157,9 +157,14 @@ def _sha256(path: Path) -> str:
 
 
 def _write_json(path: Path, payload: dict) -> None:
+    # newline="\n" forces LF on every OS, so the working-copy bytes == the
+    # committed blob == the sha256 we stamp in manifest.json. Without this,
+    # Windows writes CRLF, git normalizes to LF on commit, and the drift gate's
+    # sha would mismatch across platforms.
     path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 

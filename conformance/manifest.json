@@ -7,7 +7,7 @@
   "fixtures": [
     {
       "path": "redaction_battery.json",
-      "sha256": "706d3727542a497144dd6bb8e046b4ae4a11566429b098d8ec651ad9f0b32931",
+      "sha256": "17f93ff7073ce9d2545f514e6586dd963df9aac6dabfa3eba55061d40dc250b1",
       "producer": "tools/gen_conformance.py::redaction_battery"
     }
   ]
