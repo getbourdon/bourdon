@@ -80,8 +80,11 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install ruff
-        run: python -m pip install ruff
+      - name: Install ruff + package
+        # The package itself is needed by the conformance drift gate below: the
+        # generator imports the live oracle (core.*), and `import core` pulls in
+        # the package's hard deps (pyyaml). Editable install keeps it cheap.
+        run: python -m pip install ruff -e .
       - name: Lint
         # v0.0.x is pre-alpha; lint warnings are reported but don't fail the build
         # until the codebase stabilizes. Tighten to `ruff check --exit-non-zero`
@@ -92,7 +95,6 @@ jobs:
         # The TS mirror asserts against conformance/*. Regenerate from the live
         # Python oracle and fail if a committed fixture changed but wasn't
         # re-committed -- this is what stops the two implementations drifting.
-        # Stdlib-only (core.redaction), so no package install needed.
         run: |
           python tools/gen_conformance.py
           git diff --exit-code -- conformance/ \
