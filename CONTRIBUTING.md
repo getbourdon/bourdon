@@ -26,6 +26,15 @@ Specifically wanted:
 - LangChain / CrewAI / AutoGen memory exporters
 - Non-agent data sources: Linear, Attio, Notion, Google Calendar, Slack, email (IMAP/MBOX), Obsidian
 
+### Live response loop integrations (most wanted)
+A participant *captures* memory after the fact; a **live response loop integration** *injects* recognition into an agent's turn while the user is waiting — the real-time path of `prompt → context → generate → close`. This is the open frontier (see `spec/FINDINGS_JOURNAL.md`: "integration into a live agent's response loop is the next experimental step"). Read [`docs/LIVE_RESPONSE_LOOPS.md`](docs/LIVE_RESPONSE_LOOPS.md) for the two boundaries (pre-generation inject / post-turn capture), the recognition-first-hydration-second pattern, and the latency/degradation contract.
+
+Specifically wanted:
+- New IDE/agent turn hooks beyond the existing adapters (Cline, Zed, Continue.dev, JetBrains AI)
+- Chat-framework middleware (LangChain / LlamaIndex / Vercel AI SDK) that calls `prepare_recognition_context` before the LLM call and `commit_to_federation` after
+- Voice/realtime pipelines (Pipecat, LiveKit, Twilio/Vapi turn handlers) — recognition inside a sub-second speech turn
+- Server-side agent runtime middleware (e.g. Hono/Edge) that recognizes before routing
+
 ### Core improvements
 - L0 keyword detection is currently naive string matching. Fuzzy matching + alias tables would be a straight win.
 - L1 token budget enforcement currently drops entities in iteration order. LRU or relevance-weighted eviction would be better.
