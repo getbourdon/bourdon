@@ -70,7 +70,14 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.5.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.6.0"  # bump on any fixture change (see manifest.json doc)
+# 1.6.0: + the native_stores family (participant parity): each external-agent
+#        reader (hermes=sqlite, claude_code=file, github_copilot=network) gets a
+#        seeded hermetic native store + the REAL participant.export_l5() to_dict
+#        pinned as expected_l5.json (last_updated + claude_code's agent.instance
+#        frozen to fixed valid values; every other field a pure function of the
+#        store). Readers redact native strings themselves; seeds use keyword-only
+#        credential triggers so no token literal lands in a store fixture.
 # 1.5.0: + the mcp_snapshots family (the JSON-in-TextContent wire contract): the
 #        live create_l6_server tool closures driven in-process over a temp copy of
 #        fed_seed_library, with each of the 10 tools' req/res snapshotted through a
@@ -1697,6 +1704,342 @@ def mcp_snapshots() -> dict:
     return {"__multifile__": True, "files": written}
 
 
+# ---------------------------------------------------------------------------
+# native_stores  (external-agent native store -> the REAL participant -> L5)
+# ---------------------------------------------------------------------------
+# Participants are external-agent readers: they walk a native store (SQLite /
+# files / a network TTL cache) and normalize it into an L5 manifest. The PARITY
+# contract is ONLY the export_l5() OUTPUT SHAPE (its to_dict()) -- the internal
+# scraping is each reader's own business and is NOT pinned. So each case here
+# seeds a tiny, hermetic native store, runs the REAL participant.export_l5()
+# against it, and pins the resulting to_dict() as expected_l5.json. The TS mirror
+# seeds the byte-identical store, runs ITS reader, and must reproduce the same
+# normalized manifest.
+#
+# Three reader categories are covered (one each, the minimum slice):
+#   hermes          -- SQLite reader   (state.db sessions + memories/*.md)
+#   claude_code     -- file reader     (claude-brain + auto-memory + KG jsonl)
+#   github_copilot  -- network reader  (seeded TTL cache, runs offline-from-cache)
+#
+# DETERMINISM. export_l5() stamps two runtime-bound fields that are NOT part of
+# the parity contract: agent.last_updated (datetime.now) and, for claude_code,
+# agent.instance (socket.gethostname). Both are FROZEN before emission -- to a
+# VALID date-time / a fixed label, so the frozen manifest still validates against
+# L5_schema.json. Every other field is a pure function of the seeded store.
+#
+# REDACTION. The readers redact native strings themselves (the SSOT). The seeds
+# carry credential-shaped content using KEYWORD triggers only (".env", "bearer
+# token", "service_role") -- never a token literal -- so the redaction is visible
+# in the output (hermes memory entry / github PR title -> the REDACTED sentinel;
+# claude_code's credential graph entity + person entity -> dropped as private)
+# while no contiguous secret ever lands in a committed store fixture.
+
+# Frozen runtime fields (valid date-time keeps the frozen manifest schema-valid).
+_NATIVE_FROZEN_TS = "2026-06-29T00:00:00+00:00"
+_NATIVE_FROZEN_INSTANCE = "conformance-host"
+# Frozen cache fetched_at for the network reader. Value is irrelevant to freshness
+# (the generator forces an infinite TTL) but MUST be constant for an idempotent
+# committed cache fixture.
+_NATIVE_FROZEN_FETCHED_AT = 1782604800.0
+
+
+def _freeze_native_l5(d: dict) -> dict:
+    """Freeze the two runtime-bound fields so the manifest is deterministic.
+
+    last_updated -> a fixed valid date-time; agent.instance -> a fixed label
+    (only present on readers that stamp the hostname). Everything else is a pure
+    function of the seeded store and is left untouched.
+    """
+    frozen = json.loads(json.dumps(d))
+    frozen["last_updated"] = _NATIVE_FROZEN_TS
+    agent = frozen.get("agent")
+    if isinstance(agent, dict) and "instance" in agent:
+        agent["instance"] = _NATIVE_FROZEN_INSTANCE
+    return frozen
+
+
+def _seed_hermes_state_db(db_path: Path) -> None:
+    """Seed a tiny ~/.hermes/state.db (2 active sessions + 1 archived, 1 with tools).
+
+    No literal secrets: the credential surface is exercised by the memory files,
+    not the session DB. Created deterministically (fixed schema, no AUTOINCREMENT,
+    rollback journal closed on commit) so the committed bytes are reproducible.
+    """
+    import sqlite3
+
+    # Idempotency: a stale file (or its sidecars) would break CREATE TABLE / drift
+    # the bytes. Start from a clean slate every run.
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        p = db_path.with_name(db_path.name + suffix) if suffix else db_path
+        p.unlink(missing_ok=True)
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute(
+            "CREATE TABLE sessions(id TEXT, source TEXT, model TEXT, title TEXT, "
+            "cwd TEXT, started_at REAL, ended_at REAL, message_count INT, "
+            "tool_call_count INT, archived INT)"
+        )
+        db.execute(
+            "CREATE TABLE messages(id INTEGER, session_id TEXT, role TEXT, "
+            "content TEXT, tool_name TEXT)"
+        )
+        # Fixed epoch (UTC) -- no datetime.now anywhere in the seed.
+        ts = 1781827200.0  # 2026-06-19T00:00:00Z (date-only is the L5 surface)
+        db.execute(
+            "INSERT INTO sessions VALUES('s1','tui','m','Refactor auth flow',"
+            "'/projects/bourdon',?,?,10,4,0)",
+            (ts, ts),
+        )
+        db.execute(
+            "INSERT INTO sessions VALUES('s2','cli','m','Fix flaky tests',"
+            "'/projects/bourdon',?,?,5,2,0)",
+            (ts, ts),
+        )
+        # Archived row -- must be excluded from the manifest (COALESCE(archived,0)).
+        db.execute(
+            "INSERT INTO sessions VALUES('s3','slack','m','archived work',"
+            "'/projects/secretwork',?,?,2,0,1)",
+            (ts, ts),
+        )
+        for tn in ("terminal", "read_file", "patch"):
+            db.execute("INSERT INTO messages VALUES(1,'s1','tool','x',?)", (tn,))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _native_hermes(base: Path) -> tuple[dict, list[str]]:
+    """Seed a ~/.hermes store, run the REAL HermesParticipant, return (frozen, files)."""
+    from participants.hermes import HermesParticipant
+
+    home = base / "store" / ".hermes"
+    (home / "memories").mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    _seed_hermes_state_db(home / "state.db")
+    written.append("native_stores/hermes/store/.hermes/state.db")
+
+    # memory.md carries a credential-shaped line (keyword trigger, no literal) so
+    # the redaction shows up in the emitted entity; user.md is benign preferences.
+    _write_text_lf(
+        home / "memories" / "memory.md",
+        "- Project uses pytest with xdist\n"
+        "- The bearer token is stored in .env\n",
+    )
+    written.append("native_stores/hermes/store/.hermes/memories/memory.md")
+    _write_text_lf(
+        home / "memories" / "user.md",
+        "- Prefers concise answers\n- Works in the Pacific timezone\n",
+    )
+    written.append("native_stores/hermes/store/.hermes/memories/user.md")
+
+    manifest = HermesParticipant(hermes_home=home).export_l5()
+    return _freeze_native_l5(manifest.to_dict()), written
+
+
+def _native_claude_code(base: Path) -> tuple[dict, list[str]]:
+    """Seed claude-brain + auto-memory + KG, run the REAL ClaudeCodeParticipant."""
+    from participants.claude_code import ClaudeCodeParticipant
+
+    store = base / "store"
+    brain = store / "brain"
+    auto = store / "auto_memory"
+    kg = store / "knowledge_graph"
+    (brain / "PROJECTS" / "Bourdon").mkdir(parents=True, exist_ok=True)
+    (brain / "PROJECTS" / "OldThing").mkdir(parents=True, exist_ok=True)
+    (brain / "LOG").mkdir(parents=True, exist_ok=True)
+    auto.mkdir(parents=True, exist_ok=True)
+    kg.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    def emit(path: Path, text: str, rel: str) -> None:
+        _write_text_lf(path, text)
+        written.append(rel)
+
+    emit(
+        brain / "PROJECTS" / "Bourdon" / "OVERVIEW.md",
+        "# Bourdon -- Cross-agent memory federation\n\n"
+        "Cross-agent memory federation substrate. L5 manifests + L6 library.\n",
+        "native_stores/claude_code/store/brain/PROJECTS/Bourdon/OVERVIEW.md",
+    )
+    # Archived project -> tags=['archived'] + a recovered valid_to date.
+    emit(
+        brain / "PROJECTS" / "OldThing" / "OVERVIEW.md",
+        "# OldThing\n\nA retired experiment.\n\n## Status: Archived (2026-01-15)\n",
+        "native_stores/claude_code/store/brain/PROJECTS/OldThing/OVERVIEW.md",
+    )
+    emit(
+        brain / "LOG" / "2026-06-28-pc.md",
+        "# Session 2026-06-28\n\n"
+        "Wired the native_stores conformance family and validated the fixtures.\n",
+        "native_stores/claude_code/store/brain/LOG/2026-06-28-pc.md",
+    )
+    # MEMORY.md is the index file the parser skips.
+    emit(
+        auto / "MEMORY.md",
+        "# Project Memory Index\n\n- see entity files\n",
+        "native_stores/claude_code/store/auto_memory/MEMORY.md",
+    )
+    emit(
+        auto / "clyde.md",
+        "---\nname: Clyde\ntype: project\n"
+        "description: Local AI assistant entity.\ntags: [infra]\n---\n# Clyde\n",
+        "native_stores/claude_code/store/auto_memory/clyde.md",
+    )
+    # type: person -> PRIVATE by default -> MUST be filtered out (visibility guard).
+    emit(
+        auto / "ry-guy.md",
+        "---\nname: Ry Guy\ntype: person\ndescription: The owner.\n---\n# Ry Guy\n",
+        "native_stores/claude_code/store/auto_memory/ry-guy.md",
+    )
+    # KG: one public entity + one whose observation is a credential -> PRIVATE -> dropped.
+    emit(
+        kg / "memory.jsonl",
+        '{"type":"entity","name":"OMNIvour","entityType":"project",'
+        '"observations":["File conversion app."]}\n'
+        '{"type":"entity","name":"SecretCreds","entityType":"concept",'
+        '"observations":["the service_role key for supabase"]}\n'
+        '{"type":"relation","from":"OMNIvour","to":"Bourdon","relationType":"uses"}\n',
+        "native_stores/claude_code/store/knowledge_graph/memory.jsonl",
+    )
+
+    # Run the REAL reader. Path *resolution* (env/home probing) is not the parity
+    # contract -- seed the three discovered sources directly so the run is hermetic.
+    p = ClaudeCodeParticipant()
+    p._brain_path = brain
+    p._auto_memory_path = auto
+    p._knowledge_graph_path = kg / "memory.jsonl"
+    manifest = p.export_l5()
+    return _freeze_native_l5(manifest.to_dict()), written
+
+
+def _native_github_copilot(base: Path) -> tuple[dict, list[str]]:
+    """Seed the network reader's TTL cache, run export_l5() offline-from-cache."""
+    from participants.github_copilot import GitHubCopilotParticipant
+
+    cache_root = base / "cache"
+    slug_dir = cache_root / "github-copilot"
+    slug_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    # The {fetched_at, payload} cache the base class reads. The payload is what the
+    # GitHub fetch would have returned; one PR title carries a credential keyword
+    # (no literal) so the reader's redact_text shows up in the emitted session.
+    payload = {
+        "fetched_user": "ryan",
+        "fetched_at": _NATIVE_FROZEN_TS,
+        "items": [
+            {
+                "title": "Add OAuth login flow",
+                "number": 12,
+                "updated_at": "2026-06-20T10:00:00Z",
+                "repository_url": "https://api.github.com/repos/ryan/bourdon",
+            },
+            {
+                "title": "Rotate the service_role key in CI",
+                "number": 9,
+                "updated_at": "2026-06-18T10:00:00Z",
+                "repository_url": "https://api.github.com/repos/ryan/bourdon",
+            },
+        ],
+    }
+    _write_json(slug_dir / "payload.json", {
+        "fetched_at": _NATIVE_FROZEN_FETCHED_AT,
+        "payload": payload,
+    })
+    written.append("native_stores/github_copilot/cache/github-copilot/payload.json")
+
+    # Infinite TTL -> the seeded cache is always "fresh", so export_l5 reads it
+    # without a token and never touches the network. No auth provider on purpose.
+    p = GitHubCopilotParticipant(auth_provider=lambda: None, cache_root=cache_root)
+    p.cache_ttl_seconds = float("inf")
+    manifest = p.export_l5()
+    return _freeze_native_l5(manifest.to_dict()), written
+
+
+_NATIVE_READERS: list[tuple[str, Any]] = [
+    ("hermes", _native_hermes),
+    ("claude_code", _native_claude_code),
+    ("github_copilot", _native_github_copilot),
+]
+
+
+def native_stores() -> dict:
+    """Seed each reader's native store, run the REAL participant, pin its L5 to_dict.
+
+    Multi-file producer. For each reader it writes the seeded store fixtures plus
+    an ``expected_l5.json`` (the frozen-then-validated to_dict of the live
+    participant.export_l5()). The expected manifest is VALIDATED against the live
+    L5 schema before it lands, so a participant that emits a non-conformant
+    manifest can never be committed as a green fixture.
+    """
+    validator = _l5_validator()
+    root = CONFORMANCE / "native_stores"
+    root.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    for name, seed_fn in _NATIVE_READERS:
+        base = root / name
+        base.mkdir(parents=True, exist_ok=True)
+        expected, store_files = seed_fn(base)
+
+        # The frozen manifest MUST still validate (frozen fields stay valid-shaped).
+        if not validator.is_valid(expected):
+            errs = sorted(e.message for e in validator.iter_errors(expected))
+            raise SystemExit(
+                f"REFUSING TO EMIT: native_stores/{name} expected_l5 does not "
+                f"validate against L5_schema.json: {errs}"
+            )
+
+        out = base / "expected_l5.json"
+        _write_json(out, expected)
+        # Guard: no contiguous token-shaped secret may leak into the manifest.
+        _assert_no_literal_secret(out)
+        written.extend(store_files)
+        written.append(f"native_stores/{name}/expected_l5.json")
+
+    # Index doc so the family is self-describing alongside the others.
+    _write_json(root / "README.json", {
+        "_doc": "Participant parity fixtures: external-agent native store -> the "
+                "REAL participant.export_l5() -> its to_dict(), pinned as "
+                "expected_l5.json. ONLY the export_l5 OUTPUT SHAPE is the contract "
+                "(internal scraping is not). agent.last_updated (+ claude_code's "
+                "agent.instance) are FROZEN to fixed valid values; every other field "
+                "is a pure function of the seeded store. Readers redact native "
+                "strings themselves -- seeds use keyword-only credential triggers so "
+                "no token literal lands in a store fixture. Each expected_l5 "
+                "validates against L5_schema.json.",
+        "frozen_fields": {
+            "last_updated": _NATIVE_FROZEN_TS,
+            "agent.instance": _NATIVE_FROZEN_INSTANCE,
+        },
+        "readers": {
+            "hermes": {
+                "category": "sqlite",
+                "store": "store/.hermes/ (state.db sessions + memories/*.md)",
+                "reads": "non-archived sessions + project-from-cwd entities + "
+                         "memory.md/user.md facts; redacts memory lines; team default",
+            },
+            "claude_code": {
+                "category": "file",
+                "store": "store/{brain,auto_memory,knowledge_graph}/",
+                "reads": "PROJECTS/*/OVERVIEW.md + LOG/*.md + auto-memory frontmatter "
+                         "+ KG jsonl, deduped/sorted; person + credential entities "
+                         "filtered as private",
+            },
+            "github_copilot": {
+                "category": "network",
+                "store": "cache/github-copilot/payload.json (TTL cache)",
+                "reads": "offline-from-cache (infinite TTL, no token); PR items -> "
+                         "sessions + repository entities; redacts PR titles",
+            },
+        },
+    })
+    written.append("native_stores/README.json")
+
+    return {"__multifile__": True, "files": written}
+
+
 # The active families (stubs excluded until wired). Single-file producers
 # return a payload dict; multi-file producers (l5) write their own tree and
 # return {"__multifile__": True, "files": [...]}.
@@ -1710,6 +2053,8 @@ FAMILIES = {
     "tier_matrix.json": ("tier_matrix", tier_matrix),
     "federation_on_disk": ("federation_on_disk", federation_on_disk),
     "mcp_snapshots": ("mcp_snapshots", mcp_snapshots),
+    # Participant readers: native store -> the real export_l5() -> its to_dict().
+    "native_stores": ("native_stores", native_stores),
 }
 
 
