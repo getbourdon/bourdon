@@ -1198,7 +1198,7 @@ def tier_matrix() -> dict:
     try:
         from core.l6_server import create_l6_server
     except ImportError as exc:  # pragma: no cover -- needs the [server] extra
-        raise SystemExit(
+        raise SkipFamilyError(
             "tier_matrix needs fastmcp (pip install 'bourdon[server]') to drive the "
             f"real L6 enforcement: {exc}"
         ) from exc
@@ -1605,7 +1605,7 @@ def mcp_snapshots() -> dict:
     try:
         from core.l6_server import create_l6_server
     except ImportError as exc:  # pragma: no cover -- needs the [server] extra
-        raise SystemExit(
+        raise SkipFamilyError(
             "mcp_snapshots needs fastmcp (pip install 'bourdon[server]') to drive "
             f"the real L6 tool surface: {exc}"
         ) from exc
@@ -2390,6 +2390,32 @@ def _assert_no_literal_secret(path: Path) -> None:
             )
 
 
+class SkipFamilyError(Exception):
+    """Raised by a producer that cannot run in the current environment (e.g. a
+    fastmcp-dependent family in the lint lane that installs only ``[dev]``). The
+    family's already-committed fixtures + manifest entries are PRESERVED verbatim,
+    so the drift gate stays clean wherever the optional deps are absent, while a
+    full regen still runs where they are present (the ``[server]`` extra)."""
+
+
+def _existing_manifest_entries_by_producer() -> dict[str, list[dict]]:
+    """Load the committed manifest, grouped by producer function name, so a
+    skipped family's entries can be preserved in place."""
+    path = CONFORMANCE / "manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    by_producer: dict[str, list[dict]] = {}
+    for entry in data.get("fixtures", []):
+        producer = str(entry.get("producer", ""))
+        name = producer.rsplit("::", 1)[-1] if "::" in producer else producer
+        by_producer.setdefault(name, []).append(entry)
+    return by_producer
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate conformance parity fixtures.")
     parser.add_argument("--check", action="store_true",
@@ -2397,9 +2423,18 @@ def main() -> int:
     parser.parse_args()
 
     CONFORMANCE.mkdir(exist_ok=True)
+    preserved = _existing_manifest_entries_by_producer()
     fixtures_meta = []
     for filename, (producer_name, fn) in FAMILIES.items():
-        result = fn()
+        try:
+            result = fn()
+        except SkipFamilyError as skip:
+            # Optional dep missing: keep this family's committed fixtures + entries
+            # untouched so the drift gate stays clean.
+            kept = preserved.get(producer_name, [])
+            fixtures_meta.extend(kept)
+            print(f"  SKIP {producer_name}: {skip} (preserved {len(kept)} committed fixture(s))")
+            continue
         if isinstance(result, dict) and result.get("__multifile__"):
             # Producer already wrote its own tree; stamp each emitted file.
             for rel in result["files"]:
