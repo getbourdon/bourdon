@@ -153,10 +153,90 @@ Every participant MUST ship:
 
 Fixtures live under `tests/fixtures/<agent_id>/` with sample native-store content.
 
+## Network-Shaped Participants (Contract v0.3)
+
+Up to v0.2 every participant is a **file-reader**: `discover()` walks a known
+on-disk path. That blocks an entire class of agents whose state legitimately
+lives behind a SaaS API, not on the user's machine — GitHub-embedded Copilot
+(`@copilot` PR review/comments), future cloud agent surfaces, background agents.
+
+v0.3 adds a **network-shaped** participant category. It keeps the *same*
+`export_l5()` / `export_sessions()` contract — the L5-emit half is identical —
+and differs only in the discovery half: it fetches from an authenticated network
+API. The base class `participants/_network_base.py::NetworkParticipant` provides
+the shape; an adapter implements only `fetch_payload(token)` and
+`payload_to_l5(payload)`.
+
+```python
+class NetworkParticipant:
+    participant_slug: str        # cache namespace + agent id
+    agent_id: str
+    agent_type: str
+    cache_ttl_seconds: float     # local cache window
+
+    def fetch_payload(self, token: str) -> dict:
+        """Authenticated API call. Raise NetworkUnavailable on transport/5xx
+        (-> cache fallback) or ParticipantAuthError on 401/403 (-> blocked)."""
+
+    def payload_to_l5(self, payload: dict) -> L5Manifest:
+        """Normalize a (fresh or cached) payload into L5. Pure, no I/O."""
+```
+
+### Three guarantees the v0.3 contract adds
+
+1. **Local cache layer.** Every fetched payload caches to
+   `~/.cache/bourdon/<participant_slug>/` (honoring `$XDG_CACHE_HOME`) with a
+   TTL. On a fresh cache hit the adapter never touches the network, so a tight
+   federation loop (`export-all` on every session end) doesn't hammer the API.
+   The cache stores `{fetched_at, payload}` only — **never** the auth token.
+
+2. **Graceful degradation.** If the network is unreachable, the base serves the
+   most recent cached payload (even an expired one) and reports `health_check()
+   -> degraded` with the cache age. Federation goes *stale, loudly* — never
+   silent.
+
+3. **Authentication boundary.** Credentials come from an injected
+   `AuthProvider` (a zero-arg callable resolving an OS-keychain / env-var token
+   lazily at call time). They are **never** read from or written to an L5
+   manifest, never logged, never cached. Token handling distinguishes two cases:
+   - An **invalid** token (the server rejects it — 401, or 403 without a
+     rate-limit signal) always surfaces as `health_check() -> blocked`, and
+     stale cache must **never mask** it: `ParticipantAuthError` propagates even
+     when a cache exists. A bad token is a user problem to fix.
+   - A **missing** token (none resolvable) blocks only when there is *no* cache;
+     when a cache exists the base serves it as `degraded` (stale, loudly) — the
+     data is the user's own, already-fetched state, surfaced openly rather than
+     hidden. (A transient rate-limit is **not** an auth failure — it is
+     `NetworkUnavailable`, i.e. degraded with cache fallback.)
+
+### Documentation requirements (per network adapter)
+
+Each network adapter's module docstring MUST document:
+- the **auth path** (which env vars / keychain entry, what scopes),
+- the **API surface** it reads and how it scopes to *only the user's own* state,
+- its **cache TTL** and **rate-limit** posture,
+- its **fallback** behavior (e.g. a sibling convention-file adapter that keeps
+  publishing independently).
+
+### Detection
+
+Network participants have no filesystem presence, so the setup wizard
+(`cli/setup.py::detect_agents`) detects them structurally (`issubclass(...,
+NetworkParticipant)`) and treats "present" as "a credential is resolvable now,"
+rather than calling `.exists()` on a path.
+
+### Reference Implementation
+
+`participants/github_copilot.py` — the first network adapter, the v0.3
+smoke-test. Reads `@copilot` PR activity via the GitHub REST API (stdlib
+`urllib`, no new dependency), token from `$GITHUB_TOKEN`/`$GH_TOKEN` or
+`gh auth token`. It is additive: the existing convention-file
+`participants/copilot.py` keeps publishing `copilot.l5.yaml` independently.
+
 ## Versioning
 
 - Participant contract has its own semver, tied to Bourdon spec version but independently bumped on breaking changes
-- Participants declare `CONTRACT_VERSION = "0.1"` at module level
+- Participants declare `CONTRACT_VERSION = "0.1"` at module level (network participants: `"0.3"`)
 - L6 warns on version mismatch but does not reject — participants are free to be ahead or behind
 
 ## Open Questions (To Resolve in v0.2)
@@ -168,4 +248,6 @@ Fixtures live under `tests/fixtures/<agent_id>/` with sample native-store conten
 
 ## Reference Implementation
 
-See `participants/claude_code.py` for the first external participant. See `participants/base.py` for the Protocol + dataclass definitions.
+See `participants/claude_code.py` for the first external (file) participant,
+`participants/github_copilot.py` for the first network (v0.3) participant, and
+`participants/base.py` for the Protocol + dataclass definitions.

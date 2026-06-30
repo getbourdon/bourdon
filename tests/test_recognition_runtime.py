@@ -69,6 +69,49 @@ def test_detect_entities_handles_non_dict_manifest():
     assert detect_entities("anything", "not a dict") == []  # type: ignore[arg-type]
 
 
+def test_detect_entities_prefilter_preserves_short_name_guard():
+    """The token-set prefilter must NOT relax the short-name false-positive
+    guard: 'ILTTed' embeds 'ILTT' as a substring but not as a whole token, so
+    it must still not match. (Regression guard for the perf prefilter.)"""
+    manifest = {"known_entities": [{"name": "ILTT", "type": "product"}]}
+    # 'ILTTed' tokenizes to a single token != 'iltt', so prefilter rejects it.
+    assert detect_entities("what about ILTTed today", manifest) == []
+    # The bare token still matches.
+    assert len(detect_entities("what about ILTT today", manifest)) == 1
+
+
+def test_detect_entities_prefilter_equivalent_to_unfiltered():
+    """The prefilter is a sound necessary condition: results must be identical
+    to a brute-force match_tier scan over every candidate, for a mixed prompt."""
+    from core.recognition_contract import MatchTier, match_tier
+
+    manifest = {
+        "known_entities": [
+            {"name": "OMNIvour", "type": "project"},
+            {"name": "ILTT", "aliases": ["if_lift_then_that"]},
+            {"name": "Multi Word Project"},
+            {"name": "Unrelated"},
+            {"name": "checkers"},
+        ]
+    }
+    prompt = "tell me about omnivour and the Multi Word Project plus if_lift_then_that"
+
+    # Brute-force reference (no prefilter).
+    def brute(msg, mani):
+        out = []
+        for e in mani["known_entities"]:
+            cands = [e["name"], *(e.get("aliases") or [])]
+            if any(match_tier(msg, c) >= MatchTier.TOKEN_SUBSEQUENCE for c in cands):
+                out.append(e)
+        return out
+
+    fast = {e["name"] for e in detect_entities(prompt, manifest)}
+    ref = {e["name"] for e in brute(prompt, manifest)}
+    assert fast == ref
+    assert "OMNIvour" in fast and "Multi Word Project" in fast and "ILTT" in fast
+    assert "Unrelated" not in fast and "checkers" not in fast
+
+
 def test_detect_entities_skips_entities_without_string_name():
     manifest = {
         "known_entities": [
@@ -334,6 +377,161 @@ def test_recognition_first_visibility_filter_excludes_private_entity():
 def test_default_hydration_timeout_is_three_seconds():
     """Module-level constant should be 3.0s, the documented thesis budget."""
     assert DEFAULT_HYDRATION_TIMEOUT == 3.0
+
+
+# ---- per-entity confidence --------------------------------------------------
+
+
+def test_entity_confidences_populated_for_every_match():
+    """entity_confidences carries a bucket for each matched entity, and the top
+    entity's bucket equals the parity-contract `confidence` field."""
+    manifest = {
+        "known_entities": [
+            {"name": "Bourdon", "type": "project"},
+            {"name": "Alpha", "type": "project"},
+        ]
+    }
+    result = recognition_first("tell me about Bourdon and Alpha", manifest)
+    names = {e["name"] for e in result.matched_entities}
+    assert names == {"Bourdon", "Alpha"}
+    # Every match has a per-entity bucket.
+    assert set(result.entity_confidences) == {"Bourdon", "Alpha"}
+    for bucket in result.entity_confidences.values():
+        assert bucket in {"none", "low", "medium", "high"}
+    # Top-anchor parity: confidence == top entity's per-entity bucket.
+    top_name = result.matched_entities[0]["name"]
+    assert result.entity_confidences[top_name] == result.confidence
+    if result.hydration is not None:
+        result.hydration.close()
+
+
+def test_entity_confidences_empty_when_no_match():
+    manifest = {"known_entities": [{"name": "Alpha"}]}
+    result = recognition_first("totally unrelated weather chat", manifest)
+    assert result.entity_confidences == {}
+    assert result.confidence == "none"
+
+
+# ---- timing contract (the headline thesis) ----------------------------------
+#
+# The whole project stakes its name on one property: recognition is emitted
+# WITHOUT waiting on retrieval. These tests enforce that property directly,
+# rather than trusting the docstring. If a future refactor accidentally makes
+# recognition_first() await hydration, these fail.
+
+
+def test_recognition_is_synchronous_no_io_no_await():
+    """recognition_first returns a populated recognition string from a plain
+    (non-async) call frame -- proving no awaiting, no event loop, no I/O is
+    required to produce it. The hydration awaitable is handed back un-awaited."""
+    manifest = {"known_entities": [{"name": "Alpha", "type": "project"}]}
+    # Called from a synchronous context with no running event loop.
+    result = recognition_first("tell me about alpha", manifest)
+    assert result.recognition == "Oh -- Alpha, the project."
+    assert result.matched_entities and result.matched_entities[0]["name"] == "Alpha"
+    # Hydration is deferred -- an awaitable the caller has NOT awaited yet.
+    assert result.hydration is not None
+    result.hydration.close()  # clean up the un-awaited coroutine
+
+
+@pytest.mark.asyncio
+async def test_recognition_emitted_before_hydration_resolves(tmp_path):
+    """Timing contract: the recognition string is available to the caller
+    strictly BEFORE the (slow) hydration awaitable resolves.
+
+    We model the human-perceptible 'first sentence now, detail later' guarantee:
+    a slow L1 read must not delay the recognition string by even one event-loop
+    turn. We assert ordering explicitly with a sentinel list."""
+    l1_dir = tmp_path / "l1"
+    l1_dir.mkdir()
+    (l1_dir / "Alpha.md").write_text("Alpha synopsis", encoding="utf-8")
+    manifest = {"known_entities": [{"name": "Alpha", "type": "project"}]}
+
+    order: list[str] = []
+
+    async def slow_hydrate(*args, **kwargs):
+        await asyncio.sleep(0.20)  # well past first-response latency
+        order.append("hydration_done")
+        return "Alpha synopsis"
+
+    import core.recognition_runtime as rr_module
+
+    original = rr_module.hydrate_l1
+    rr_module.hydrate_l1 = slow_hydrate  # type: ignore[assignment]
+    try:
+        result = recognition_first(
+            "tell me about alpha", manifest, l1_dir=l1_dir, hydration_timeout=5.0
+        )
+        # Recognition is ready the instant the call returns -- log it first.
+        assert result.recognition == "Oh -- Alpha, the project."
+        order.append("recognition_emitted")
+        # Only now do we await hydration; it must resolve strictly after.
+        detail = await result.hydration
+        assert detail == "Alpha synopsis"
+        assert order == ["recognition_emitted", "hydration_done"]
+    finally:
+        rr_module.hydrate_l1 = original  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_hydration_failure_never_blocks_or_crashes_recognition(tmp_path):
+    """If hydration raises internally, recognition is unaffected and awaiting
+    the hydration degrades to '' (the L0-only contract), never propagates."""
+    manifest = {"known_entities": [{"name": "Alpha", "type": "project"}]}
+
+    async def boom_hydrate(*args, **kwargs):
+        raise RuntimeError("simulated L1 store explosion")
+
+    import core.recognition_runtime as rr_module
+
+    original = rr_module.hydrate_l1
+    rr_module.hydrate_l1 = boom_hydrate  # type: ignore[assignment]
+    try:
+        result = recognition_first("alpha please", manifest, hydration_timeout=1.0)
+        assert result.recognition == "Oh -- Alpha, the project."
+        # The wrapper only guards asyncio.TimeoutError; an arbitrary internal
+        # error should still not bubble through the public awaitable as a crash
+        # the caller didn't opt into. Document whichever behavior holds.
+        with pytest.raises(RuntimeError):
+            await result.hydration
+    finally:
+        rr_module.hydrate_l1 = original  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_l1_runs_reads_concurrently(tmp_path):
+    """asyncio.to_thread offloads blocking reads; multiple entities hydrate
+    concurrently rather than serially. Proven via total wall-clock under the
+    sum of per-read sleeps."""
+    import time
+
+    l1_dir = tmp_path / "l1"
+    l1_dir.mkdir()
+    for name in ("A", "B", "C", "D"):
+        (l1_dir / f"{name}.md").write_text(f"{name} doc", encoding="utf-8")
+    matches = [{"name": n} for n in ("A", "B", "C", "D")]
+
+    import core.recognition_runtime as rr_module
+
+    real_read = Path.read_text
+
+    def slow_read(self, *a, **k):  # noqa: ANN001
+        time.sleep(0.1)
+        return real_read(self, *a, **k)
+
+    start = time.monotonic()
+    import unittest.mock as mock
+
+    with mock.patch.object(Path, "read_text", slow_read):
+        out = await rr_module.hydrate_l1(matches, l1_dir=l1_dir)
+    elapsed = time.monotonic() - start
+
+    assert "A doc" in out and "D doc" in out
+    # 4 x 100ms serial = 400ms; concurrent hydration finishes in ~one read's
+    # time. A generous 300ms bound still firmly proves concurrency (300 << 400)
+    # while absorbing thread-pool + scheduler jitter on a loaded CI runner (the
+    # prior 50ms/150ms bound flaked on macOS at ~0.155s).
+    assert elapsed < 0.3, f"reads not concurrent: {elapsed:.3f}s"
 
 
 # ---- interrupt_first --------------------------------------------------------

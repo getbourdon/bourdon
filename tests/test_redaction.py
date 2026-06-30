@@ -12,6 +12,9 @@ If you add a secret shape to core.redaction, add it to SECRETS.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from core.l6_server import _safe_context_text
@@ -37,46 +40,19 @@ PREDICATE_SURFACES = (
     ("claude_code._contains_credential_pattern", _contains_credential_pattern),
 )
 
-# The secret battery. Each MUST be redacted on every surface. The keyword-less
-# token shapes (AWS/GitHub/Slack/OpenAI/Anthropic/Google/JWT/PEM) are the class
-# the pre-SSOT sets missed (P0-2 / P0-4).
-SECRETS = [
-    "my api_key is QXp9-not-a-real-key",
-    "password: hunter2hunter2",
-    "uses a bearer token to authenticate",
-    "the service_role key for supabase",
-    "stripe secret rotated today",
-    "the keystore password lives in .env",
-    # Token-shaped fixtures are assembled from fragments so no contiguous secret
-    # literal lives in source (GitHub push-protection scans literals). The
-    # runtime-joined strings still exercise the regexes.
-    "sk" + "_live_" + "abcd1234efGH5678ijkl",
-    "appl" + "_AbCdEfGhIjKlMnOp",
-    "hf" + "_abcdefghij1234567890",
-    "AKIA" + "IOSFODNN7EXAMPLE",
-    "ghp_" + "a" * 36,
-    "github_pat_" + "b" * 24,
-    "glpat-" + "c" * 22,
-    "xoxb" + "-123456789012-abcdefghijklmnop",
-    "sk-" + "d" * 24,
-    "sk-ant-" + "api03-" + "e" * 24,
-    "AIza" + "f" * 35,
-    "ya29." + "g" * 30,
-    "npm_" + "h" * 36,
-    "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0In0." + "Sf" + "lKxwRJSMeKKF2QT4fwpMeJf36",
-    "-----BEGIN RSA PRIVATE KEY-----",
-]
-
-# Benign text the recognition surface MUST keep (over-redaction drops anchors).
-# Includes words that embed token prefixes mid-word (task/risk/disk) to prove the
-# \b anchoring does not false-positive.
-BENIGN = [
-    "We shipped the recognition timing layer for Bourdon",
-    "Fixed the desktop tray autostart on Windows",
-    "task-management-dashboard-rewrite-was-completed-today",
-    "the risk-assessment-and-disk-usage-monitoring-tool shipped",
-    "Bourdon recognition-first runtime layer is the core promise",
-]
+# The secret battery + benign survivors now load from the language-neutral parity
+# fixture (conformance/redaction_battery.json) -- the SINGLE source of truth shared
+# with the TypeScript mirror's vitest suite, so a pattern can never drift between
+# the two implementations. Token-shaped secrets are stored as fragment arrays (no
+# contiguous literal lands in git); they are joined at load. Regenerate via
+# `python tools/gen_conformance.py` after changing a pattern in core.redaction.
+# See the bourdon-parity-fixture-harness skill.
+_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent.parent / "conformance" / "redaction_battery.json")
+    .read_text(encoding="utf-8")
+)
+SECRETS = ["".join(case["fragments"]) for case in _FIXTURE["secrets"]]
+BENIGN = [case["text"] for case in _FIXTURE["benign"]]
 
 
 @pytest.mark.parametrize("secret", SECRETS)
