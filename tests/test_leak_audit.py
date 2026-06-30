@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from core.leak_audit import (
     AUDIT_SCHEMA_VERSION,
@@ -14,6 +17,13 @@ from core.leak_audit import (
 )
 
 _FIXTURE_LIBRARY = Path(__file__).resolve().parent / "fixtures" / "leak_audit_library"
+
+# Cross-impl leak-audit parity cases (oracle-computed, shared with the TS mirror).
+# Regenerate via `python tools/gen_conformance.py`. See bourdon-parity-fixture-harness.
+_LEAK_CASES_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent.parent / "conformance" / "leak_cases.json")
+    .read_text(encoding="utf-8")
+)
 
 
 # ---- visibility resolution --------------------------------------------------
@@ -277,6 +287,26 @@ def test_private_tag_families_cover_known_participant_policies():
             union.update(str(t).lower() for t in tags)
     assert union, "expected at least one participant DEFAULT_POLICY.private_tags"
     assert union <= PRIVATE_TAG_FAMILIES, f"uncovered tags: {union - PRIVATE_TAG_FAMILIES}"
+
+
+# ---- conformance parity: the oracle must reproduce its own fixture ----------
+
+
+@pytest.mark.parametrize(
+    "case", _LEAK_CASES_FIXTURE["cases"], ids=lambda c: c["name"]
+)
+def test_leak_cases_fixture_matches_oracle(case):
+    """audit_manifest must reproduce the committed [{kind, location}] for each
+    case -- the pytest half of the cross-impl parity contract (the TS mirror
+    asserts the same bytes)."""
+    findings = audit_manifest(case["manifest"], f"{case['name']}.l5.yaml")
+    actual = [{"kind": f.kind.value, "location": f.location} for f in findings]
+    assert actual == case["expected_findings"]
+
+
+def test_leak_cases_fixture_schema_version_matches():
+    assert _LEAK_CASES_FIXTURE["audit_schema_version"] == AUDIT_SCHEMA_VERSION
+    assert set(_LEAK_CASES_FIXTURE["private_tag_families"]) == set(PRIVATE_TAG_FAMILIES)
 
 
 # ---- CI gate wiring ---------------------------------------------------------

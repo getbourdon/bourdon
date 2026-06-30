@@ -30,6 +30,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 # Make the repo root importable so this runs standalone (`python tools/gen_conformance.py`)
 # from any cwd and in a CI lane that has NOT `pip install -e .`'d the package -- the drift
@@ -41,6 +42,11 @@ sys.path.insert(0, str(REPO_ROOT))
 import jsonschema  # noqa: E402
 from jsonschema import Draft202012Validator  # noqa: E402
 
+from core.leak_audit import (  # noqa: E402
+    AUDIT_SCHEMA_VERSION,
+    PRIVATE_TAG_FAMILIES,
+    audit_manifest,
+)
 from core.recognition_contract import (  # noqa: E402
     MatchTier,
     best_match_tier,
@@ -61,7 +67,9 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.2.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.3.0"  # bump on any fixture change (see manifest.json doc)
+# 1.3.0: + leak_cases family (core.leak_audit parity) and a case_variants section
+#        in redaction_battery pinning per-token-pattern case sensitivity.
 BOURDON_VERSION = "0.11.0"     # the oracle version these fixtures were produced against
 
 
@@ -109,6 +117,79 @@ BENIGN: list[str] = [
 
 BENIGN_LIMIT = 400  # the limit the recognition surface uses for benign text
 
+# Case-sensitivity probes -- one per TOKEN pattern. `correct` is a known-good
+# token (stored as fragments, joined at load -- never a contiguous literal);
+# `wrong` is the SAME token with its case-bearing prefix flipped. For the
+# case-SENSITIVE patterns (every token pattern EXCEPT appl_/hf_, which compile
+# with re.IGNORECASE) the wrong case MUST NOT redact -- that is the per-flag
+# pin. For appl_/hf_ the wrong case MUST STILL redact (proving the `i` flag).
+# Expectations are oracle-computed below and self-checked, so a pattern that
+# silently loses/gains its IGNORECASE flag fails generation.
+#   (name, case_sensitive, correct_fragments, wrong_fragments)
+_CASE_VARIANT_PROBES: list[tuple[str, bool, list[str], list[str]]] = [
+    ("stripe_sk", True, ["sk", "_live_", "abcd1234efGH5678ijkl"],
+     ["SK_LIVE_ABCD1234EFGH5678IJKL"]),
+    ("revenuecat_appl", False, ["appl", "_AbCdEfGhIjKlMnOp"],
+     ["APPL", "_ABCDEFGHIJKLMNOP"]),
+    ("huggingface_hf", False, ["hf", "_abcdefghij1234567890"],
+     ["HF", "_ABCDEFGHIJ1234567890"]),
+    ("aws_akia", True, ["AKIA", "IOSFODNN7EXAMPLE"], ["akiaiosfodnn7example"]),
+    ("github_ghp", True, ["ghp_", "a" * 36], ["GHP_" + "A" * 36]),
+    ("github_pat", True, ["github_pat_", "b" * 24], ["GITHUB_PAT_" + "B" * 24]),
+    ("gitlab_glpat", True, ["glpat-", "c" * 22], ["GLPAT-" + "C" * 22]),
+    ("slack_xoxb", True, ["xoxb", "-123456789012-abcdefghijklmnop"],
+     ["XOXB-123456789012-ABCDEFGHIJKLMNOP"]),
+    ("openai_anthropic_sk", True, ["sk-", "d" * 24], ["SK-" + "D" * 24]),
+    ("google_aiza", True, ["AIza", "f" * 35], ["AIZA" + "F" * 35]),
+    ("google_ya29", True, ["ya29.", "g" * 30], ["YA29." + "G" * 30]),
+    ("npm_token", True, ["npm_", "h" * 36], ["NPM_" + "H" * 36]),
+    ("jwt", True,
+     ["eyJ", "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.", "eyJzdWIiOiIxMjM0In0.",
+      "Sf", "lKxwRJSMeKKF2QT4fwpMeJf36"],
+     ["EYJHBGCIOIJIUZI1NIISINR5CCI6IKPXVCJ9.EYJZDWIIOIIXMJM0IN0.SFLKXWRJSMEKKF2QT4FWPMEJF36"]),
+    ("pem_private_key", True, ["-----BEGIN RSA PRIVATE KEY-----"],
+     ["-----begin rsa private key-----"]),
+]
+
+
+def _case_variant_probe(name: str, case_sensitive: bool,
+                        correct: list[str], wrong: list[str]) -> dict:
+    """One case-sensitivity probe, oracle-computed and self-checked."""
+    correct_joined = "".join(correct)
+    wrong_joined = "".join(wrong)
+    correct_secret = contains_secret(correct_joined)
+    wrong_secret = contains_secret(wrong_joined)
+    # Self-checks: make the generator authoritative so a mis-cased probe (or a
+    # flag regression) can never be committed as a green fixture.
+    if not correct_secret:
+        raise SystemExit(
+            f"REFUSING TO EMIT: case_variant {name!r} correct case did not redact"
+        )
+    if case_sensitive and wrong_secret:
+        raise SystemExit(
+            f"REFUSING TO EMIT: case_variant {name!r} is declared case-sensitive "
+            "but the wrong case still matched a pattern"
+        )
+    if not case_sensitive and not wrong_secret:
+        raise SystemExit(
+            f"REFUSING TO EMIT: case_variant {name!r} is declared IGNORECASE but "
+            "the wrong case did not match"
+        )
+    return {
+        "pattern": name,
+        "case_sensitive": case_sensitive,
+        "correct": {
+            "fragments": correct,
+            "expect_redacted": redact_text(correct_joined),
+            "expect_contains_secret": correct_secret,
+        },
+        "wrong": {
+            "fragments": wrong,
+            "expect_redacted": redact_text(wrong_joined),
+            "expect_contains_secret": wrong_secret,
+        },
+    }
+
 
 def redaction_battery() -> dict:
     """Emit the redaction parity battery with oracle-computed expectations."""
@@ -130,13 +211,153 @@ def redaction_battery() -> dict:
         }
         for text in BENIGN
     ]
+    case_variants = [
+        _case_variant_probe(name, cs, correct, wrong)
+        for name, cs, correct, wrong in _CASE_VARIANT_PROBES
+    ]
     return {
         "_doc": "Cross-impl redaction parity. Loaders join `fragments`. "
-                f"REDACTED sentinel = {REDACTED!r}. benign uses limit={BENIGN_LIMIT}.",
+                f"REDACTED sentinel = {REDACTED!r}. benign uses limit={BENIGN_LIMIT}. "
+                "case_variants: one probe per TOKEN pattern -- `correct` always "
+                "redacts; for case_sensitive patterns `wrong` (case-flipped prefix) "
+                "must NOT redact, for the IGNORECASE patterns (appl_/hf_) `wrong` "
+                "still redacts. Pins the per-pattern case flag across impls.",
         "redacted_sentinel": REDACTED,
         "benign_limit": BENIGN_LIMIT,
         "secrets": secrets,
         "benign": benign,
+        "case_variants": case_variants,
+    }
+
+
+# ---------------------------------------------------------------------------
+# leak_cases  (extracted from tests/test_leak_audit.py)
+# ---------------------------------------------------------------------------
+# Each case feeds a manifest TREE through the live core.leak_audit.audit_manifest
+# oracle and pins the resulting findings as [{kind, location}]. kind + location
+# are the cross-impl assertion: agent_file is just the passed-in filename and
+# `detail` is human prose, so neither is pinned. Findings keep the oracle's
+# emission order (visibility entities, then visibility sessions, then the total
+# credential walk) -- order is contract.
+#
+# Credential cases use KEYWORD-shaped triggers (".env", "service_role", "api_key",
+# "bearer token") -- never a token-shaped literal -- so no contiguous secret can
+# land in a committed fixture (harness rule #3). The per-token-pattern parity
+# (incl. case sensitivity) lives in redaction_battery; here we prove the auditor
+# wires contains_secret across the WHOLE federated string tree and resolves
+# visibility the way the emitters do.
+_LEAK_CASES: list[tuple[str, Any]] = [
+    # CREDENTIAL: keyword trigger in an entity summary -- the canonical leak.
+    ("credential_in_summary", {
+        "known_entities": [
+            {"name": "API", "summary": "the service_role key for supabase",
+             "visibility": "team"},
+        ],
+    }),
+    # CREDENTIAL: a .env path deep in a session's files_touched list -- proves the
+    # walk is total (the pre-SSOT allowlist silently skipped files_touched).
+    ("credential_in_files_touched", {
+        "recent_sessions": [
+            {"date": "2026-06-20", "files_touched": ["src/app.ts", "config/.env"]},
+        ],
+    }),
+    # CREDENTIAL: agent.role_narrative -- federated free-text the old allowlist
+    # never scanned.
+    ("credential_in_role_narrative", {
+        "agent": {"id": "x", "type": "code-assistant",
+                  "role_narrative": "rotate the api_key before every deploy"},
+    }),
+    # CREDENTIAL: a top-level scalar list -- the credential walk reaches everything.
+    ("credential_in_top_level_capabilities", {
+        "capabilities": ["state_db", "the bearer token is read from .env"],
+    }),
+    # VISIBILITY: an explicitly private entity riding in a federated manifest.
+    ("private_entity_explicit", {
+        "known_entities": [
+            {"name": "SecretProj", "type": "project", "visibility": "private"},
+        ],
+    }),
+    # VISIBILITY: a private-tag-FAMILY entity (a tag forces private regardless of
+    # the declared visibility).
+    ("private_tag_family_entity", {
+        "known_entities": [
+            {"name": "Payroll", "type": "concept", "tags": ["financial"]},
+        ],
+    }),
+    # VISIBILITY: a private-tagged session.
+    ("private_tagged_session", {
+        "recent_sessions": [
+            {"date": "2026-06-20", "tags": ["personal"]},
+        ],
+    }),
+    # VISIBILITY: the auditor unions the manifest's OWN declared private_tags, so a
+    # custom tag the families don't hardcode is still caught -- and the
+    # visibility_policy block itself is never credential-scanned.
+    ("manifest_declared_private_tag", {
+        "known_entities": [
+            {"name": "Vault", "type": "project", "tags": ["client-confidential"]},
+        ],
+        "visibility_policy": {"default": "team",
+                              "private_tags": ["client-confidential"]},
+    }),
+    # CLEAN: nothing private, no secrets -> zero findings.
+    ("clean_manifest", {
+        "known_entities": [
+            {"name": "Bourdon", "type": "project",
+             "summary": "memory federation", "visibility": "team"},
+        ],
+        "recent_sessions": [
+            {"date": "2026-06-20", "key_actions": ["refactored the L6 store"],
+             "visibility": "team"},
+        ],
+    }),
+    # CLEAN: visibility_policy enumerates tag-family NAMES (declarations, not
+    # content), so naming "credential"/"secret"/"private_key" must NOT self-flag.
+    ("policy_names_not_self_flagged", {
+        "known_entities": [{"name": "Bourdon", "type": "project",
+                            "visibility": "team"}],
+        "visibility_policy": {
+            "default": "team",
+            "private_tags": ["credential", "secret", "password", "private_key"],
+        },
+    }),
+    # GARBAGE: a non-dict manifest never raises and yields nothing.
+    ("garbage_non_dict_manifest", "not a dict"),
+    # GARBAGE: malformed collections (wrong element/collection types) are skipped,
+    # not crashed on.
+    ("garbage_malformed_collections", {
+        "known_entities": "nope",
+        "recent_sessions": [None, 42],
+    }),
+]
+
+
+def leak_cases() -> dict:
+    """Emit the federation leak-audit parity cases with oracle-computed findings."""
+    cases = []
+    for name, manifest in _LEAK_CASES:
+        findings = audit_manifest(manifest, f"{name}.l5.yaml")
+        cases.append(
+            {
+                "name": name,
+                "manifest": manifest,
+                "expected_findings": [
+                    {"kind": f.kind.value, "location": f.location} for f in findings
+                ],
+            }
+        )
+    return {
+        "_doc": "Cross-impl federation leak-audit parity. Oracle = "
+                "core.leak_audit.audit_manifest. Each case feeds `manifest` through "
+                "the auditor; `expected_findings` pins [{kind, location}] in the "
+                "oracle's emission order (visibility entities, visibility sessions, "
+                "then the total credential walk). kind in {'credential','visibility'}; "
+                "location is a json-path like 'known_entities[0].summary'. "
+                "audit_manifest NEVER raises -- garbage manifests yield []. Credential "
+                "cases use keyword-shaped triggers only; no token literal is committed.",
+        "audit_schema_version": AUDIT_SCHEMA_VERSION,
+        "private_tag_families": sorted(PRIVATE_TAG_FAMILIES),
+        "cases": cases,
     }
 
 
@@ -695,6 +916,7 @@ def mcp_snapshots() -> dict:
 # return {"__multifile__": True, "files": [...]}.
 FAMILIES = {
     "redaction_battery.json": ("redaction_battery", redaction_battery),
+    "leak_cases.json": ("leak_cases", leak_cases),
     "recognition_vectors": ("recognition_vectors", recognition_vectors),
     "l5_schema_and_manifests": ("l5_schema_and_manifests", l5_schema_and_manifests),
 }
