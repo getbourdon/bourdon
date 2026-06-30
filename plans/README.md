@@ -10,6 +10,7 @@ and update your status row when done.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001  | Federate improve-style plan backlogs via `bourdon improve sync` | P1 | M | — | DONE |
+| 002  | Show live agent activity in the tray (process count → session registry) | P2 | S→L | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (rationale)
 
