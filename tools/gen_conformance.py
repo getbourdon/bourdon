@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml  # noqa: E402  (third-party, but a hard dep of the oracle)
+
 # Make the repo root importable so this runs standalone (`python tools/gen_conformance.py`)
 # from any cwd and in a CI lane that has NOT `pip install -e .`'d the package -- the drift
 # gate only needs the checked-out tree (core.redaction is stdlib-only).
@@ -67,7 +69,14 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.3.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.4.0"  # bump on any fixture change (see manifest.json doc)
+# 1.4.0: + the L6 FEDERATION families (the cross-machine trust boundary):
+#        tier_matrix (D4 tool x trust-tier x granted -> allow|deny + structured
+#        denial, oracle-driven through the real create_l6_server enforcement),
+#        fed_seed_library (a 2-agent seeded agent-library with public/team/private
+#        entities + sessions for query-parity), and on_disk/ (a Python-WRITTEN
+#        federation.yaml registry + audit.jsonl + auth_vectors the TS side must
+#        parse identically -- synthetic bdn_ tokens only, sha256-at-rest).
 # 1.3.0: + leak_cases family (core.leak_audit parity) and a case_variants section
 #        in redaction_battery pinning per-token-pattern case sensitivity.
 BOURDON_VERSION = "0.11.0"     # the oracle version these fixtures were produced against
@@ -898,10 +907,518 @@ def l5_schema_and_manifests() -> dict:
     return {"__multifile__": True, "files": written}
 
 
+# ---------------------------------------------------------------------------
+# fed_seed_library  (a 2-agent seeded agent-library for query + tier parity)
+# ---------------------------------------------------------------------------
+# These are INPUT fixtures (read by L6Store), not oracle output: a small,
+# stable library spread across two agents with public / team / private entities
+# and sessions, plus a cross-agent shared entity name ("Bourdon") and a same-date
+# session pair (2026-06-08) so the visibility filter, the find_entity merge, and
+# the list_recent_work stable-sort/cursor are all exercised by one corpus. The
+# tier_matrix family drives the REAL server over a temp copy of this same seed,
+# so the two federation families stay coherent.
+#
+# claude-code is the GRANTED namespace for the quarantined caller; codex is the
+# UNGRANTED one. "SecretProj" is known ONLY by codex, so a quarantined
+# find_entity for it must come back empty (filtered to granted agents).
+_SEED_MANIFESTS: dict[str, dict] = {
+    "claude-code.l5.yaml": {
+        "spec_version": "0.1",
+        "agent": {
+            "id": "claude-code",
+            "type": "code-assistant",
+            "instance": "pc-threadripper",
+            "role_narrative": "Lead code-assistant on the federation substrate.",
+        },
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "capabilities": ["code-read", "code-write"],
+        "known_entities": [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "aliases": ["NeuroLayer", "Continuo"],
+                "summary": "Cross-agent memory federation (granted side).",
+                "tags": ["infra"],
+                "visibility": "public",
+            },
+            {
+                "name": "Roadmap",
+                "type": "concept",
+                "summary": "Phase 1.7 federation roadmap.",
+                "tags": ["team"],
+                "visibility": "team",
+            },
+            {
+                "name": "Quarterly Revenue",
+                "type": "concept",
+                "summary": "Q2 numbers.",
+                "tags": ["financial"],
+                "visibility": "private",
+            },
+        ],
+        "recent_sessions": [
+            {
+                "date": "2026-06-08",
+                "cwd": "/c/Users/cumul/repos/bourdon",
+                "project_focus": ["Bourdon"],
+                "key_actions": ["wired tier matrix fixtures"],
+                "files_touched": ["tools/gen_conformance.py"],
+                "visibility": "public",
+            },
+            {
+                "date": "2026-06-07",
+                "cwd": "/c/Users/cumul/repos/bourdon",
+                "project_focus": ["Roadmap"],
+                "key_actions": ["team planning"],
+                "visibility": "team",
+            },
+            {
+                "date": "2026-06-06",
+                "cwd": "/c/Users/cumul/repos/bourdon",
+                "project_focus": ["Quarterly Revenue"],
+                "key_actions": ["private review"],
+                "visibility": "private",
+            },
+        ],
+        "visibility_policy": {
+            "default": "public",
+            "private_tags": ["financial", "personal"],
+            "team_tags": ["team"],
+        },
+    },
+    "codex.l5.yaml": {
+        "spec_version": "0.1",
+        "agent": {"id": "codex", "type": "code-assistant"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [
+            {
+                "name": "SecretProj",
+                "type": "project",
+                "summary": "Known only by codex (ungranted namespace).",
+                "visibility": "public",
+            },
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Federation, codex view.",
+                "visibility": "public",
+            },
+            {
+                "name": "Internal Notes",
+                "type": "concept",
+                "summary": "codex private.",
+                "tags": ["personal"],
+                "visibility": "private",
+            },
+        ],
+        "recent_sessions": [
+            {
+                "date": "2026-06-08",
+                "cwd": "/y",
+                "project_focus": ["SecretProj"],
+                "key_actions": ["codex work"],
+                "visibility": "public",
+            },
+            {
+                "date": "2026-06-05",
+                "cwd": "/y",
+                "project_focus": ["Internal Notes"],
+                "key_actions": ["codex private"],
+                "visibility": "team",
+            },
+        ],
+    },
+}
+
+
+def _write_text_lf(path: Path, text: str) -> None:
+    """Write text with hard LF endings (cross-platform stable sha, see _write_json)."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    path.write_text(normalized, encoding="utf-8", newline="\n")
+
+
+def _l5_validator() -> Draft202012Validator:
+    schema = json.loads(SPEC_SCHEMA.read_text(encoding="utf-8"))
+    return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
+
+
+def fed_seed_library() -> dict:
+    """Emit the seeded agent-library (2 agents) for federation query parity.
+
+    Each manifest is validated against the live L5 schema before it lands, so a
+    malformed seed can never be committed. Written as LF yaml so the bytes are
+    identical on every OS (the TS mirror loads the same files for its query
+    parity tests).
+    """
+    validator = _l5_validator()
+    agents_dir = CONFORMANCE / "fed_seed_library" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for fname, manifest in _SEED_MANIFESTS.items():
+        if not validator.is_valid(manifest):
+            errs = sorted(e.message for e in validator.iter_errors(manifest))
+            raise SystemExit(f"REFUSING TO EMIT: seed {fname} does not validate: {errs}")
+        text = yaml.safe_dump(manifest, sort_keys=False, default_flow_style=False)
+        _write_text_lf(agents_dir / fname, text)
+        written.append(f"fed_seed_library/agents/{fname}")
+    return {"__multifile__": True, "files": written}
+
+
+# ---------------------------------------------------------------------------
+# tier_matrix  (D4 enforcement: tool x trust-tier x granted -> allow|deny)
+# ---------------------------------------------------------------------------
+# Oracle = the REAL create_l6_server enforcement closures. We stand up the live
+# FastMCP server over a temp copy of fed_seed_library with the real
+# FederationRegistry (a quarantined `openclaw` granted ONLY `claude-code`) and a
+# real FederationAudit, then invoke every tool fn under each caller identity --
+# exactly as tests/test_federation_tiers.py does -- and record the resulting
+# decision plus the verbatim structured-denial dict. Nothing here re-implements
+# the policy: the allow/deny call and the denial shape are whatever the server
+# actually returns.
+#
+# trusted  = the default OPERATOR identity (stdio / legacy peer = v0.8.0 behavior)
+# quarantined = AgentIdentity(openclaw, grants=(claude-code,))
+#
+# `granted`: True/False for namespace-scoped tools (query_agent_memory,
+# list_recent_work with an explicit agent, commit_to_federation namespace),
+# None for the non-namespace-scoped tools (the aggregates that deny wholesale,
+# and the filtered reads that allow-then-filter).
+
+# (tool, kwargs, namespace, granted) -- the quarantined caller's surface.
+_QUARANTINED_CASES: list[tuple[str, dict, str | None, bool | None]] = [
+    ("query_agent_memory", {"agent": "claude-code", "topic": "Bourdon"}, "claude-code", True),
+    ("query_agent_memory", {"agent": "codex", "topic": "Bourdon"}, "codex", False),
+    ("list_recent_work", {"since": "2026-06-01"}, None, None),
+    ("list_recent_work", {"since": "2026-06-01", "agent": "claude-code"}, "claude-code", True),
+    ("list_recent_work", {"since": "2026-06-01", "agent": "codex"}, "codex", False),
+    ("find_entity", {"name": "Bourdon"}, None, None),
+    ("find_entity", {"name": "SecretProj"}, None, None),
+    ("list_agents", {}, None, None),
+    ("export_agents", {}, None, None),
+    ("commit_to_federation",
+     {"agent_id": "openclaw", "agent_type": "other",
+      "entities": [{"name": "ClawFinding", "type": "topic", "summary": "from openclaw"}],
+      "sessions": [{"date": "2026-06-09"}]},
+     "openclaw", True),
+    ("commit_to_federation",
+     {"agent_id": "claude-code", "agent_type": "code-assistant",
+      "entities": [{"name": "Poisoned", "summary": "injected"}]},
+     "claude-code", False),
+    ("get_cross_agent_summary", {"project": "Bourdon"}, None, None),
+    ("prepare_recognition_context", {"prompt": "what about Bourdon"}, None, None),
+    ("get_deeper_context", {"prompt": "what about Bourdon"}, None, None),
+    ("compile_codex_turn", {"prompt": "what about Bourdon"}, None, None),
+]
+
+# (tool, kwargs, namespace, granted) -- the trusted operator's surface (all allow).
+_TRUSTED_CASES: list[tuple[str, dict, str | None, bool | None]] = [
+    ("query_agent_memory", {"agent": "claude-code", "topic": "Bourdon"}, "claude-code", None),
+    ("query_agent_memory", {"agent": "codex", "topic": "Bourdon"}, "codex", None),
+    ("list_recent_work", {"since": "2026-06-01"}, None, None),
+    ("list_recent_work", {"since": "2026-06-01", "agent": "codex"}, "codex", None),
+    ("find_entity", {"name": "Bourdon"}, None, None),
+    ("list_agents", {}, None, None),
+    ("export_agents", {}, None, None),
+    ("commit_to_federation",
+     {"agent_id": "clyde", "agent_type": "other",
+      "entities": [{"name": "TrustedThing", "summary": "ok"}]},
+     "clyde", None),
+    ("get_cross_agent_summary", {"project": "Bourdon"}, None, None),
+    ("prepare_recognition_context", {"prompt": "what about Bourdon"}, None, None),
+    ("get_deeper_context", {"prompt": "what about Bourdon"}, None, None),
+    ("compile_codex_turn", {"prompt": "what about Bourdon"}, None, None),
+]
+
+
+def _invoke_tool(server, name: str, identity, kwargs: dict):
+    """Call one MCP tool fn under an optional caller identity (mirrors the test)."""
+    import asyncio
+
+    from core.federation_registry import reset_caller, set_caller
+
+    async def _inner():
+        tool = await server.get_tool(name)
+        res = tool.fn(**kwargs)
+        if asyncio.iscoroutine(res):
+            res = await res
+        return res
+
+    ctx = set_caller(identity) if identity is not None else None
+    try:
+        return asyncio.run(_inner())
+    finally:
+        if ctx is not None:
+            reset_caller(ctx)
+
+
+def _classify(result: Any) -> tuple[str, dict | None]:
+    if isinstance(result, dict) and result.get("error") == "access denied":
+        return "deny", result
+    return "allow", None
+
+
 def tier_matrix() -> dict:
-    # TODO(P5): extract the D4 quarantined allowlist from tests/test_federation_*.py
-    # (tool x tier x granted -> allow|deny + structured-denial shape).
-    raise NotImplementedError("tier_matrix: wire in Phase 5")
+    """Drive the real D4 enforcement and pin tool x tier x granted -> allow|deny.
+
+    The denial dict is captured verbatim so the TS mirror reproduces the exact
+    structured-denial envelope (error/op/agent/tier/detail, plus the empty
+    sessions page list_recent_work folds in). Run against a TEMP copy of the
+    seed so the quarantined staged write never pollutes the committed library.
+    """
+    import shutil
+    import tempfile
+
+    from core.federation_audit import FederationAudit
+    from core.federation_registry import AgentIdentity, FederationRegistry
+    from core.l6_store import L6Store
+
+    try:
+        from core.l6_server import create_l6_server
+    except ImportError as exc:  # pragma: no cover -- needs the [server] extra
+        raise SystemExit(
+            "tier_matrix needs fastmcp (pip install 'bourdon[server]') to drive the "
+            f"real L6 enforcement: {exc}"
+        ) from exc
+
+    quarantined = AgentIdentity(
+        agent_id="openclaw", tier="quarantined", grants=("claude-code",)
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        lib = Path(td) / "lib"
+        agents = lib / "agents"
+        agents.mkdir(parents=True)
+        for fname, manifest in _SEED_MANIFESTS.items():
+            _write_text_lf(
+                agents / fname,
+                yaml.safe_dump(manifest, sort_keys=False, default_flow_style=False),
+            )
+        registry = FederationRegistry(Path(td) / "federation.yaml")
+        registry.add_agent("openclaw", tier="quarantined", grants=["claude-code"])
+        audit = FederationAudit(Path(td) / "audit.jsonl")
+        store = L6Store(lib)
+        server = create_l6_server(store, registry=registry, audit=audit)
+
+        cases: list[dict] = []
+        for tier, identity, raw_cases in (
+            ("trusted", None, _TRUSTED_CASES),
+            ("quarantined", quarantined, _QUARANTINED_CASES),
+        ):
+            for tool, kwargs, namespace, granted in raw_cases:
+                result = _invoke_tool(server, tool, identity, dict(kwargs))
+                decision, denial = _classify(result)
+                # Self-check: a quarantined ungranted/aggregate call MUST deny;
+                # a trusted call must NEVER deny. A regression in the enforcement
+                # can therefore never be committed as a green fixture.
+                if tier == "trusted" and decision != "allow":
+                    raise SystemExit(
+                        f"REFUSING TO EMIT: trusted {tool} unexpectedly denied"
+                    )
+                if tier == "quarantined" and granted is False and decision != "deny":
+                    raise SystemExit(
+                        f"REFUSING TO EMIT: quarantined ungranted {tool} did not deny"
+                    )
+                cases.append(
+                    {
+                        "tool": tool,
+                        "tier": tier,
+                        "namespace": namespace,
+                        "granted": granted,
+                        "args": kwargs,
+                        "decision": decision,
+                        "denial": denial,
+                    }
+                )
+
+        # Cross-cut the seed in -- restore the committed copy if the staged write
+        # touched the temp tree (defensive; the temp dir is discarded anyway).
+        shutil.rmtree(lib, ignore_errors=True)
+
+    return {
+        "_doc": "Cross-impl D4 trust-tier enforcement. Oracle = the live "
+                "create_l6_server closures, driven over a temp copy of "
+                "fed_seed_library with a quarantined `openclaw` granted ONLY "
+                "`claude-code`. Each case pins the allow|deny decision the server "
+                "actually returned and, on deny, the VERBATIM structured-denial "
+                "dict. `granted` is True/False for namespace-scoped tools, null "
+                "otherwise. `denial.detail` is deterministic prose (embeds the "
+                "synthetic caller id / namespace); the load-bearing invariant is "
+                "decision + the denial KEY SET. trusted=OPERATOR (stdio / legacy "
+                "peer); list_recent_work denials also fold in an empty "
+                "sessions/next_cursor/has_more page.",
+        "denial_shape": {
+            "keys": ["error", "op", "agent", "tier", "detail"],
+            "error_value": "access denied",
+            "note": "list_recent_work denials additionally carry "
+                    "sessions=[], next_cursor=null, has_more=false.",
+        },
+        "seed_library": "fed_seed_library",
+        "caller": {
+            "trusted": {"agent_id": "operator", "tier": "trusted"},
+            "quarantined": {
+                "agent_id": "openclaw",
+                "tier": "quarantined",
+                "grants": ["claude-code"],
+            },
+        },
+        "cases": cases,
+    }
+
+
+# ---------------------------------------------------------------------------
+# federation_on_disk  (Python-WRITTEN registry + audit log the TS side parses)
+# ---------------------------------------------------------------------------
+# These are on-disk artifacts the TS mirror must parse byte/structure-identically:
+#   on_disk/federation.yaml  -- the registry, written through the REAL
+#                               FederationRegistry serialization (sha256-only
+#                               rows, sorted keys) for SYNTHETIC bdn_ tokens with
+#                               frozen timestamps. A trusted member, a quarantined
+#                               member (granted one namespace), and a revoked one.
+#   on_disk/audit.jsonl      -- produced by the REAL FederationAudit.record (so
+#                               the JSONL record shape is the oracle's), then the
+#                               runtime `ts` is frozen for an idempotent fixture.
+#   on_disk/auth_vectors.json -- synthetic tokens (fragment arrays, joined at
+#                               load) + the oracle-computed authenticate() result
+#                               against federation.yaml (round-trip parity).
+#
+# Synthetic tokens are stored as fragment arrays (harness rule #3) so no
+# contiguous bdn_ literal lands in a committed file. Only their sha256 reaches
+# federation.yaml; the plaintext lives nowhere on disk.
+
+# (name, agent_id, token_fragments, tier, grants, revoked)
+_REGISTRY_MEMBERS: list[tuple[str, str, list[str], str, list[str], bool]] = [
+    ("trusted_member", "claude-code", ["bdn_", "a" * 48], "trusted", [], False),
+    ("quarantined_member", "openclaw", ["bdn_", "b" * 48], "quarantined", ["claude-code"], False),
+    ("revoked_member", "retired", ["bdn_", "c" * 48], "trusted", [], True),
+]
+
+_FROZEN_CREATED = "2026-06-29T00:00:00Z"
+_FROZEN_REVOKED = "2026-06-29T00:05:00Z"
+
+# Audit records to emit -- (agent, op, namespace, decision, detail). Run through
+# the REAL record() so the line shape is the oracle's; ts is frozen afterward.
+_AUDIT_RECORDS: list[tuple[str, str, str, str, str | None]] = [
+    ("openclaw", "find_entity", "claude-code", "allow", None),
+    ("openclaw", "query_agent_memory", "codex", "deny", "namespace 'codex' not granted"),
+    ("openclaw", "commit_to_federation", "openclaw", "allow", "staged"),
+    ("operator", "list_agents", "*", "allow", None),
+    ("openclaw", "get_cross_agent_summary", "*", "deny",
+     "tier 'quarantined' may not call this tool"),
+]
+
+
+def federation_on_disk() -> dict:
+    """Emit the on-disk registry + audit log + auth round-trip vectors."""
+    import re as _re
+    import tempfile
+
+    from core import federation_registry as fr
+    from core.federation_audit import FederationAudit
+
+    base = CONFORMANCE / "on_disk"
+    base.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    tokens = {name: "".join(frags) for name, _aid, frags, *_ in _REGISTRY_MEMBERS}
+
+    # -- 1. federation.yaml through the real registry serialization -------------
+    with tempfile.TemporaryDirectory() as td:
+        reg_path = Path(td) / "federation.yaml"
+        reg = fr.FederationRegistry(reg_path)
+        rows: dict[str, dict] = {}
+        for name, agent_id, _frags, tier, grants, revoked in _REGISTRY_MEMBERS:
+            row: dict[str, Any] = {
+                "tier": tier,
+                "token_sha256": fr._hash_token(tokens[name]),
+                "created_at": _FROZEN_CREATED,
+                "revoked": revoked,
+                "grants": list(grants),
+            }
+            if revoked:
+                row["revoked_at"] = _FROZEN_REVOKED
+            rows[agent_id] = row
+        reg._agents = rows
+        reg._save()  # the REAL serialization (sorted keys, version envelope)
+        yaml_text = reg_path.read_text(encoding="utf-8")
+
+        # Self-check + oracle-compute the auth vectors via the REAL authenticate.
+        rt = fr.FederationRegistry(reg_path)
+        vectors: list[dict] = []
+        for name, _agent_id, frags, _tier, _grants, _revoked in _REGISTRY_MEMBERS:
+            ident = rt.authenticate(tokens[name])
+            vectors.append(
+                {
+                    "name": name,
+                    "token_fragments": frags,
+                    "expect": None
+                    if ident is None
+                    else {
+                        "agent_id": ident.agent_id,
+                        "tier": ident.tier,
+                        "grants": list(ident.grants),
+                    },
+                }
+            )
+        # Negative vectors -- never authenticate.
+        for neg_name, neg_frags in (
+            ("unknown_token", ["bdn_", "f" * 48]),
+            ("empty_token", [""]),
+        ):
+            assert rt.authenticate("".join(neg_frags)) is None
+            vectors.append({"name": neg_name, "token_fragments": neg_frags, "expect": None})
+
+        # Oracle invariants the TS parser must reproduce.
+        if rt.authenticate(tokens["revoked_member"]) is not None:
+            raise SystemExit("REFUSING TO EMIT: revoked member still authenticates")
+        if rt.authenticate(tokens["trusted_member"]).tier != "trusted":
+            raise SystemExit("REFUSING TO EMIT: trusted member did not resolve trusted")
+
+    _write_text_lf(base / "federation.yaml", yaml_text)
+    written.append("on_disk/federation.yaml")
+
+    # No synthetic token plaintext may leak into the registry file.
+    fed_text = (base / "federation.yaml").read_text(encoding="utf-8")
+    for tok in tokens.values():
+        if tok in fed_text:
+            raise SystemExit("REFUSING TO EMIT: token plaintext leaked into federation.yaml")
+
+    # -- 2. audit.jsonl through the real record(), then freeze ts ---------------
+    with tempfile.TemporaryDirectory() as td:
+        audit_path = Path(td) / "audit.jsonl"
+        audit = FederationAudit(audit_path)
+        for agent, op, namespace, decision, detail in _AUDIT_RECORDS:
+            audit.record(agent, op, namespace, decision, detail)
+        raw_lines = [
+            ln for ln in audit_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+
+    ts_re = _re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+    frozen_lines: list[str] = []
+    for i, ln in enumerate(raw_lines):
+        entry = json.loads(ln)
+        if not ts_re.match(entry["ts"]):
+            raise SystemExit(f"REFUSING TO EMIT: audit ts not in expected format: {entry['ts']!r}")
+        # Freeze the runtime timestamp; key order (ts,agent,op,namespace,decision,
+        # [detail]) is preserved from the real record() emission.
+        entry["ts"] = f"2026-06-29T00:00:{i:02d}.000000Z"
+        frozen_lines.append(json.dumps(entry, ensure_ascii=False))
+    _write_text_lf(base / "audit.jsonl", "\n".join(frozen_lines) + "\n")
+    written.append("on_disk/audit.jsonl")
+
+    # -- 3. auth_vectors.json (round-trip parity for the registry parser) -------
+    _write_json(base / "auth_vectors.json", {
+        "_doc": "Synthetic bdn_ tokens (fragment arrays -- join at load, NEVER a "
+                "real secret) + the oracle authenticate() result against "
+                "on_disk/federation.yaml. Oracle: FederationRegistry.authenticate "
+                "(sha256 of the joined token, constant-time compare; revoked rows "
+                "and the empty token resolve to null). The TS parser must reproduce "
+                "each `expect`.",
+        "registry_file": "federation.yaml",
+        "vectors": vectors,
+    })
+    written.append("on_disk/auth_vectors.json")
+
+    return {"__multifile__": True, "files": written}
 
 
 def mcp_snapshots() -> dict:
@@ -919,6 +1436,10 @@ FAMILIES = {
     "leak_cases.json": ("leak_cases", leak_cases),
     "recognition_vectors": ("recognition_vectors", recognition_vectors),
     "l5_schema_and_manifests": ("l5_schema_and_manifests", l5_schema_and_manifests),
+    # L6 federation families (the cross-machine trust boundary).
+    "fed_seed_library": ("fed_seed_library", fed_seed_library),
+    "tier_matrix.json": ("tier_matrix", tier_matrix),
+    "federation_on_disk": ("federation_on_disk", federation_on_disk),
 }
 
 

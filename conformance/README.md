@@ -29,10 +29,20 @@ minor = new family, major = a changed expected-output = a reviewed behavior chan
 |------|--------|-------------------------|-------|
 | `redaction_battery.json` | redaction | `tests/test_redaction.py` SECRETS/BENIGN | ✅ wired |
 | `manifest.json` | index | (generated) | ✅ |
-| `recognition_vectors.json` | recognition | `test_recognition_{contract,parity}.py` | TODO P2 |
-| `l5_schema.json` + `l5_manifests/` | schema | `spec/L5_schema.json` | TODO P1 |
-| `tier_matrix.json` | trust | `test_federation_*.py` allowlist | TODO P5 |
+| `recognition_vectors.json` | recognition | `test_recognition_{contract,parity}.py` | ✅ wired |
+| `l5_schema.json` + `l5_manifests/` | schema | `spec/L5_schema.json` | ✅ wired |
+| `tier_matrix.json` | trust (D4) | `create_l6_server` enforcement over the seed | ✅ wired |
+| `fed_seed_library/agents/*.l5.yaml` | seed input | 2-agent library, public/team/private | ✅ wired |
+| `on_disk/federation.yaml` + `audit.jsonl` + `auth_vectors.json` | on-disk trust state | real `FederationRegistry` + `FederationAudit` | ✅ wired |
 | `mcp_snapshots/` | wire | Python L6 server over a seed library | TODO P5/P6 |
+
+The L6 **federation** families are the cross-machine trust boundary. `tier_matrix.json` drives
+the live `create_l6_server` enforcement (a quarantined `openclaw` granted only `claude-code`) and
+pins, per `tool x trust-tier x granted`, the allow/deny decision plus the verbatim structured-denial
+dict. `on_disk/` holds Python-written artifacts the TS side must parse identically: a registry with
+**sha256-only** rows for **synthetic** `bdn_` tokens (stored as fragment arrays in `auth_vectors.json`,
+never a contiguous literal), and an append-only audit log produced by the real `record()` with frozen
+timestamps. Both pytest (`tests/test_federation_conformance.py`) and the TS vitest suite assert these.
 
 Token-shaped secrets are stored as **fragment arrays** joined at load time, so no
 contiguous secret literal ever lands in git (GitHub push-protection scans literals).
