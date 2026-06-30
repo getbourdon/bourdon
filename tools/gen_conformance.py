@@ -1778,8 +1778,15 @@ def _seed_hermes_state_db(db_path: Path) -> None:
     """
     import sqlite3
 
-    # Idempotency: a stale file (or its sidecars) would break CREATE TABLE / drift
-    # the bytes. Start from a clean slate every run.
+    # The SQLite file header embeds the library version, so a regenerated DB
+    # differs byte-for-byte across SQLite versions/platforms (the CI Linux runner
+    # vs a dev box) even with a fixed schema. Treat the committed state.db as a
+    # STATIC seed INPUT: reuse it if present (the reader re-runs against it, so
+    # expected_l5.json stays deterministic; a Windows-written DB reads fine on
+    # Linux). Delete the committed file to force a reseed.
+    if db_path.exists():
+        return
+    # First-time seed: clean any stale sidecars, then create deterministically.
     for suffix in ("", "-wal", "-shm", "-journal"):
         p = db_path.with_name(db_path.name + suffix) if suffix else db_path
         p.unlink(missing_ok=True)
