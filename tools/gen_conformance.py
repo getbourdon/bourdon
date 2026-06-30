@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,13 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.4.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.5.0"  # bump on any fixture change (see manifest.json doc)
+# 1.5.0: + the mcp_snapshots family (the JSON-in-TextContent wire contract): the
+#        live create_l6_server tool closures driven in-process over a temp copy of
+#        fed_seed_library, with each of the 10 tools' req/res snapshotted through a
+#        codified NORMALIZER (key-sort, float-round, null/empty-list drop, freeze
+#        last_updated/generated_at/generated_from/path, drop latency, decode base64
+#        cursors). compile_codex_turn is the deferred P7 stub (env-bound brief).
 # 1.4.0: + the L6 FEDERATION families (the cross-machine trust boundary):
 #        tier_matrix (D4 tool x trust-tier x granted -> allow|deny + structured
 #        denial, oracle-driven through the real create_l6_server enforcement),
@@ -1421,11 +1428,273 @@ def federation_on_disk() -> dict:
     return {"__multifile__": True, "files": written}
 
 
+# ---------------------------------------------------------------------------
+# mcp_snapshots  (the JSON-in-TextContent wire contract for all 10 L6 tools)
+# ---------------------------------------------------------------------------
+# Oracle = the REAL create_l6_server tool closures, driven IN-PROCESS over a temp
+# copy of fed_seed_library (reused -- the snapshots and tier_matrix share one
+# corpus). Each tool returns a plain dict that fastmcp serializes onto the wire as
+# a single TextContent whose `.text` is `json.dumps(payload)`; RemoteL6Client does
+# `json.loads(item.text)` to recover it. We snapshot that recovered payload, run
+# through the NORMALIZER below so a second implementation can match value-for-value
+# without tripping on key order, float jitter, to_dict() omission, opaque cursors,
+# or runtime-stamped timestamps/latencies/paths.
+#
+# NORMALIZER (codified here, fixture-tested via _normalizer.json):
+#   1. recursively SORT object keys (arrays keep their order -- sessions/matches/
+#      agents order IS contract); emitted via sort_keys=True at write time.
+#   2. ROUND floats to 4 dp (recognition confidence / brief scores).
+#   3. DROP null and empty-list dict fields (matches the dataclass to_dict()
+#      omission rule the TS port reproduces).
+#   4. FREEZE non-deterministic fields (applied last, by field name):
+#      last_updated / generated_at / generated_from / path -> "<frozen>".
+#   5. DROP latency fields (runtime-dependent): recognition_latency_us /
+#      peer_latencies_us -- asserted "present and numeric" by the live run, never
+#      pinned by value.
+#   6. base64 CURSORS compared by DECODED payload: next_cursor -> {"offset": N}
+#      via the real _decode_cursor, so the opaque token's encoding can differ
+#      across impls as long as the position matches.
+#
+# compile_codex_turn is snapshotted as its DEFERRED structured stub: the live turn
+# compiler's brief is environment-bound (resolves the real cwd, git repo name +
+# remote, and repo-identity scoring) and is therefore not a portable parity
+# fixture until the TS turn compiler lands (P7). The req is still pinned so the
+# tool surface + arg defaults stay covered.
+
+_SNAPSHOT_DROP_LATENCY = {"recognition_latency_us", "peer_latencies_us"}
+_SNAPSHOT_FREEZE_FIELDS = {"last_updated", "generated_at", "generated_from", "path"}
+_SNAPSHOT_CURSOR_FIELDS = {"next_cursor"}
+_SNAPSHOT_FROZEN = "<frozen>"
+
+
+def normalize_snapshot(value: Any, field_name: str | None = None) -> Any:
+    """Canonicalize one MCP payload for cross-impl comparison (see the policy above).
+
+    Returns a JSON-ready structure with object keys sorted at write time (via
+    sort_keys=True), floats rounded, null/empty-list fields dropped, the freeze
+    fields stamped, latency fields removed, and base64 cursors decoded to
+    ``{"offset": N}``. Applied identically on both sides before compare.
+    """
+    from core.l6_store import _decode_cursor
+
+    # Field-name-keyed transforms first (freeze last per the policy, but freeze and
+    # cursor are mutually exclusive field sets so the order between them is moot).
+    if field_name in _SNAPSHOT_CURSOR_FIELDS and isinstance(value, str) and value:
+        return {"offset": _decode_cursor(value)}
+    if field_name in _SNAPSHOT_FREEZE_FIELDS and value is not None:
+        return _SNAPSHOT_FROZEN
+
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, raw in value.items():
+            if key in _SNAPSHOT_DROP_LATENCY:
+                continue  # latency: runtime-dependent, dropped wholesale
+            norm = normalize_snapshot(raw, key)
+            if norm is None:
+                continue  # drop null (to_dict omission)
+            if isinstance(norm, list) and not norm:
+                continue  # drop empty list (to_dict omission)
+            out[key] = norm
+        return out
+    if isinstance(value, list):
+        return [normalize_snapshot(item) for item in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return round(value, 4)
+    return value
+
+
+# Each tuple drives one tool: (tool, kwargs). Registration order in create_l6_server.
+# Args are fixed and chosen to exercise the contract: team access so team rows show,
+# a since window that spans the seed (the default 14-day window would exclude the
+# 2026-06 seed sessions), and limit=2 on list_recent_work so a real next_cursor is
+# produced (cursor-decode parity). commit_to_federation is a WRITE -- driven over the
+# temp seed copy so it never mutates the committed library.
+_SNAPSHOT_CASES: list[tuple[str, dict]] = [
+    ("query_agent_memory",
+     {"agent": "claude-code", "topic": "Bourdon", "access_level": "team"}),
+    ("list_recent_work",
+     {"since": "2026-06-01", "access_level": "team", "limit": 2}),
+    ("find_entity", {"name": "Bourdon", "access_level": "team"}),
+    ("list_agents", {}),
+    ("export_agents", {}),
+    ("commit_to_federation",
+     {"agent_id": "clyde", "agent_type": "other",
+      "entities": [{"name": "SnapshotEntity", "summary": "mcp snapshot probe"}],
+      "sessions": [{"date": "2026-06-09"}],
+      "mode": "merge"}),
+    ("get_cross_agent_summary", {"project": "Bourdon", "access_level": "team"}),
+    ("prepare_recognition_context",
+     {"prompt": "what about Bourdon", "access_level": "team"}),
+    ("compile_codex_turn",
+     {"prompt": "Bourdon recognition", "access_level": "team"}),
+    ("get_deeper_context",
+     {"prompt": "what about Bourdon", "access_level": "team"}),
+]
+
+# compile_codex_turn's portable stand-in (see note above). The TS mirror reproduces
+# THIS, not the env-bound brief, until the P7 turn compiler is ported.
+_COMPILE_CODEX_TURN_DEFERRED = {
+    "_status": "deferred",
+    "schema_version": "codex-turn-brief/v1",
+    "reason": (
+        "compile_codex_turn output is environment-bound (resolves the live cwd, "
+        "git repo name + remote, and repo-identity scoring) and is not a portable "
+        "cross-impl parity fixture until the TS turn compiler lands (P7). The req "
+        "pins the tool surface + arg defaults; the res is this deferred stub."
+    ),
+}
+
+# {raw, normalized} pairs that PIN the normalizer rules themselves (oracle-computed
+# by normalize_snapshot below) so the TS port's canonicalizer is fixture-tested too.
+_NORMALIZER_RAW_CASES: list[dict] = [
+    {"_doc": "drops null + empty-list fields (to_dict omission parity)",
+     "raw": {"agent": None, "files_touched": [], "kept": "x", "zero": 0}},
+    {"_doc": "rounds floats to 4 dp; bools are untouched",
+     "raw": {"score": 71.66666666, "ok": True, "ratio": 0.1234567}},
+    {"_doc": "freezes last_updated / path / generated_from / generated_at",
+     "raw": {"last_updated": "2026-06-30T02:59:09.096243+00:00",
+             "path": "/tmp/x/clyde.l5.yaml",
+             "generated_from": "/tmp/x/agents",
+             "generated_at": "2026-06-30T02:59:09Z"}},
+    {"_doc": "drops latency fields wholesale (runtime-dependent)",
+     "raw": {"recognition_latency_us": 140.5, "peer_latencies_us": {"mac": 9.1},
+             "confidence": "medium"}},
+    {"_doc": "decodes a base64 next_cursor to its {offset} payload; null cursor drops",
+     "raw": {"next_cursor": "eyJvZmZzZXQiOjJ9", "has_more": True}},
+    {"_doc": "null next_cursor (last page) is dropped like any other null",
+     "raw": {"next_cursor": None, "has_more": False}},
+    {"_doc": "nested arrays keep their order; nested null/empty dropped per-field",
+     "raw": {"sessions": [{"agent": "codex", "cwd": None, "project_focus": ["A"],
+                           "files_touched": []},
+                          {"agent": "claude-code", "project_focus": ["B"]}]}},
+]
+
+
 def mcp_snapshots() -> dict:
-    # TODO(P5/P6): drive the Python L6 server in-process over a seed library;
-    # snapshot req/res for all 10 tools through the NORMALIZER (key-sort, float
-    # round, null->absent, frozen timestamps) -- codify the normalizer first.
-    raise NotImplementedError("mcp_snapshots: wire in Phase 5/6")
+    """Snapshot each of the 10 L6 MCP tools' normalized req/res over the seed.
+
+    Multi-file producer. Drives the live ``create_l6_server`` closures in-process
+    (OPERATOR / trusted, matching stdio) over a TEMP copy of ``fed_seed_library``,
+    normalizes every response, and writes ``mcp_snapshots/<tool>.{req,res}.json``
+    plus a ``seed_library`` pointer and the normalizer self-test. Returns the
+    marker listing every file so ``main`` stamps each in manifest.json.
+    """
+    import shutil
+    import tempfile
+
+    from core.l6_store import L6Store
+
+    try:
+        from core.l6_server import create_l6_server
+    except ImportError as exc:  # pragma: no cover -- needs the [server] extra
+        raise SystemExit(
+            "mcp_snapshots needs fastmcp (pip install 'bourdon[server]') to drive "
+            f"the real L6 tool surface: {exc}"
+        ) from exc
+
+    snap_dir = CONFORMANCE / "mcp_snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    # Deterministic machine label so export_agents.machine is stable across hosts.
+    prior_local_name = os.environ.get("BOURDON_LOCAL_NAME")
+    os.environ["BOURDON_LOCAL_NAME"] = "conformance-host"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "lib"
+            agents = lib / "agents"
+            agents.mkdir(parents=True)
+            for fname, manifest in _SEED_MANIFESTS.items():
+                _write_text_lf(
+                    agents / fname,
+                    yaml.safe_dump(manifest, sort_keys=False, default_flow_style=False),
+                )
+            store = L6Store(lib)
+            server = create_l6_server(store)
+
+            for tool, kwargs in _SNAPSHOT_CASES:
+                req = {"tool": tool, "args": kwargs}
+                if tool == "compile_codex_turn":
+                    res = _COMPILE_CODEX_TURN_DEFERRED
+                else:
+                    raw = _invoke_tool(server, tool, None, dict(kwargs))
+                    # Round-trip through the wire encoding (json.dumps in TextContent
+                    # -> json.loads) exactly as RemoteL6Client recovers it, so the
+                    # snapshot is the post-serialization payload, never a live object.
+                    raw = json.loads(json.dumps(raw, ensure_ascii=False))
+                    # Latency fields must be present + numeric before we drop them.
+                    if tool == "prepare_recognition_context":
+                        lat = raw.get("recognition_latency_us")
+                        if not isinstance(lat, (int, float)):
+                            raise SystemExit(
+                                "REFUSING TO EMIT: prepare_recognition_context lost "
+                                "its numeric recognition_latency_us latency field"
+                            )
+                    # commit_to_federation must have actually written (not errored).
+                    if tool == "commit_to_federation" and raw.get("error"):
+                        raise SystemExit(
+                            f"REFUSING TO EMIT: commit_to_federation errored: {raw['error']!r}"
+                        )
+                    res = normalize_snapshot(raw)
+
+                req_rel = f"mcp_snapshots/{tool}.req.json"
+                res_rel = f"mcp_snapshots/{tool}.res.json"
+                _write_snapshot_json(snap_dir / f"{tool}.req.json", req)
+                _write_snapshot_json(snap_dir / f"{tool}.res.json", res)
+                written.extend([req_rel, res_rel])
+
+            shutil.rmtree(lib, ignore_errors=True)
+    finally:
+        if prior_local_name is None:
+            os.environ.pop("BOURDON_LOCAL_NAME", None)
+        else:
+            os.environ["BOURDON_LOCAL_NAME"] = prior_local_name
+
+    # seed_library pointer -- the snapshots reuse the committed fed_seed_library
+    # corpus verbatim (one seed for both federation families).
+    _write_snapshot_json(snap_dir / "seed_library.json", {
+        "_doc": "The 10 mcp_snapshots/*.res.json were produced by driving the live "
+                "create_l6_server tool closures (OPERATOR / trusted, = stdio) over a "
+                "TEMP copy of this seed library, then normalizing each response. The "
+                "TS mirror loads the SAME seed and must reproduce every normalized "
+                "res. Each tool's payload travels the wire as a single TextContent "
+                "whose .text = json.dumps(payload); the snapshot is the json.loads "
+                "of that text.",
+        "seed_library": "fed_seed_library",
+        "transport": "in-process (create_l6_server tool closures); wire-equivalent "
+                     "to stdio / streamable-HTTP JSON-in-TextContent",
+        "caller": {"agent_id": "operator", "tier": "trusted"},
+        "tools": [tool for tool, _ in _SNAPSHOT_CASES],
+        "deferred": ["compile_codex_turn"],
+    })
+    written.append("mcp_snapshots/seed_library.json")
+
+    # Normalizer self-test -- {raw, normalized} pairs, normalized BY the oracle.
+    normalizer_cases = [
+        {"_doc": case["_doc"], "raw": case["raw"],
+         "normalized": normalize_snapshot(case["raw"])}
+        for case in _NORMALIZER_RAW_CASES
+    ]
+    _write_snapshot_json(snap_dir / "_normalizer.json", {
+        "_doc": "Fixture-tests the MCP snapshot NORMALIZER itself. Each `normalized` "
+                "is normalize_snapshot(`raw`) computed by the oracle. Rules: sort "
+                "object keys (write-time), round floats to 4 dp, drop null + "
+                "empty-list dict fields, freeze {last_updated, generated_at, "
+                "generated_from, path} -> '<frozen>', drop latency fields "
+                "{recognition_latency_us, peer_latencies_us}, decode next_cursor "
+                "base64 -> {offset:N}. The TS canonicalizer must match each pair.",
+        "frozen_sentinel": _SNAPSHOT_FROZEN,
+        "freeze_fields": sorted(_SNAPSHOT_FREEZE_FIELDS),
+        "drop_latency_fields": sorted(_SNAPSHOT_DROP_LATENCY),
+        "cursor_fields": sorted(_SNAPSHOT_CURSOR_FIELDS),
+        "float_precision": 4,
+        "cases": normalizer_cases,
+    })
+    written.append("mcp_snapshots/_normalizer.json")
+
+    return {"__multifile__": True, "files": written}
 
 
 # The active families (stubs excluded until wired). Single-file producers
@@ -1440,6 +1709,7 @@ FAMILIES = {
     "fed_seed_library": ("fed_seed_library", fed_seed_library),
     "tier_matrix.json": ("tier_matrix", tier_matrix),
     "federation_on_disk": ("federation_on_disk", federation_on_disk),
+    "mcp_snapshots": ("mcp_snapshots", mcp_snapshots),
 }
 
 
@@ -1454,6 +1724,20 @@ def _write_json(path: Path, payload: dict) -> None:
     # sha would mismatch across platforms.
     path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _write_snapshot_json(path: Path, payload: Any) -> None:
+    """Write an MCP snapshot with SORTED object keys (the normalizer's rule #1).
+
+    Same LF-deterministic bytes as _write_json, but sort_keys=True so the object
+    key order is canonical and a second implementation compares structure, not
+    insertion order. Arrays keep their order (that order is contract).
+    """
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
         newline="\n",
     )
