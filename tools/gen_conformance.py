@@ -38,11 +38,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 # The oracle. Import the real implementation -- never reimplement here.
+import jsonschema  # noqa: E402
+from jsonschema import Draft202012Validator  # noqa: E402
+
 from core.redaction import REDACTED, contains_secret, redact_text  # noqa: E402
+from participants.base import (  # noqa: E402
+    AgentInfo,
+    Entity,
+    L5Manifest,
+    Session,
+    Visibility,
+    VisibilityPolicy,
+)
 
 CONFORMANCE = REPO_ROOT / "conformance"
+SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.0.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.1.0"  # bump on any fixture change (see manifest.json doc)
 BOURDON_VERSION = "0.11.0"     # the oracle version these fixtures were produced against
 
 
@@ -132,10 +144,366 @@ def recognition_vectors() -> dict:
     raise NotImplementedError("recognition_vectors: wire in Phase 2")
 
 
+# ---------------------------------------------------------------------------
+# l5_schema_and_manifests  (oracle: spec/L5_schema.json + participants.base)
+# ---------------------------------------------------------------------------
+# Emits a multi-file tree under conformance/:
+#   l5_schema.json                         -- byte-identical copy of the spec schema
+#   l5_manifests/valid/*.json              -- manifests that MUST validate
+#   l5_manifests/invalid/*.json            -- manifests that MUST fail
+#   l5_manifests/invalid/reasons.json      -- {file: {keyword, instancePath}} (oracle-run)
+#   l5_todict.json                         -- L5Manifest.to_dict() parity cases
+#
+# Expectations are produced by RUNNING the oracle (jsonschema validation +
+# the live dataclass serializer), never hand-typed. The TS port asserts ajv
+# accept/reject + (keyword, instancePath) parity and toDict byte/shape parity.
+
+# Manifests that MUST validate (on-disk schema form).
+_VALID_MANIFESTS: dict[str, dict] = {
+    "minimal.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clyde", "type": "note-capture"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+    },
+    "full.json": {
+        "spec_version": "0.1",
+        "agent": {
+            "id": "claude-code",
+            "type": "code-assistant",
+            "instance": "pc-threadripper",
+            "spec_version_compat": ">=0.1",
+            "role_narrative": "Lead code-assistant. Organizes project code.",
+        },
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "capabilities": ["code-read", "code-write", "web-search"],
+        "recent_sessions": [
+            {
+                "date": "2026-06-28",
+                "cwd": "/c/Users/cumul/repos/bourdon",
+                "project_focus": ["bourdon"],
+                "key_actions": ["wired l5 conformance fixtures"],
+                "files_touched": ["tools/gen_conformance.py"],
+                "visibility": "public",
+            }
+        ],
+        "known_entities": [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "aliases": ["NeuroLayer", "Continuo"],
+                "summary": "Cross-agent memory federation.",
+                "last_touched": "2026-06-29",
+                "valid_from": "2026-01-01",
+                "tags": ["infra"],
+                "visibility": "public",
+            }
+        ],
+        "visibility_policy": {
+            "default": "public",
+            "private_tags": ["personal", "financial", "credential"],
+            "team_tags": ["team"],
+        },
+    },
+    "team-and-private.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clair", "type": "note-capture"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [
+            {
+                "name": "Quarterly Revenue",
+                "type": "concept",
+                "tags": ["financial"],
+                "summary": "Q2 numbers.",
+                "visibility": "private",
+            },
+            {"name": "Roadmap", "type": "concept", "tags": ["team"], "visibility": "team"},
+            {"name": "Public Blog", "type": "site", "visibility": "public"},
+        ],
+        "recent_sessions": [
+            {"date": "2026-06-27", "visibility": "private"},
+            {"date": "2026-06-28", "visibility": "team"},
+        ],
+        "visibility_policy": {
+            "default": "team",
+            "private_tags": ["financial"],
+            "team_tags": ["team"],
+        },
+    },
+}
+
+# Manifests that MUST fail -- each crafted to trip exactly ONE schema violation.
+_INVALID_MANIFESTS: dict[str, dict] = {
+    # required keyword at the document root (last_updated omitted)
+    "missing-required-last_updated.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clyde", "type": "note-capture"},
+    },
+    # spec_version pattern ^\d+\.\d+$ (three-part semver rejected)
+    "bad-spec-version-pattern.json": {
+        "spec_version": "0.1.0",
+        "agent": {"id": "clyde", "type": "note-capture"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+    },
+    # agent.type enum
+    "bad-agent-type-enum.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clyde", "type": "wizard"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+    },
+    # nested $ref Visibility enum on an entity
+    "entity-bad-visibility-enum.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clyde", "type": "note-capture"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [{"name": "X", "visibility": "secret"}],
+    },
+    # required keyword nested in an array item (entity.name omitted)
+    "entity-missing-name.json": {
+        "spec_version": "0.1",
+        "agent": {"id": "clyde", "type": "note-capture"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [{"type": "project"}],
+    },
+}
+
+
+def _json_pointer(parts) -> str:
+    """ajv-style instancePath (RFC 6901 JSON Pointer) from a jsonschema path deque."""
+    elems = list(parts)
+    if not elems:
+        return ""
+    return "/" + "/".join(str(p).replace("~", "~0").replace("/", "~1") for p in elems)
+
+
+def _vis(value):
+    return Visibility(value) if value is not None else None
+
+
+def _build_entity(d: dict) -> Entity:
+    d = dict(d)
+    if "visibility" in d:
+        d["visibility"] = _vis(d["visibility"])
+    return Entity(**d)
+
+
+def _build_session(d: dict) -> Session:
+    d = dict(d)
+    if "visibility" in d:
+        d["visibility"] = _vis(d["visibility"])
+    return Session(**d)
+
+
+def _build_policy(d):
+    if d is None:
+        return None
+    d = dict(d)
+    if "default" in d:
+        d["default"] = _vis(d["default"])
+    return VisibilityPolicy(**d)
+
+
+def _build_manifest(spec: dict) -> L5Manifest:
+    """Build an L5Manifest from a declarative spec (the same shape the TS port builds from)."""
+    return L5Manifest(
+        spec_version=spec["spec_version"],
+        agent=AgentInfo(**spec["agent"]),
+        last_updated=spec["last_updated"],
+        capabilities=spec.get("capabilities", []),
+        recent_sessions=[_build_session(s) for s in spec.get("recent_sessions", [])],
+        known_entities=[_build_entity(e) for e in spec.get("known_entities", [])],
+        visibility_policy=_build_policy(spec.get("visibility_policy")),
+    )
+
+
+# to_dict() parity cases. `input` is a declarative dataclass-spec the TS port
+# rebuilds objects from; `expected` is produced by the live Python serializer.
+# These pin the three change-detection rules: empty-list drop, None drop, and
+# Visibility enum -> lowercase value.
+_TODICT_SPECS: list[dict] = [
+    {
+        "name": "drops_empty_lists_and_none",
+        "spec": {
+            "spec_version": "0.1",
+            "agent": {"id": "clyde", "type": "note-capture", "instance": None},
+            "last_updated": "2026-06-29T12:00:00+00:00",
+            "capabilities": [],
+            "recent_sessions": [],
+            "known_entities": [],
+            "visibility_policy": None,
+        },
+    },
+    {
+        "name": "visibility_lowercased",
+        "spec": {
+            "spec_version": "0.1",
+            "agent": {"id": "clair", "type": "note-capture"},
+            "last_updated": "2026-06-29T12:00:00+00:00",
+            "recent_sessions": [{"date": "2026-06-28", "visibility": "team"}],
+            "known_entities": [{"name": "Secret", "visibility": "private"}],
+            "visibility_policy": {"default": "public"},
+        },
+    },
+    {
+        "name": "entity_empty_inner_lists_dropped",
+        "spec": {
+            "spec_version": "0.1",
+            "agent": {"id": "clyde", "type": "note-capture"},
+            "last_updated": "2026-06-29T12:00:00+00:00",
+            "known_entities": [
+                {
+                    "name": "Bourdon",
+                    "type": "project",
+                    "summary": "Federation layer.",
+                    "aliases": [],
+                    "tags": [],
+                }
+            ],
+        },
+    },
+    {
+        "name": "policy_default_injected",
+        "spec": {
+            "spec_version": "0.1",
+            "agent": {"id": "clyde", "type": "note-capture"},
+            "last_updated": "2026-06-29T12:00:00+00:00",
+            "visibility_policy": {},
+        },
+    },
+    {
+        "name": "full_key_order",
+        "spec": {
+            "spec_version": "0.1",
+            "agent": {
+                "id": "claude-code",
+                "type": "code-assistant",
+                "instance": "pc-threadripper",
+                "spec_version_compat": ">=0.1",
+                "role_narrative": "Lead code-assistant.",
+            },
+            "last_updated": "2026-06-29T12:00:00+00:00",
+            "capabilities": ["code-read", "code-write"],
+            "recent_sessions": [
+                {
+                    "date": "2026-06-28",
+                    "cwd": "/repo",
+                    "project_focus": ["bourdon"],
+                    "key_actions": ["ported l5"],
+                    "files_touched": ["a.py"],
+                    "visibility": "public",
+                }
+            ],
+            "known_entities": [
+                {
+                    "name": "Bourdon",
+                    "type": "project",
+                    "aliases": ["NeuroLayer"],
+                    "summary": "Federation.",
+                    "last_touched": "2026-06-29",
+                    "tags": ["infra"],
+                    "visibility": "team",
+                    "valid_from": "2026-01-01",
+                    "valid_to": "2026-12-31",
+                }
+            ],
+            "visibility_policy": {
+                "default": "public",
+                "private_tags": ["financial"],
+                "team_tags": ["team"],
+            },
+        },
+    },
+]
+
+
 def l5_schema_and_manifests() -> dict:
-    # TODO(P1): copy spec/L5_schema.json byte-identical; emit valid/ + invalid/
-    # manifests with expected ajv/jsonschema accept-reject + failing keyword/path.
-    raise NotImplementedError("l5_schema_and_manifests: wire in Phase 1")
+    """Emit the L5 schema + manifest validity corpus + to_dict() parity cases.
+
+    Multi-file producer: writes its own tree and returns a marker listing the
+    relative paths it wrote so ``main`` can stamp each in manifest.json.
+    """
+    schema = json.loads(SPEC_SCHEMA.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(
+        schema, format_checker=Draft202012Validator.FORMAT_CHECKER
+    )
+
+    written: list[str] = []
+
+    # 1. Byte-identical schema copy (raw bytes -- never re-serialized).
+    schema_out = CONFORMANCE / "l5_schema.json"
+    schema_out.write_bytes(SPEC_SCHEMA.read_bytes())
+    written.append("l5_schema.json")
+
+    # 2. Valid manifests -- assert each truly validates against the oracle schema.
+    valid_dir = CONFORMANCE / "l5_manifests" / "valid"
+    valid_dir.mkdir(parents=True, exist_ok=True)
+    for fname, instance in _VALID_MANIFESTS.items():
+        if not validator.is_valid(instance):
+            errs = sorted(e.message for e in validator.iter_errors(instance))
+            raise SystemExit(f"REFUSING TO EMIT: valid/{fname} does not validate: {errs}")
+        _write_json(valid_dir / fname, instance)
+        written.append(f"l5_manifests/valid/{fname}")
+
+    # 3. Invalid manifests -- assert each fails; capture (keyword, instancePath).
+    invalid_dir = CONFORMANCE / "l5_manifests" / "invalid"
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    reasons: dict[str, dict] = {}
+    for fname, instance in _INVALID_MANIFESTS.items():
+        if validator.is_valid(instance):
+            raise SystemExit(f"REFUSING TO EMIT: invalid/{fname} unexpectedly validated")
+        best = jsonschema.exceptions.best_match(validator.iter_errors(instance))
+        all_errs = sorted(
+            (
+                {
+                    "keyword": e.validator,
+                    "instancePath": _json_pointer(e.absolute_path),
+                    "message": e.message,
+                }
+                for e in validator.iter_errors(instance)
+            ),
+            key=lambda r: (r["instancePath"], str(r["keyword"])),
+        )
+        _write_json(invalid_dir / fname, instance)
+        written.append(f"l5_manifests/invalid/{fname}")
+        reasons[fname] = {
+            "valid": False,
+            "expected": {
+                "keyword": best.validator,
+                "instancePath": _json_pointer(best.absolute_path),
+            },
+            "errors": all_errs,
+        }
+    _write_json(invalid_dir / "reasons.json", {
+        "_doc": "Each invalid manifest's expected primary failure. `expected` "
+                "(keyword + ajv-style instancePath) is the cross-impl assertion; "
+                "`errors` lists every violation for debugging. Oracle: "
+                "jsonschema Draft202012Validator over spec/L5_schema.json.",
+        "reasons": reasons,
+    })
+    written.append("l5_manifests/invalid/reasons.json")
+
+    # 4. to_dict() parity cases -- expectations from the live serializer.
+    cases = []
+    for case in _TODICT_SPECS:
+        manifest = _build_manifest(case["spec"])
+        cases.append(
+            {
+                "name": case["name"],
+                "input": case["spec"],
+                "expected": manifest.to_dict(),
+            }
+        )
+    _write_json(CONFORMANCE / "l5_todict.json", {
+        "_doc": "L5Manifest.to_dict() parity. The TS port rebuilds objects from "
+                "`input` (declarative dataclass-spec: visibility as a lowercase "
+                "string, null=None, []=empty list) and asserts toDict()==`expected`. "
+                "Rules pinned: drop None fields, drop empty-list fields, Visibility "
+                "enum -> lowercase value, key order = dataclass field order, and "
+                "VisibilityPolicy.default always emitted (defaults to 'public').",
+        "cases": cases,
+    })
+    written.append("l5_todict.json")
+
+    return {"__multifile__": True, "files": written}
 
 
 def tier_matrix() -> dict:
@@ -151,9 +519,12 @@ def mcp_snapshots() -> dict:
     raise NotImplementedError("mcp_snapshots: wire in Phase 5/6")
 
 
-# The active families (stubs excluded until wired).
+# The active families (stubs excluded until wired). Single-file producers
+# return a payload dict; multi-file producers (l5) write their own tree and
+# return {"__multifile__": True, "files": [...]}.
 FAMILIES = {
     "redaction_battery.json": ("redaction_battery", redaction_battery),
+    "l5_schema_and_manifests": ("l5_schema_and_manifests", l5_schema_and_manifests),
 }
 
 
@@ -192,8 +563,22 @@ def main() -> int:
     CONFORMANCE.mkdir(exist_ok=True)
     fixtures_meta = []
     for filename, (producer_name, fn) in FAMILIES.items():
+        result = fn()
+        if isinstance(result, dict) and result.get("__multifile__"):
+            # Producer already wrote its own tree; stamp each emitted file.
+            for rel in result["files"]:
+                out = CONFORMANCE / rel
+                fixtures_meta.append(
+                    {
+                        "path": rel,
+                        "sha256": _sha256(out),
+                        "producer": f"tools/gen_conformance.py::{producer_name}",
+                    }
+                )
+                print(f"  wrote {rel}  ({fixtures_meta[-1]['sha256'][:12]})")
+            continue
         out = CONFORMANCE / filename
-        _write_json(out, fn())
+        _write_json(out, result)
         _assert_no_literal_secret(out)
         fixtures_meta.append(
             {
