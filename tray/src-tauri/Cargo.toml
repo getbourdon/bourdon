@@ -24,6 +24,11 @@ tauri-build = { version = "2.6.2", features = [] }
 tauri = { version = "2.11.2", features = ["tray-icon", "image-png", "image-ico"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Live-activity scan (Phase A): read-only enumeration of the process table to
+# count running agent CLIs. No shell / no pgrep — same exec-safety posture as
+# the CLI invocation. Pinned to 0.36.x to respect rust-version 1.77.2 (sysinfo
+# 0.39+ requires rustc 1.95). Only the "system" feature (processes) is needed.
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
 [features]
 # Default Tauri custom-protocol feature for release builds.

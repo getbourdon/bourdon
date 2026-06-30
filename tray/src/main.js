@@ -173,6 +173,16 @@ function buildAgentRow(a) {
   const brand = agentBrand(a.id);
   const touch = a.parse_error ? "" : humanize(a.last_updated);
 
+  // Phase A live-activity badge: running CLI processes on this machine.
+  const liveCount =
+    typeof a.live_process_count === "number" ? a.live_process_count : 0;
+  const liveBadge =
+    liveCount > 0
+      ? `<span class="live-badge" title="${liveCount} running CLI process${
+          liveCount === 1 ? "" : "es"
+        } on this machine"><span class="live-dot"></span>${liveCount} live</span>`
+      : "";
+
   row.innerHTML = `
     <span class="agent-logo-wrap">
       ${logoMarkup(brand.d, "agent-logo--row", brand.hex)}
@@ -182,6 +192,7 @@ function buildAgentRow(a) {
       <div class="agent-id">${esc(brand.name)}</div>
       <div class="agent-sub">${esc(sub)}</div>
     </span>
+    ${liveBadge}
     <span class="agent-touch">${esc(touch)}</span>
     <span class="chev">›</span>`;
 
