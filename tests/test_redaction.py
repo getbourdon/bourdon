@@ -53,6 +53,7 @@ _FIXTURE = json.loads(
 )
 SECRETS = ["".join(case["fragments"]) for case in _FIXTURE["secrets"]]
 BENIGN = [case["text"] for case in _FIXTURE["benign"]]
+CASE_VARIANTS = _FIXTURE["case_variants"]
 
 
 @pytest.mark.parametrize("secret", SECRETS)
@@ -73,6 +74,24 @@ def test_benign_text_survives_recognition_surface(text):
     out = redact_text(text, limit=400)
     assert out != REDACTED, f"over-redacted benign text: {text!r}"
     assert contains_secret(text) is False
+
+
+@pytest.mark.parametrize("probe", CASE_VARIANTS, ids=lambda p: p["pattern"])
+def test_case_variant_probes_pin_per_pattern_case_flag(probe):
+    """Each token pattern's case sensitivity is pinned: the correct case always
+    redacts; for case-sensitive patterns the wrong case must NOT, and for the
+    IGNORECASE patterns (appl_/hf_) the wrong case still does. Cross-impl: the TS
+    mirror asserts the SAME oracle-computed expectations."""
+    correct = "".join(probe["correct"]["fragments"])
+    wrong = "".join(probe["wrong"]["fragments"])
+    assert redact_text(correct) == probe["correct"]["expect_redacted"] == REDACTED
+    assert contains_secret(correct) is probe["correct"]["expect_contains_secret"] is True
+    assert redact_text(wrong) == probe["wrong"]["expect_redacted"]
+    assert contains_secret(wrong) is probe["wrong"]["expect_contains_secret"]
+    if probe["case_sensitive"]:
+        assert contains_secret(wrong) is False
+    else:
+        assert contains_secret(wrong) is True
 
 
 def test_empty_string_passthrough():
