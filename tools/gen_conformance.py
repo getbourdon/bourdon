@@ -70,7 +70,16 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.6.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.7.0"  # bump on any fixture change (see manifest.json doc)
+# 1.7.0: + the turn_compiler_vectors family (P7 turn compilers): the REAL
+#        compile_codex_turn / compile_cursor_turn driven over a dedicated 2-agent
+#        seed with the wall clock FROZEN (deterministic recency). Pins per case the
+#        BriefItem scores (round 1dp), the tier-only recognition_confidence bucket,
+#        and the codex TurnBrief.to_dict() (resolved cwd swapped for the logical
+#        input -- the only env-bound field; repo.root/remote null for the synthetic
+#        non-git cwd). The pinned codex_cwd_hit item folds cwd-hit (25) + recency
+#        (15) + a NAME_SUBSTRING tier into one session item. This replaces the
+#        deferred compile_codex_turn stub the mcp_snapshots family still carries.
 # 1.6.0: + the native_stores family (participant parity): each external-agent
 #        reader (hermes=sqlite, claude_code=file, github_copilot=network) gets a
 #        seeded hermetic native store + the REAL participant.export_l5() to_dict
@@ -2040,6 +2049,287 @@ def native_stores() -> dict:
     return {"__multifile__": True, "files": written}
 
 
+# ---------------------------------------------------------------------------
+# turn_compiler_vectors  (codex + cursor turn compilers, oracle-driven)
+# ---------------------------------------------------------------------------
+# Oracle = the REAL compile_codex_turn / compile_cursor_turn. Each case is a
+# seeded (prompt, cwd) driven over a TEMP copy of the dedicated seed library
+# below, with the wall clock FROZEN to _TURN_FROZEN_* so the recency bands
+# (codex _recency_score / cursor last_touched lift) are deterministic. The codex
+# brief's resolved top-level `cwd` field -- the ONLY environment-bound output --
+# is normalized back to the logical input string; repo identity is name-only
+# (the cwd is a synthetic non-git path, so repo.root / repo.remote are null and
+# repo.name is just the basename). codex_home is an empty temp dir (no
+# state_5.sqlite) so native_stage1 = "unknown" and no machine-local Codex thread
+# leaks in. The brief is then a pure function of (seed, prompt, cwd, frozen clock).
+#
+# The PINNED case (codex_cwd_hit) exercises cwd-hit (25.0) + recency (15.0) +
+# a NAME_SUBSTRING prompt tier + BriefItem.score round(.,1) in ONE item: a prior
+# session whose cwd == the turn cwd, dated one day before the frozen clock, whose
+# project_focus name ("Bourdon") is a substring of the prompt.
+#
+# Cross-compiler difference pinned by the recency-only cases: codex's recognition
+# gate DROPS a recency-only non-vague candidate (-> observe / empty items), while
+# cursor INCLUDES any entity with score > 0 (recency alone) yet still buckets the
+# recognition_confidence as "none" when no name/alias tier matches the prompt.
+
+_TURN_FROZEN_DATE_ISO = "2026-06-29"  # the frozen wall clock for recency bands
+
+# A dedicated 2-agent seed. Bourdon is cross-agent (both agents know it -> the
+# codex cross_agent component fires); the claude-code session's cwd == the pinned
+# turn cwd (the 25.0 cwd-hit) and is dated one day before the frozen clock (the
+# 15.0 freshest recency band). Roadmap is team-visibility (exercises the team
+# access filter) and carries a mid-band last_touched for the cursor recency lift.
+_TURN_SEED_MANIFESTS: dict[str, dict] = {
+    "claude-code.l5.yaml": {
+        "spec_version": "0.1",
+        "agent": {"id": "claude-code", "type": "code-assistant"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "aliases": ["NeuroLayer", "Continuo"],
+                "summary": "Cross-agent memory federation.",
+                "last_touched": "2026-06-28",
+                "visibility": "public",
+            },
+            {
+                "name": "Roadmap",
+                "type": "concept",
+                "summary": "Phase 1.7 federation roadmap.",
+                "tags": ["team"],
+                "last_touched": "2026-06-10",
+                "visibility": "team",
+            },
+        ],
+        "recent_sessions": [
+            {
+                "date": "2026-06-28",
+                "cwd": "/projects/bourdon",
+                "project_focus": ["Bourdon"],
+                "key_actions": ["wired the turn compiler"],
+                "files_touched": ["core/codex_turn_compiler.py"],
+                "visibility": "public",
+            }
+        ],
+    },
+    "codex.l5.yaml": {
+        "spec_version": "0.1",
+        "agent": {"id": "codex", "type": "code-assistant"},
+        "last_updated": "2026-06-29T12:00:00+00:00",
+        "known_entities": [
+            {
+                "name": "Bourdon",
+                "type": "project",
+                "summary": "Federation, codex view.",
+                "last_touched": "2026-06-28",
+                "visibility": "public",
+            }
+        ],
+    },
+}
+
+# (name, prompt, cwd) -- cwd is a synthetic logical path (no real .git ancestor).
+_CODEX_TURN_CASES: list[tuple[str, str, str]] = [
+    ("codex_cwd_hit", "what's next on Bourdon", "/projects/bourdon"),
+    ("codex_prompt_only", "tell me about the Roadmap", "/projects/unrelated"),
+    ("codex_observe_no_match", "what is the weather today", "/projects/unrelated"),
+]
+_CURSOR_TURN_CASES: list[tuple[str, str, str]] = [
+    ("cursor_cwd_hit", "what's next on Bourdon", "/projects/bourdon"),
+    ("cursor_prompt_only", "tell me about the Roadmap", "/projects/unrelated"),
+    ("cursor_recency_only", "what is the weather today", "/projects/unrelated"),
+]
+
+
+def turn_compiler_vectors() -> dict:
+    """Drive the REAL codex + cursor turn compilers and pin their oracle output.
+
+    Single-file producer. The wall clock is frozen (so recency is deterministic)
+    and the codex brief's resolved top-level cwd is normalized to the logical
+    input (the only env-bound field). Self-checks refuse to emit if the pinned
+    invariants (cwd-hit + recency + tier on the top codex item, observe-on-no-
+    match, cursor recency-only-with-none-confidence) ever regress.
+    """
+    import tempfile
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
+
+    import core.codex_turn_compiler as cc
+    import core.cursor_turn_compiler as cu
+    from core.codex_turn_compiler import SCHEMA_VERSION as CODEX_SCHEMA
+    from core.codex_turn_compiler import compile_codex_turn
+    from core.cursor_turn_compiler import SCHEMA_VERSION as CURSOR_SCHEMA
+    from core.cursor_turn_compiler import compile_cursor_turn
+
+    frozen_dt = _datetime(2026, 6, 29, 12, 0, 0, tzinfo=_timezone.utc)
+    frozen_date = _date(2026, 6, 29)
+
+    class _FrozenTurnDateTime(_datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001 -- match datetime.now signature
+            return frozen_dt if tz is None else frozen_dt.astimezone(tz)
+
+    class _FrozenTurnDate(_date):
+        @classmethod
+        def today(cls):
+            return frozen_date
+
+    def _freeze_codex_brief(brief, logical_cwd: str) -> dict:
+        """to_dict with the resolved cwd swapped for the logical input string.
+
+        The top-level cwd is the ONLY env-bound field (repo.root/remote are null
+        for a non-git synthetic path); everything else is portable. The TS mirror
+        passes the same logical cwd and applies the identical swap before compare.
+        """
+        d = brief.to_dict()
+        d["cwd"] = logical_cwd
+        return d
+
+    codex_cases: list[dict] = []
+    cursor_cases: list[dict] = []
+
+    saved = (cc.datetime, cc.date, cu.date)
+    cc.datetime = _FrozenTurnDateTime
+    cc.date = _FrozenTurnDate
+    cu.date = _FrozenTurnDate
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "lib"
+            agents = lib / "agents"
+            agents.mkdir(parents=True)
+            for fname, manifest in _TURN_SEED_MANIFESTS.items():
+                _write_text_lf(
+                    agents / fname,
+                    yaml.safe_dump(manifest, sort_keys=False, default_flow_style=False),
+                )
+            codex_home = Path(td) / "codex_home"  # empty: no state_5.sqlite
+            codex_home.mkdir()
+
+            for name, prompt, cwd in _CODEX_TURN_CASES:
+                brief = compile_codex_turn(
+                    prompt,
+                    cwd=cwd,
+                    codex_home=codex_home,
+                    library_path=lib,
+                    access_level="team",
+                )
+                # Self-checks: the env-bound surfaces must be neutralized, so a
+                # stray .git ancestor (or a clock leak) can never ship green.
+                if brief.repo.root is not None:
+                    raise SystemExit(
+                        f"REFUSING TO EMIT: turn case {name!r} resolved a real git "
+                        f"root ({brief.repo.root!r}); cwd is not hermetic"
+                    )
+                items = brief.items
+                if name == "codex_cwd_hit":
+                    if not items or items[0].kind != "session":
+                        raise SystemExit(
+                            "REFUSING TO EMIT: codex_cwd_hit top item is not the session"
+                        )
+                    reason = items[0].reason
+                    for needle in ("prompt matched", "cwd matched", "recent work"):
+                        if needle not in reason:
+                            raise SystemExit(
+                                f"REFUSING TO EMIT: codex_cwd_hit lost {needle!r} "
+                                f"(reason={reason!r})"
+                            )
+                    if items[0].to_dict()["score"] != round(items[0].score, 1):
+                        raise SystemExit(
+                            "REFUSING TO EMIT: codex_cwd_hit score is not round(.,1)"
+                        )
+                    if brief.routing.get("confidence") != "medium":
+                        raise SystemExit(
+                            "REFUSING TO EMIT: codex_cwd_hit confidence != medium"
+                        )
+                if name == "codex_observe_no_match" and (
+                    items or brief.routing.get("mode") != "observe"
+                ):
+                    raise SystemExit(
+                        "REFUSING TO EMIT: codex_observe_no_match did not observe-empty"
+                    )
+                codex_cases.append(
+                    {
+                        "name": name,
+                        "prompt": prompt,
+                        "cwd": cwd,
+                        "access_level": "team",
+                        "recognition_confidence": brief.routing.get("confidence"),
+                        "item_scores": [
+                            {
+                                "rank": it.rank,
+                                "name": it.name,
+                                "kind": it.kind,
+                                "source": it.source,
+                                "score": round(it.score, 1),
+                            }
+                            for it in items
+                        ],
+                        "brief": _freeze_codex_brief(brief, cwd),
+                    }
+                )
+
+            for name, prompt, cwd in _CURSOR_TURN_CASES:
+                brief = compile_cursor_turn(
+                    prompt, cwd=cwd, library_path=lib, access_level="team"
+                )
+                conf = brief.routing.get("confidence")
+                if name == "cursor_cwd_hit" and (
+                    not brief.matched_entities or conf != "medium"
+                ):
+                    raise SystemExit(
+                        "REFUSING TO EMIT: cursor_cwd_hit lost its match/medium bucket"
+                    )
+                if name == "cursor_recency_only" and (
+                    not brief.matched_entities or conf != "none"
+                ):
+                    raise SystemExit(
+                        "REFUSING TO EMIT: cursor_recency_only expected matches with "
+                        "a 'none' tier confidence"
+                    )
+                cursor_cases.append(
+                    {
+                        "name": name,
+                        "prompt": prompt,
+                        "cwd": cwd,
+                        "access_level": "team",
+                        "recognition_confidence": conf,
+                        "cwd_project": brief.cwd_project,
+                        "prompt_tokens": brief.prompt_tokens,
+                        "matched_entities": brief.matched_entities,
+                        "routing": brief.routing,
+                    }
+                )
+    finally:
+        cc.datetime, cc.date, cu.date = saved
+
+    return {
+        "_doc": "Cross-impl turn-compiler parity. Oracle = the REAL "
+                "compile_codex_turn / compile_cursor_turn, driven over a temp copy "
+                "of `seed_library` with the wall clock FROZEN to frozen_clock so "
+                "recency is deterministic. codex `brief` is TurnBrief.to_dict() with "
+                "the resolved top-level cwd swapped back to the logical input string "
+                "(the only env-bound field; repo.root/remote are null for the "
+                "synthetic non-git cwd) -- the TS mirror passes the same cwd and "
+                "applies the identical swap. BriefItem.score is round(.,1); "
+                "recognition_confidence is the shared tier-only bucket. The pinned "
+                "codex_cwd_hit item folds cwd-hit (25) + recency (15) + a "
+                "NAME_SUBSTRING prompt tier into one session item. cursor briefs drop "
+                "the runtime compile_latency_us; matched_entities[].score is "
+                "round(.,2). codex DROPS recency-only non-vague candidates (observe), "
+                "cursor INCLUDES score>0 recency matches but still buckets confidence "
+                "'none' without a name/alias tier hit.",
+        "frozen_clock": _TURN_FROZEN_DATE_ISO,
+        "codex_schema_version": CODEX_SCHEMA,
+        "cursor_schema_version": CURSOR_SCHEMA,
+        "seed_library": _TURN_SEED_MANIFESTS,
+        "codex_cases": codex_cases,
+        "cursor_cases": cursor_cases,
+    }
+
+
 # The active families (stubs excluded until wired). Single-file producers
 # return a payload dict; multi-file producers (l5) write their own tree and
 # return {"__multifile__": True, "files": [...]}.
@@ -2055,6 +2345,8 @@ FAMILIES = {
     "mcp_snapshots": ("mcp_snapshots", mcp_snapshots),
     # Participant readers: native store -> the real export_l5() -> its to_dict().
     "native_stores": ("native_stores", native_stores),
+    # Turn compilers: the real compile_codex_turn / compile_cursor_turn (P7).
+    "turn_compiler_vectors.json": ("turn_compiler_vectors", turn_compiler_vectors),
 }
 
 
