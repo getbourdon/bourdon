@@ -41,6 +41,13 @@ sys.path.insert(0, str(REPO_ROOT))
 import jsonschema  # noqa: E402
 from jsonschema import Draft202012Validator  # noqa: E402
 
+from core.recognition_contract import (  # noqa: E402
+    MatchTier,
+    best_match_tier,
+    normalized_confidence,
+    recognition_confidence,
+)
+from core.recognition_runtime import recognition_first  # noqa: E402
 from core.redaction import REDACTED, contains_secret, redact_text  # noqa: E402
 from participants.base import (  # noqa: E402
     AgentInfo,
@@ -54,7 +61,7 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.1.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.2.0"  # bump on any fixture change (see manifest.json doc)
 BOURDON_VERSION = "0.11.0"     # the oracle version these fixtures were produced against
 
 
@@ -137,11 +144,175 @@ def redaction_battery() -> dict:
 # STUBS -- fill in as each port phase reaches the family (extraction-first).
 # Each must import the live oracle and emit its actual output, never hand-typed.
 # ---------------------------------------------------------------------------
+# recognition_vectors  (extracted from tests/test_recognition_{contract,parity}.py
+# CASES + BENCHMARKS/recognition_golden_v1.yaml). Three vector families, all
+# oracle-computed:
+#   tier_vectors          -- match_tier ladder + TIER-ONLY recognition_confidence
+#                            (the short-name guard, substring-not-token, alias
+#                            best-tier, and "2 shared terms still buckets low
+#                            because confidence is tier-only" cases).
+#   confidence_buckets    -- normalized_confidence boundary arithmetic, incl. the
+#                            EXACT 0.45 (TOKEN_OVERLAP + 2 anchor terms) and 0.80
+#                            (NAME_SUBSTRING + recency) bucket edges.
+#   recognition_strings   -- recognition_first end-to-end: detect_entities +
+#                            build_recognition_string + visibility filtering +
+#                            the temporal (archived) suffix + per-entity buckets.
+
+# (prompt, names) -> best_match_tier(prompt, names).name +
+# recognition_confidence(prompt, names) (TIER-ONLY: no cwd/recency/anchor-count).
+_TIER_CASES: list[tuple[str, list[str]]] = [
+    ("Bourdon", ["bourdon"]),                                # EXACT / high
+    ("tell me about Bourdon", ["Bourdon"]),                  # NAME_SUBSTRING / medium
+    ("how is ILTT going", ["ILTT"]),                         # NAME_SUBSTRING / medium
+    ("we ILTTed the build", ["ILTT"]),                       # short-name guard: NONE / none
+    ("pick a category", ["cat"]),                            # substring-not-token: NONE / none
+    ("the federation substrate work", ["Bourdon federation engine"]),  # TOKEN_OVERLAP / low
+    # 2 shared meaningful terms, but recognition_confidence is TIER-ONLY so it
+    # still buckets `low` (n_anchor_terms is not folded into the emitted bucket).
+    ("the federation memory substrate", ["Bourdon federation memory"]),
+    ("we shipped DINOs Chess tonight", ["DINOs Chess"]),     # NAME_SUBSTRING / medium
+    ("checkers tonight", ["DINOs Chess", "checkers"]),       # alias best-tier: NAME_SUBSTRING
+    ("completely unrelated words", ["Bourdon"]),             # NONE / none
+    # whole-token NAS matches; "bananas" does not -> NAME_SUBSTRING / medium
+    ("i deployed to a NAS box, the bananas were fine", ["NAS"]),
+    ("where are we on the Multi Word Project", ["Multi Word Project"]),  # NAME_SUBSTRING
+]
+
+# (tier, kwargs) -> normalized_confidence(tier, **kwargs). Pins the bucket
+# arithmetic INCLUDING the present-signal lifts the tier-only emitted bucket does
+# NOT use -- the two boundaries are load-bearing: 0.45 (low->medium) and 0.80
+# (medium->high).
+_CONFIDENCE_CASES: list[tuple[MatchTier, dict]] = [
+    (MatchTier.NONE, {}),                                            # none
+    (MatchTier.TOKEN_OVERLAP, {"n_anchor_terms": 1}),               # 0.30 -> low
+    (MatchTier.TOKEN_OVERLAP, {"n_anchor_terms": 2}),               # 0.45 -> medium (ON 0.45 edge)
+    (MatchTier.TOKEN_SUBSEQUENCE, {}),                              # 0.55 -> medium
+    (MatchTier.NAME_SUBSTRING, {}),                                 # 0.75 -> medium (below 0.80)
+    (MatchTier.NAME_SUBSTRING, {"recency_fresh": True}),            # 0.80 -> high (ON 0.80 edge)
+    (MatchTier.NAME_SUBSTRING, {"cwd_hit": True}),                  # 0.85 -> high
+    (MatchTier.EXACT, {}),                                          # 0.90 -> high
+    # 0.30 + 0.15 + 0.10 + 0.05 = 0.60 -> medium
+    (MatchTier.TOKEN_OVERLAP, {"n_anchor_terms": 2, "cwd_hit": True, "recency_fresh": True}),
+]
+
+# (name, prompt, manifest, access_level) -> recognition_first(...) end-to-end.
+_RECOGNITION_STRING_CASES: list[tuple[str, str, dict, str]] = [
+    ("single_with_type", "tell me about Bourdon",
+     {"known_entities": [{"name": "Bourdon", "type": "project"}]}, "team"),
+    ("single_no_type", "status on Alpha please",
+     {"known_entities": [{"name": "Alpha"}]}, "team"),
+    ("two_matches", "compare Bourdon and OMNIvour for me",
+     {"known_entities": [{"name": "Bourdon", "type": "project"},
+                         {"name": "OMNIvour", "type": "project"},
+                         {"name": "Unrelated", "type": "project"}]}, "team"),
+    ("three_matches", "status on Alpha, Beta, and Gamma please",
+     {"known_entities": [{"name": "Alpha"}, {"name": "Beta"},
+                         {"name": "Gamma"}, {"name": "Delta"}]}, "team"),
+    ("short_name_guard", "the build ILTTed yesterday and broke",
+     {"known_entities": [{"name": "ILTT", "type": "product"}]}, "team"),
+    ("substring_not_token", "i deployed to a NAS box, the bananas were fine",
+     {"known_entities": [{"name": "NAS", "type": "hardware"}]}, "team"),
+    ("visibility_private_hidden", "tell me about SecretSauce and PublicProj",
+     {"known_entities": [
+         {"name": "PublicProj", "type": "project"},
+         {"name": "SecretSauce", "type": "project", "visibility": "private"},
+     ]}, "team"),
+    ("archived_valid_to", "remind me what Coolculator was",
+     {"known_entities": [
+         {"name": "Coolculator", "type": "project", "valid_to": "2026-01-01"},
+     ]}, "team"),
+    ("archived_tag", "what about LegacyThing",
+     {"known_entities": [
+         {"name": "LegacyThing", "type": "tool", "tags": ["archived"]},
+     ]}, "team"),
+    ("alias_match", "any update on if_lift_then_that",
+     {"known_entities": [
+         {"name": "ILTT", "type": "product", "aliases": ["if_lift_then_that"]},
+     ]}, "team"),
+    ("negative_control", "what is the weather like today",
+     {"known_entities": [{"name": "Bourdon"}, {"name": "OMNIvour"}]}, "team"),
+    ("multi_word", "where are we on the Multi Word Project",
+     {"known_entities": [{"name": "Multi Word Project", "type": "project"}]}, "team"),
+]
+
+
 def recognition_vectors() -> dict:
-    # TODO(P2): extract from tests/test_recognition_contract.py +
-    # tests/test_recognition_parity.py CASES. For each (prompt, manifest):
-    # match_tier(...).name + recognition_confidence(...) bucket. tier-only.
-    raise NotImplementedError("recognition_vectors: wire in Phase 2")
+    """Emit the recognition parity vectors + the byte-identical golden copy.
+
+    Multi-file producer: writes recognition_vectors.json (oracle-computed tier /
+    confidence / recognition-string vectors) and a byte-for-byte copy of the
+    BENCHMARKS golden dataset (the F1==1.0 gate input), and returns the marker
+    listing both so `main` stamps each in manifest.json.
+    """
+    tier_vectors = [
+        {
+            "prompt": prompt,
+            "names": names,
+            "tier": best_match_tier(prompt, names).name,
+            "confidence": recognition_confidence(prompt, names),
+        }
+        for prompt, names in _TIER_CASES
+    ]
+
+    confidence_buckets = [
+        {
+            "tier": tier.name,
+            "n_anchor_terms": kwargs.get("n_anchor_terms", 1),
+            "cwd_hit": kwargs.get("cwd_hit", False),
+            "recency_fresh": kwargs.get("recency_fresh", False),
+            "bucket": normalized_confidence(tier, **kwargs),
+        }
+        for tier, kwargs in _CONFIDENCE_CASES
+    ]
+
+    recognition_strings = []
+    for name, prompt, manifest, access in _RECOGNITION_STRING_CASES:
+        result = recognition_first(prompt, manifest, access_level=access)
+        # Close the un-awaited hydration coroutine (no event loop touched), per
+        # the recognition-eval pattern -- we score recognition, not hydration.
+        close = getattr(result.hydration, "close", None)
+        if callable(close):
+            close()
+        recognition_strings.append(
+            {
+                "name": name,
+                "prompt": prompt,
+                "manifest": manifest,
+                "access_level": access,
+                "matched_names": [str(e.get("name") or "") for e in result.matched_entities],
+                "recognition": result.recognition,
+                "confidence": result.confidence,
+                "entity_confidences": result.entity_confidences,
+            }
+        )
+
+    payload = {
+        "_doc": "Cross-impl recognition parity. Python is the oracle. "
+                "tier_vectors: best_match_tier(prompt,names).name + TIER-ONLY "
+                "recognition_confidence(prompt,names). confidence_buckets: "
+                "normalized_confidence(tier, n_anchor_terms/cwd_hit/recency_fresh) "
+                "-- pins the 0.45 and 0.80 bucket edges. recognition_strings: "
+                "recognition_first(prompt,manifest,access_level) end-to-end "
+                "(detect + build_recognition_string + visibility + archived suffix).",
+        "tier_vectors": tier_vectors,
+        "confidence_buckets": confidence_buckets,
+        "recognition_strings": recognition_strings,
+    }
+
+    written: list[str] = []
+    out = CONFORMANCE / "recognition_vectors.json"
+    _write_json(out, payload)
+    written.append("recognition_vectors.json")
+
+    # Byte-identical copy of the golden dataset (the F1==1.0 eval gate input).
+    # Raw bytes -- never re-serialized -- so the TS mirror's eval runs the SAME
+    # cases and the parity is on the dataset itself, not a re-emission of it.
+    golden_src = REPO_ROOT / "BENCHMARKS" / "recognition_golden_v1.yaml"
+    golden_out = CONFORMANCE / "recognition_golden_v1.yaml"
+    golden_out.write_bytes(golden_src.read_bytes())
+    written.append("recognition_golden_v1.yaml")
+
+    return {"__multifile__": True, "files": written}
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +695,7 @@ def mcp_snapshots() -> dict:
 # return {"__multifile__": True, "files": [...]}.
 FAMILIES = {
     "redaction_battery.json": ("redaction_battery", redaction_battery),
+    "recognition_vectors": ("recognition_vectors", recognition_vectors),
     "l5_schema_and_manifests": ("l5_schema_and_manifests", l5_schema_and_manifests),
 }
 
