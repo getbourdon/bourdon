@@ -1196,12 +1196,13 @@ def tier_matrix() -> dict:
     from core.l6_store import L6Store
 
     try:
-        from core.l6_server import create_l6_server
+        import fastmcp  # noqa: F401 -- probe; create_l6_server imports the name lazily but CALLS it
     except ImportError as exc:  # pragma: no cover -- needs the [server] extra
         raise SkipFamilyError(
             "tier_matrix needs fastmcp (pip install 'bourdon[server]') to drive the "
             f"real L6 enforcement: {exc}"
         ) from exc
+    from core.l6_server import create_l6_server
 
     quarantined = AgentIdentity(
         agent_id="openclaw", tier="quarantined", grants=("claude-code",)
@@ -1603,12 +1604,13 @@ def mcp_snapshots() -> dict:
     from core.l6_store import L6Store
 
     try:
-        from core.l6_server import create_l6_server
+        import fastmcp  # noqa: F401 -- probe; create_l6_server imports the name lazily but CALLS it
     except ImportError as exc:  # pragma: no cover -- needs the [server] extra
         raise SkipFamilyError(
             "mcp_snapshots needs fastmcp (pip install 'bourdon[server]') to drive "
             f"the real L6 tool surface: {exc}"
         ) from exc
+    from core.l6_server import create_l6_server
 
     snap_dir = CONFORMANCE / "mcp_snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
