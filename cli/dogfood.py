@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 ``bourdon dogfood`` -- end-to-end smoke test of the federation on a real machine.
 

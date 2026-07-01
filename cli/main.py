@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Top-level `bourdon` CLI."""
 
 from __future__ import annotations

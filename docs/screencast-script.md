@@ -125,7 +125,7 @@ bourdon sync push user@laptop.tailnet:~/agent-library/
 **Screen:** bourdon.ai homepage, scrolled to the Status section. Highlight the "Quickstart" link.
 
 **Voice:**
-> *"Pre-alpha. Open source. BSL 1.1. \`pip install bourdon\` to try it. The quickstart's at bourdon.ai. That's it."*
+> *"Pre-alpha. Open source. BUSL-1.1. \`pip install bourdon\` to try it. The quickstart's at bourdon.ai. That's it."*
 
 End on the URL clearly visible.
 

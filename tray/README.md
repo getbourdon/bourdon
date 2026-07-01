@@ -94,7 +94,7 @@ The freshness window (7 days) is the `FRESHNESS_WINDOW_DAYS` constant in
 
 ## License
 
-BSL 1.1 — see [`LICENSE`](LICENSE) (server-side of the MIT-cli / BSL-server
+BUSL-1.1 — see [`LICENSE`](LICENSE) (server-side of the MIT-cli / BSL-server
 boundary).
 
 See [`BUILD_NOTES.md`](BUILD_NOTES.md) for the compile-time assumptions and

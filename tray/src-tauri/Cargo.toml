@@ -5,7 +5,7 @@ description = "Bourdon Desktop Tray — read-only visibility into the local cros
 authors = ["RADLAB LLC"]
 edition = "2021"
 rust-version = "1.77.2"
-license = "BSL-1.1"
+license = "BUSL-1.1"
 
 # The library crate is what Tauri's mobile entry-point macro targets; the
 # binary is a thin wrapper. This split is the Tauri v2 convention (see lib.rs).

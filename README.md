@@ -10,7 +10,7 @@ Named for the *bourdon* — the deep continuous drone of a pipe organ, the found
 
 ---
 
-## Status: Pre-Alpha (v0.6.0, BSL 1.1)
+## Status: Pre-Alpha (v0.6.0 — BUSL-1.1 engine + Apache-2.0 wire/interop)
 
 Project renamed Continuo → Bourdon on 2026-05-05 (v0.1.0); relicensed MIT → Business Source License 1.1 on 2026-05-06 (v0.2.0). See [release notes](https://github.com/getbourdon/bourdon/releases) for migration. The version-by-version history below covers v0.0.1 through v0.0.7 in detail; for v0.0.8 and later see GitHub Releases.
 
@@ -238,7 +238,7 @@ powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1 -WorkspaceRoot "." -
 
 - **v0.0.1** (now) — Scaffold + Phase 1 orchestrator (L0 + L1, manual files, Ollama-compatible)
 - **v0.1.0** — L2 UltraRAG async integration + session-close L5 export
-- **v0.2.0** — Relicense MIT → BSL 1.1
+- **v0.2.0** — Relicense MIT → BUSL-1.1
 - **v0.3.0** — Codex operational layer: memory doctor + fallback recognition + L6 prep
 - **v0.4.0** — Copilot participant (convention-file fallback for cloud-only agents) + OpenManus zero-code MCP integration + public participant-authoring guide (`docs/AUTHORING_A_PARTICIPANT.md`)
 - **v0.4.1** — Cascade (Windsurf) participant (5th IDE participant; self-authored against the public guide) + project-level `SECURITY.md` + `bourdon doctor` / `bourdon export-all` cross-participant CLI surfaces
@@ -267,7 +267,15 @@ See [`spec/USE_CASES.md`](spec/USE_CASES.md) for eight worked domain scenarios b
 
 ## Contributing
 
-Bourdon is source-available under the Business Source License 1.1 (auto-converts to Apache 2.0 after four years per version). Free for solo developers, internal/non-competing commercial use, research, and education. Commercial license required for hosted-service offerings that compete with RADLAB LLC's paid versions. See [`LICENSE`](LICENSE) for the legal text and [`LICENSE_FAQ.md`](LICENSE_FAQ.md) for plain-English guidance. Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Bourdon's engine is source-available under the Business Source License 1.1
+(BUSL-1.1, auto-converts to Apache-2.0 after four years per version); its
+wire/interop surface (CLI, conformance fixtures, L5 format, spec) is Apache-2.0.
+Free for solo developers, internal/non-competing commercial use, research, and
+education. Commercial license required for hosted-service offerings that compete
+with RADLAB LLC's paid versions. See [`LICENSING.md`](LICENSING.md) for the split,
+[`LICENSE`](LICENSE) / [`LICENSE-APACHE`](LICENSE-APACHE) for the legal text, and
+[`LICENSE_FAQ.md`](LICENSE_FAQ.md) for plain-English guidance. Contributions
+welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## About
 
@@ -293,6 +301,23 @@ Because you found us here, you might like to check out:
 
 ## License
 
-Business Source License 1.1, auto-converts to Apache License 2.0 four years after each version is published. See [`LICENSE`](LICENSE) for the full text and [`LICENSE_FAQ.md`](LICENSE_FAQ.md) for guidance on what's permitted. Commercial licensing inquiries: licensing@bourdon.ai.
+Bourdon uses a two-license split (mirrored package-for-package by
+[`getbourdon/bourdon-js`](https://github.com/getbourdon/bourdon-js)):
 
-Versions v0.0.1 through v0.1.0 were published under MIT and remain MIT in their distributed form. Relicensing to BSL 1.1 applies from v0.2.0 onward.
+- **Apache-2.0** — the wire/interop surface (`cli/`, `conformance/`,
+  `core/l5_io.py`, `spec/`, `examples/`, `starter-template/`), so anyone can
+  build a conformant or interoperating implementation freely. Full text:
+  [`LICENSE-APACHE`](LICENSE-APACHE).
+- **BUSL-1.1** — the engine (everything else). Source-available; auto-converts to
+  Apache-2.0 four years after each version is published. Free for solo
+  developers, internal/non-competing commercial use, research, and education; a
+  commercial license is required for competing hosted-service offerings. Full
+  text: [`LICENSE`](LICENSE).
+
+See [`LICENSING.md`](LICENSING.md) for the full mapping and rationale, and
+[`LICENSE_FAQ.md`](LICENSE_FAQ.md) for plain-English guidance. Commercial
+licensing inquiries: licensing@bourdon.ai.
+
+Versions v0.0.1 through v0.1.0 were published under MIT and remain MIT in their
+distributed form. v0.2.0+ is BUSL-1.1; from the next release the wire/interop
+surface above is Apache-2.0.
