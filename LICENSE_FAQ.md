@@ -1,6 +1,6 @@
 # Bourdon License FAQ
 
-This document explains how the Business Source License (BSL) 1.1 applies to Bourdon. It is interpretive guidance — the [LICENSE](LICENSE) itself is the authoritative legal text.
+This document explains how the Business Source License 1.1 (BUSL-1.1, informally "BSL") applies to Bourdon's **engine**. It is interpretive guidance — the [LICENSE](LICENSE) itself is the authoritative legal text. Bourdon's **wire/interop surface** (CLI, conformance fixtures, L5 format, spec) is Apache-2.0, not BUSL-1.1 — see [`LICENSING.md`](LICENSING.md) for the split.
 
 ## TL;DR
 
@@ -13,7 +13,7 @@ This document explains how the Business Source License (BSL) 1.1 applies to Bour
 
 Bourdon was originally MIT-licensed (v0.0.1 through v0.1.0). The rename from Continuo → Bourdon (2026-05-05) was the right moment to also relicense before the project gained external adoption — the project's strategy depends on RADLAB LLC capturing some commercial value to fund continued development. Pure MIT meant any cloud company could offer Bourdon-as-a-Service without contributing back, leaving the maintainer with no path to sustainability.
 
-BSL 1.1 keeps Bourdon source-available and free for the vast majority of users while preserving a commercial wedge against direct hosted-service competitors. HashiCorp (Terraform, Vault), CockroachDB, Sentry, Couchbase, and MariaDB all use this license; HashiCorp was acquired by IBM under BSL in 2024, demonstrating it doesn't kill commercial outcomes.
+BUSL-1.1 keeps Bourdon source-available and free for the vast majority of users while preserving a commercial wedge against direct hosted-service competitors. HashiCorp (Terraform, Vault), CockroachDB, Sentry, Couchbase, and MariaDB all use this license; HashiCorp was acquired by IBM under BSL in 2024, demonstrating it doesn't kill commercial outcomes.
 
 ## Common scenarios
 
@@ -65,7 +65,7 @@ Versions v0.0.1 through v0.1.0 were published under MIT. **Anyone who downloaded
 ## Frequently confused points
 
 ### "BSL isn't OSI-approved, so it's not 'real OSS'"
-True that BSL 1.1 isn't on the OSI-approved list, but it's source-available and auto-converts to Apache 2.0 (which IS OSI-approved). The OSS Initiative's narrow approval list is one definition of "open"; BSL meets a broader practical definition (code is public, can be read, modified, used freely for most purposes, and becomes OSI-approved over time).
+True that BUSL-1.1 isn't on the OSI-approved list, but it's source-available and auto-converts to Apache 2.0 (which IS OSI-approved). The OSS Initiative's narrow approval list is one definition of "open"; BSL meets a broader practical definition (code is public, can be read, modified, used freely for most purposes, and becomes OSI-approved over time).
 
 ### "I can't use BSL code in my company because of policy bans"
 Some enterprise software policies are written against AGPL (a different copyleft license) and don't actually cover BSL. Worth checking with your legal team — most BSL projects have been accepted in environments that ban AGPL.

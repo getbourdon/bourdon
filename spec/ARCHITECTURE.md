@@ -202,7 +202,7 @@ Four non-negotiable semantics:
 | Ollama-only, single local agent | Model/agent-agnostic; federates Claude Code, Codex, Cursor, Copilot, Cascade, Hermes |
 | UltraRAG hard-coded as the L2 backend | L2 is a non-blocking `Protocol` client, backend-agnostic, off by default |
 | L0–L4 personal stack only | + L5 manifest, L6 MCP federation, peer federation |
-| "RADLAB Internal" packaging as NeuroLayer | Open-source spec + reference implementation under BSL 1.1 |
+| "RADLAB Internal" packaging as NeuroLayer | Open-source spec + reference implementation under BUSL-1.1 |
 | Timing model as pseudocode | Implemented in `core/recognition_runtime.py` with enforced timing tests |
 
 The **timing thesis itself is unchanged** — it's the load-bearing idea, now

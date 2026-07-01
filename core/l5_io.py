@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Bourdon L5 I/O -- atomic write + read helpers for L5 manifests.
 

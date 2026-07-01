@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 ``bourdon setup`` -- interactive post-install wizard.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 ``bourdon demo`` -- self-contained cross-machine recognition walkthrough.
 

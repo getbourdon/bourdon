@@ -58,6 +58,6 @@ The `test do` block runs `bourdon --help` (must list `setup`, `demo`, `doctor`, 
 
 ### Submitting to homebrew-core (future)
 
-Pre-alpha software (BSL 1.1, < 1.0.0 version, recent rename) does not yet qualify for `homebrew/core` per their notability criteria. Re-evaluate after v1.0.0 + sustained user count.
+Pre-alpha software (BUSL-1.1, < 1.0.0 version, recent rename) does not yet qualify for `homebrew/core` per their notability criteria. Re-evaluate after v1.0.0 + sustained user count.
 
 Until then, the non-standard tap path documented above is the supported route.

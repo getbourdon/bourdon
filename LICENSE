@@ -1,3 +1,25 @@
+Bourdon is licensed under TWO licenses:
+
+  * The wire / interop surface is Apache-2.0 (full text in LICENSE-APACHE). It
+    covers the parts a third party needs to build a conformant or interoperating
+    implementation:
+      - cli/                  the `bourdon` CLI + client surface
+      - conformance/          the cross-implementation parity fixtures
+      - core/l5_io.py         the L5 manifest wire format
+      - spec/                 the interop spec (incl. L5_schema.json,
+                              PARTICIPANT_CONTRACT.md)
+      - examples/, starter-template/   sample code, meant to be copied freely
+    Files in these paths carry an `SPDX-License-Identifier: Apache-2.0` header.
+
+  * Everything else — the engine — is licensed under the Business Source License
+    1.1 (BUSL-1.1), reproduced below. It converts to the Change License
+    (Apache-2.0) on the Change Date, per-version.
+
+This mirrors the getbourdon/bourdon-js npm packages package-for-package. See
+LICENSING.md for the rationale and the relicense history.
+
+===============================================================================
+
 License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
 "Business Source License" is a trademark of MariaDB Corporation Ab.
 

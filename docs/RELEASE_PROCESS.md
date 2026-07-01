@@ -89,7 +89,7 @@ The workflow's `workflow_dispatch` input checks out that tag and publishes from 
 - v1.0.0 is reserved for either:
   - A second unaffiliated user actively using Bourdon productively, or
   - A commercial wedge (Phase 1.7 team federation w/ ACLs, hosted federation service) shipping as code.
-- The BSL 1.1 conversion clock is per-version: vX.Y.Z auto-converts to Apache 2.0 four years from its release date. v0.7.0 = 2030-05-26.
+- The BUSL-1.1 conversion clock is per-version: vX.Y.Z auto-converts to Apache 2.0 four years from its release date. v0.7.0 = 2030-05-26.
 
 ## Troubleshooting
 
