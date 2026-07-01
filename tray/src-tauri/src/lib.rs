@@ -327,9 +327,11 @@ fn live_counts() -> std::collections::HashMap<String, usize> {
             if APP_BUNDLE_MARKERS.iter().any(|m| path.contains(m)) {
                 continue; // desktop app / bundle helper, not a terminal CLI
             }
+        } else {
+            continue; // no exe path → bundle membership unverifiable; skip
         }
-        // Prefer the executable basename; fall back to the kernel process name
-        // when the exe path is unavailable (e.g. permission-restricted reads).
+        // The exe path is guaranteed present here (processes without one are
+        // skipped above), so this resolves to the executable basename.
         let base = proc
             .exe()
             .and_then(|p| p.file_name())
