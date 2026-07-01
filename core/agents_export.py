@@ -254,9 +254,38 @@ def export_local_agents(
 
     agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
 
+    _join_live_presence(agents)
+
     return {
         "schema": AGENTS_SCHEMA,
         "machine": local_name,
         "generated_from": str(agents_dir),
         "agents": agents,
     }
+
+
+def _join_live_presence(agents: list[dict[str, Any]]) -> None:
+    """Enrich each LOCAL agent row in place with live-session presence.
+
+    Adds ``live_sessions`` (a possibly-empty list of {instance, host, project,
+    started_at, age_s}) and ``live_count`` to every agent. Presence is ephemeral
+    and local-only (Phase B), read from ``~/.bourdon/presence`` via
+    :mod:`core.presence`; it is orthogonal to the durable L5 manifests. A failure
+    to read presence must never sink the agents export, so this is best-effort:
+    on any error every agent simply gets ``live_count=0``.
+
+    Only agents that already have a manifest row are enriched. A live session
+    whose agent has published no L5 manifest yet does not synthesize a row (rare;
+    every real agent exports a manifest at session end).
+    """
+    try:
+        from core import presence
+
+        by_agent = presence.live_sessions_by_agent()
+    except Exception:  # noqa: BLE001 -- presence is best-effort, never fatal
+        by_agent = {}
+
+    for agent in agents:
+        sessions = by_agent.get(str(agent.get("id") or ""), [])
+        agent["live_sessions"] = sessions
+        agent["live_count"] = len(sessions)
