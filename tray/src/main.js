@@ -170,6 +170,11 @@ function fmtAge(seconds) {
 // ---- overview ---------------------------------------------------------------
 
 function buildAgentRow(a) {
+  // Wrapper so an agent can carry an inline, collapsible live-session sub-list
+  // beneath its row (B.2). The wrapper is the unit `.agent-list` spaces via gap.
+  const item = document.createElement("div");
+  item.className = "agent-item";
+
   const row = document.createElement("div");
   row.className = "agent-row";
   row.tabIndex = 0;
@@ -192,15 +197,22 @@ function buildAgentRow(a) {
   const touch = a.parse_error ? "" : humanize(a.last_updated);
 
   // Live-activity badge. Prefer the registry session count (Phase B); fall back
-  // to the Phase A process scan. Tooltip lists live-session projects when known.
+  // to the Phase A process scan. When we have per-session detail, the badge is a
+  // toggle that expands an inline session list; otherwise it's a plain count.
   const liveCount = liveCountOf(a);
-  const liveTitle =
-    a.live_sessions && a.live_sessions.length
-      ? a.live_sessions.map((s) => s.project || s.instance || "session").join(", ")
-      : `${liveCount} running CLI process${liveCount === 1 ? "" : "es"} on this machine`;
+  const sessions = a.live_sessions || [];
+  const expandable = sessions.length > 0;
+  const liveTitle = expandable
+    ? "Show live sessions — " +
+      sessions.map((s) => s.project || s.instance || "session").join(", ")
+    : `${liveCount} running CLI process${liveCount === 1 ? "" : "es"} on this machine`;
   const liveBadge =
     liveCount > 0
-      ? `<span class="live-badge" title="${esc(liveTitle)}"><span class="live-dot"></span>${liveCount} live</span>`
+      ? `<span class="live-badge${expandable ? " live-badge--toggle" : ""}" title="${esc(
+          liveTitle
+        )}"><span class="live-dot"></span>${liveCount} live${
+          expandable ? '<span class="live-caret">›</span>' : ""
+        }</span>`
       : "";
 
   row.innerHTML = `
@@ -215,13 +227,53 @@ function buildAgentRow(a) {
     ${liveBadge}
     <span class="agent-touch">${esc(touch)}</span>
     <span class="chev">›</span>`;
+  item.appendChild(row);
 
   const open = () => openDetail(a.id, a.source || null);
   row.addEventListener("click", open);
   row.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") open();
   });
-  return row;
+
+  if (expandable) {
+    const list = document.createElement("div");
+    list.className = "agent-sessions hidden";
+    list.innerHTML = sessions
+      .map((s) => {
+        const proj = esc(s.project || s.instance || "session");
+        const host = s.host ? `<span class="agent-session-host">${esc(s.host)}</span>` : "";
+        const age =
+          typeof s.age_s === "number"
+            ? `<span class="agent-session-age">${esc(fmtAge(s.age_s))}</span>`
+            : "";
+        return `
+      <div class="agent-session">
+        <span class="agent-session-dot"></span>
+        <span class="agent-session-proj">${proj}</span>
+        ${host}
+        ${age}
+      </div>`;
+      })
+      .join("");
+    item.appendChild(list);
+
+    // Toggle the sub-list from the badge without triggering the row's openDetail.
+    const badge = row.querySelector(".live-badge--toggle");
+    if (badge) {
+      badge.tabIndex = 0;
+      const toggle = (e) => {
+        e.stopPropagation();
+        const nowHidden = list.classList.toggle("hidden");
+        badge.classList.toggle("expanded", !nowHidden);
+      };
+      badge.addEventListener("click", toggle);
+      badge.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") toggle(e);
+      });
+    }
+  }
+
+  return item;
 }
 
 // Flat list (This machine scope).
