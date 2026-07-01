@@ -371,6 +371,11 @@ function renderDetail() {
     </div>
     <div class="detail-stats">
       ${stat(humanize(a.last_updated), "last touched")}
+      ${
+        typeof a.live_process_count === "number" && a.live_process_count > 0
+          ? stat(a.live_process_count, "live now")
+          : ""
+      }
       ${stat(a.session_count ?? "—", "sessions")}
       ${stat(a.capability_count ?? "—", "capabilities")}
     </div>

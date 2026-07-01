@@ -332,11 +332,23 @@ fn live_counts() -> std::collections::HashMap<String, usize> {
         }
         // The exe path is guaranteed present here (processes without one are
         // skipped above), so this resolves to the executable basename.
-        let base = proc
-            .exe()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| proc.name().to_string_lossy().to_string());
+        let base = {
+            let raw = proc
+                .exe()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| proc.name().to_string_lossy().to_string());
+            // Windows executables carry a `.exe` suffix; strip it (any case) so
+            // the signature list ("claude"/"codex") matches cross-platform.
+            // No-op on macOS/Linux where basenames have no extension. (The
+            // `.app`-bundle exclusion above is likewise a harmless no-op off
+            // macOS — those substrings never appear in Windows/Linux paths.)
+            if raw.to_ascii_lowercase().ends_with(".exe") {
+                raw[..raw.len() - 4].to_string()
+            } else {
+                raw
+            }
+        };
 
         for (agent_id, names) in PROCESS_SIGNATURES {
             if names.iter().any(|n| n.eq_ignore_ascii_case(&base)) {
