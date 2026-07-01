@@ -287,6 +287,38 @@ a {
   font-size: 15px;
 }
 
+/* live-activity badge (Phase A): running CLI processes on this machine */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--green);
+  background: rgba(79, 107, 80, 0.12);
+  border: 1px solid rgba(79, 107, 80, 0.25);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 /* ---- agent brand logos ---- */
 .agent-logo-wrap {
   position: relative;

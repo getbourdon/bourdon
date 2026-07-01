@@ -143,6 +143,13 @@ pub struct Agent {
     pub source: Option<String>,
     #[serde(default)]
     pub source_kind: Option<String>,
+    /// Phase A live-activity: number of running CLI processes of this agent on
+    /// THIS machine. `None` until the scan runs (and for peer agents in
+    /// federated output — we can't see a peer's process table). Never emitted by
+    /// the CLI JSON; overlaid in `run_cli` after the read. `#[serde(default)]`
+    /// keeps the contract backward-compatible in both directions.
+    #[serde(default)]
+    pub live_process_count: Option<usize>,
 }
 
 /// One federated source machine (local or a peer).
@@ -283,6 +290,79 @@ fn compute_health(report: &AgentsReport) -> Health {
 }
 
 // ===========================================================================
+// Live process scan (Phase A) — read-only enumeration of the process table.
+// ===========================================================================
+//
+// Answers ONE question: how many CLI processes of each agent are running on
+// THIS machine right now. Uses sysinfo to read the kernel process list — no
+// shell, no `pgrep`, no argv interpolation; same exec-safety posture as the CLI
+// invocation below.
+
+/// Agent id (matching the L5 manifest id) → executable basenames that identify a
+/// live CLI of that agent. Matched case-insensitively against the process's
+/// executable file name. Deliberately small and explicit. The `-automations`
+/// agent ids are intentionally absent — their live processes share the same
+/// `claude`/`codex` binary, so process-counting cannot attribute them.
+const PROCESS_SIGNATURES: &[(&str, &[&str])] =
+    &[("claude-code", &["claude"]), ("codex", &["codex"])];
+
+/// Substrings that mark an executable path as belonging to a macOS desktop app
+/// bundle rather than a terminal CLI. Verified against real process tables
+/// (2026-06-30): excludes Claude.app / Codex.app and every helper, including
+/// Codex.app's embedded `.../Codex.app/Contents/Resources/codex app-server`,
+/// which otherwise shares the bare `codex` name.
+const APP_BUNDLE_MARKERS: &[&str] = &["/Applications/", ".app/Contents/"];
+
+/// Count running CLI processes per agent id on this machine. Matcher:
+///   basename(exe) == a signature name (case-insensitive)
+///   AND the exe path contains no APP_BUNDLE_MARKERS.
+fn live_counts() -> std::collections::HashMap<String, usize> {
+    use sysinfo::System;
+    let sys = System::new_all();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for proc in sys.processes().values() {
+        let exe_path = proc.exe().map(|p| p.to_string_lossy().to_string());
+        if let Some(ref path) = exe_path {
+            if APP_BUNDLE_MARKERS.iter().any(|m| path.contains(m)) {
+                continue; // desktop app / bundle helper, not a terminal CLI
+            }
+        } else {
+            continue; // no exe path → bundle membership unverifiable; skip
+        }
+        // The exe path is guaranteed present here (processes without one are
+        // skipped above), so this resolves to the executable basename.
+        let base = proc
+            .exe()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| proc.name().to_string_lossy().to_string());
+
+        for (agent_id, names) in PROCESS_SIGNATURES {
+            if names.iter().any(|n| n.eq_ignore_ascii_case(&base)) {
+                *counts.entry((*agent_id).to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Overlay live process counts onto a parsed report. Only local-machine agents
+/// receive a count; in federated output, peer agents (`source_kind == "peer"`)
+/// are left as `None` because we can only see this machine's process table.
+fn overlay_live_counts(report: &mut AgentsReport) {
+    let counts = live_counts();
+    for agent in report.agents.iter_mut() {
+        if agent.source_kind.as_deref() == Some("peer") {
+            continue;
+        }
+        if let Some(n) = counts.get(&agent.id) {
+            agent.live_process_count = Some(*n);
+        }
+    }
+}
+
+// ===========================================================================
 // CLI invocation (argv array — NO shell)
 // ===========================================================================
 
@@ -344,7 +424,11 @@ fn run_cli(federated: bool) -> AgentsResult {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     match serde_json::from_str::<AgentsReport>(&stdout) {
-        Ok(report) => {
+        Ok(mut report) => {
+            // Overlay live process counts before health/return — single merge
+            // point, so the frontend reads, the tray "Refresh" menu item, and
+            // --selftest all surface the same live-activity data.
+            overlay_live_counts(&mut report);
             let health = compute_health(&report);
             AgentsResult {
                 health,
