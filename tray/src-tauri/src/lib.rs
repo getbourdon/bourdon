@@ -340,7 +340,14 @@ const PROCESS_SIGNATURES: &[(&str, &[&str])] =
 /// (2026-06-30): excludes Claude.app / Codex.app and every helper, including
 /// Codex.app's embedded `.../Codex.app/Contents/Resources/codex app-server`,
 /// which otherwise shares the bare `codex` name.
+///
+/// macOS-only: `.app` bundles are a macOS concept, and `/Applications/` would
+/// otherwise spuriously match Linux `~/Applications` (AppImage convention) and
+/// undercount. Off macOS the marker set is empty (no exclusion).
+#[cfg(target_os = "macos")]
 const APP_BUNDLE_MARKERS: &[&str] = &["/Applications/", ".app/Contents/"];
+#[cfg(not(target_os = "macos"))]
+const APP_BUNDLE_MARKERS: &[&str] = &[];
 
 /// Count running CLI processes per agent id on this machine. Matcher:
 ///   basename(exe) == a signature name (case-insensitive)

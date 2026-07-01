@@ -131,7 +131,9 @@ function humanize(iso) {
 function esc(s) {
   const div = document.createElement("div");
   div.textContent = s == null ? "" : String(s);
-  return div.innerHTML;
+  // textContent→innerHTML escapes < > &, but NOT quotes — so also escape " and '
+  // to stay safe when interpolated inside an attribute (e.g. title="${...}").
+  return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function visClass(v) {
@@ -149,18 +151,21 @@ function pulseClass(a) {
   return "stale";
 }
 
-// Live count: prefer the accurate registry count (Phase B live_count) over the
-// coarse process scan (Phase A live_process_count). The registry counts logical
-// sessions; the scan counts OS processes and can't see desktop-embedded ones.
+// Live count: prefer the accurate registry count (Phase B live_count) — but
+// only when it actually has sessions. If the registry is 0/absent, fall back to
+// the Phase A process scan so an un-hooked-but-running CLI still shows a badge
+// instead of vanishing (registry live_count===0 was shadowing the scan).
 function liveCountOf(a) {
-  if (typeof a.live_count === "number") return a.live_count;
-  if (typeof a.live_process_count === "number") return a.live_process_count;
-  return 0;
+  const reg = typeof a.live_count === "number" ? a.live_count : 0;
+  const proc = typeof a.live_process_count === "number" ? a.live_process_count : 0;
+  return reg > 0 ? reg : proc;
 }
 
-// Humanize a heartbeat age given in seconds.
+// Humanize a heartbeat age given in seconds. Guards NaN/Infinity (would render
+// "NaNd ago") and treats a small negative age (clock skew) as "just now".
 function fmtAge(seconds) {
-  if (typeof seconds !== "number" || seconds < 0) return "";
+  if (!Number.isFinite(seconds)) return "";
+  if (seconds < 0) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
