@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1038,48 +1040,67 @@ def _hook_stdin() -> dict[str, Any]:
 
 
 def _resolve_session(args: argparse.Namespace) -> tuple[str | None, str | None]:
-    """Resolve (session_id, cwd) from explicit flags, falling back to hook stdin."""
-    session = getattr(args, "session", None)
-    cwd = getattr(args, "cwd", None)
-    if session and cwd:
-        return session, cwd
-    hook = _hook_stdin()
-    return (
-        session or hook.get("session_id"),
-        cwd or hook.get("cwd"),
-    )
+    """Resolve (session_id, cwd) from explicit flags, then hook stdin, then env.
+
+    The env fallbacks (``BOURDON_SESSION_ID``, then the terminal's
+    ``TERM_SESSION_ID``; ``PWD`` for cwd) cover agents whose hooks don't pass a
+    session id explicitly or on stdin — e.g. codex, whose hook expands
+    ``$TERM_SESSION_ID``. ``TERM_SESSION_ID`` is per-terminal (Apple Terminal /
+    iTerm2), so codex presence is keyed at terminal-session granularity — good
+    enough for the common case. Terminals that don't set it (some VS Code / ssh
+    contexts) simply yield no session, and the presence hooks then no-op rather
+    than fail (see the handlers below).
+    """
+    session = getattr(args, "session", None) or None
+    cwd = getattr(args, "cwd", None) or None
+    if not (session and cwd):
+        hook = _hook_stdin()
+        session = session or hook.get("session_id")
+        cwd = cwd or hook.get("cwd")
+    if not session:
+        session = (
+            os.environ.get("BOURDON_SESSION_ID") or os.environ.get("TERM_SESSION_ID")
+        )
+    if not cwd:
+        cwd = os.environ.get("PWD")
+    return (session or None), (cwd or None)
+
+
+# The register/heartbeat/deregister verbs run as CLAUDE CODE / CODEX HOOKS
+# (SessionStart / UserPromptSubmit / SessionEnd). A hook that exits non-zero can
+# block the user's turn, and a hook's stderr is injected into the model's
+# context. So these are HARD best-effort: they NEVER raise, NEVER print on the
+# happy path, and ALWAYS exit 0. A missing session id is a silent no-op (the
+# session just doesn't appear in the tray), never an error that disrupts work.
 
 
 def _handle_presence_register(args: argparse.Namespace) -> int:
-    from core import presence
-
     session, cwd = _resolve_session(args)
-    if not session:
-        print("presence register: no --session and no session_id on stdin", file=sys.stderr)
-        return 2
-    presence.register(args.agent, session, cwd=cwd)
+    if session:
+        with contextlib.suppress(Exception):
+            from core import presence
+
+            presence.register(args.agent, session, cwd=cwd)
     return 0
 
 
 def _handle_presence_heartbeat(args: argparse.Namespace) -> int:
-    from core import presence
-
     session, cwd = _resolve_session(args)
-    if not session:
-        print("presence heartbeat: no --session and no session_id on stdin", file=sys.stderr)
-        return 2
-    presence.heartbeat(args.agent, session, cwd=cwd)
+    if session:
+        with contextlib.suppress(Exception):
+            from core import presence
+
+            presence.heartbeat(args.agent, session, cwd=cwd)
     return 0
 
 
 def _handle_presence_deregister(args: argparse.Namespace) -> int:
-    from core import presence
-
     session, _cwd = _resolve_session(args)
-    if not session:
-        print("presence deregister: no --session and no session_id on stdin", file=sys.stderr)
-        return 2
-    presence.deregister(args.agent, session)
+    if session:
+        with contextlib.suppress(Exception):
+            from core import presence
+
+            presence.deregister(args.agent, session)
     return 0
 
 
