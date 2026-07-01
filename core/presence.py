@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import socket
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -114,31 +115,51 @@ def _parse_iso(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # A tz-naive timestamp (hand-edited file / foreign writer) would raise
+    # TypeError on `now - hb` and, unguarded, blank ALL presence. Force UTC.
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # --- write / delete ----------------------------------------------------------
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """tmp + fsync + atomic rename, then chmod 0600. Mirrors core/l5_io.py."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    """Durable atomic write: unique tmp (mkstemp, 0600) + fsync + os.replace,
+    then fsync the parent dir so the rename survives a crash.
+
+    A UNIQUE tmp per writer (not a fixed ``<name>.tmp``) is what makes concurrent
+    writes to the SAME session_id safe: there is no shared inode to interleave,
+    and each rename is independent (last-writer-wins) instead of one writer's
+    rename yanking the tmp out from under the other. The parent dir is created
+    0700 and the tmp is 0600 from birth (``mkstemp``), so a local co-tenant never
+    sees presence content — not even the brief pre-chmod window the old code had.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        os.chmod(path.parent, 0o700)  # tighten if the dir pre-existed looser
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        # best-effort; Windows / odd filesystems
+        os.replace(tmp, path)
+        # Durability: fsync the directory so the rename is on disk after a crash.
         with contextlib.suppress(OSError):
-            os.chmod(tmp, 0o600)
-        tmp.replace(path)
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except OSError:
         with contextlib.suppress(OSError):
-            if tmp.exists():
-                tmp.unlink()
+            tmp.unlink()
         raise
 
 
@@ -223,19 +244,68 @@ def _read_one(path: Path) -> dict[str, Any] | None:
 
 
 def _summarize(record: dict[str, Any], now: datetime) -> dict[str, Any]:
-    """Shape one raw presence record into the tray-facing live-session dict."""
+    """Shape one raw presence record into the tray-facing live-session dict.
+
+    The full ``session_id`` is intentionally NOT emitted — only the 8-char
+    ``instance`` the tray renders — so a full id never egresses to a peer. The
+    age is clamped at 0 so a future-dated / clock-skewed heartbeat can't render
+    a negative age.
+    """
     hb = _parse_iso(record.get("last_heartbeat"))
-    age_s = int((now - hb).total_seconds()) if hb else None
+    age_s = max(0, int((now - hb).total_seconds())) if hb else None
     session_id = str(record.get("session_id") or "")
     return {
-        # short, stable per-session label the tray renders as the "instance"
         "instance": session_id[:8] or None,
-        "session_id": session_id or None,
         "host": record.get("host"),
         "project": record.get("project"),
         "started_at": record.get("started_at"),
         "age_s": age_s,
     }
+
+
+def _iter_live_records(
+    ttl: int, now: datetime, reap: bool
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return ``(agent_id, record)`` for every LIVE session, reaping hard-stale.
+
+    Shared by :func:`live_sessions` and :func:`live_sessions_by_agent` so BOTH
+    read paths reap — the tray reads via ``live_sessions_by_agent``, which
+    previously never reaped, so crashed-session files accumulated forever.
+
+    A session is live iff its ``last_heartbeat`` is within ``ttl`` (a small
+    future skew is tolerated; a wildly-future heartbeat is treated as stale, not
+    immortal). Files hard-stale in either direction (> TTL * REAP_MULTIPLIER) are
+    deleted opportunistically. A single malformed file (bad timestamp,
+    unreadable) is skipped, never aborting the whole scan.
+    """
+    directory = presence_dir()
+    out: list[tuple[str, dict[str, Any]]] = []
+    if not directory.is_dir():
+        return out
+    try:
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return out
+
+    reap_window = ttl * REAP_MULTIPLIER
+    for path in paths:
+        try:
+            record = _read_one(path)
+            if record is None:
+                continue
+            hb = _parse_iso(record.get("last_heartbeat"))
+            age = (now - hb).total_seconds() if hb else None
+            live = age is not None and -ttl <= age <= ttl
+            if not live:
+                if reap and (age is None or abs(age) > reap_window):
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                continue
+            out.append((str(record.get("agent_id") or "").strip(), record))
+        except Exception:  # noqa: BLE001 -- one bad file must not abort the scan
+            logger.warning("Skipping unusable presence file %s", path, exc_info=True)
+            continue
+    return out
 
 
 def live_sessions(
@@ -244,75 +314,28 @@ def live_sessions(
     now: datetime | None = None,
     reap: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return all live sessions across every agent, newest-heartbeat first.
-
-    A session is live if its ``last_heartbeat`` is within ``ttl_seconds``.
-    Stale files (older than TTL * REAP_MULTIPLIER) are deleted opportunistically
-    when ``reap`` is True.
-    """
+    """Return all live sessions across every agent, newest-heartbeat first."""
     ttl = _ttl_seconds(ttl_seconds)
     now = now or _now()
-    directory = presence_dir()
-    out: list[dict[str, Any]] = []
-    if not directory.is_dir():
-        return out
-
-    try:
-        paths = sorted(directory.glob("*.json"))
-    except OSError:
-        return out
-
-    for path in paths:
-        record = _read_one(path)
-        if record is None:
-            continue
-        hb = _parse_iso(record.get("last_heartbeat"))
-        age = (now - hb).total_seconds() if hb else None
-        if age is None or age > ttl:
-            # Not live. Reap hard-stale files so they don't accumulate.
-            if reap and (age is None or age > ttl * REAP_MULTIPLIER):
-                with contextlib.suppress(OSError):
-                    path.unlink()
-            continue
-        out.append(record)
-
-    out.sort(key=lambda r: str(r.get("last_heartbeat") or ""), reverse=True)
-    return [_summarize(r, now) for r in out]
+    records = [rec for _agent_id, rec in _iter_live_records(ttl, now, reap)]
+    records.sort(key=lambda r: str(r.get("last_heartbeat") or ""), reverse=True)
+    return [_summarize(r, now) for r in records]
 
 
 def live_sessions_by_agent(
-    ttl_seconds: int | None = None, *, now: datetime | None = None
+    ttl_seconds: int | None = None,
+    *,
+    now: datetime | None = None,
+    reap: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group live sessions by ``agent_id`` for the tray-contract join.
-
-    Note: grouping keys off the raw record's agent_id (read again here rather
-    than threaded through ``_summarize``, which is tray-shaped).
-    """
+    """Group live sessions by ``agent_id`` for the tray-contract join."""
     ttl = _ttl_seconds(ttl_seconds)
     now = now or _now()
-    directory = presence_dir()
     grouped: dict[str, list[dict[str, Any]]] = {}
-    if not directory.is_dir():
-        return grouped
-
-    try:
-        paths = sorted(directory.glob("*.json"))
-    except OSError:
-        return grouped
-
-    for path in paths:
-        record = _read_one(path)
-        if record is None:
-            continue
-        hb = _parse_iso(record.get("last_heartbeat"))
-        age = (now - hb).total_seconds() if hb else None
-        if age is None or age > ttl:
-            continue
-        agent_id = str(record.get("agent_id") or "").strip()
+    for agent_id, record in _iter_live_records(ttl, now, reap):
         if not agent_id:
             continue
         grouped.setdefault(agent_id, []).append(_summarize(record, now))
-
     for sessions in grouped.values():
         sessions.sort(key=lambda s: str(s.get("started_at") or ""), reverse=False)
     return grouped

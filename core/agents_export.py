@@ -300,5 +300,13 @@ def _join_live_presence(
 
     for agent in agents:
         sessions = by_agent.get(str(agent.get("id") or ""), [])
+        for session in sessions:
+            # Route presence strings through the same audited redaction pipeline
+            # every other exported field uses (project = cwd basename, host =
+            # hostname) — don't let presence bypass it on the way to a peer.
+            if session.get("project"):
+                session["project"] = _redact_field(str(session["project"]))
+            if session.get("host"):
+                session["host"] = _redact_field(str(session["host"]))
         agent["live_sessions"] = sessions
         agent["live_count"] = len(sessions)
