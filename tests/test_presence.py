@@ -61,8 +61,48 @@ def test_heartbeat_self_heals_when_file_missing():
     # No prior register: a bare heartbeat should still create the session.
     presence.heartbeat("codex", "s-orphan", cwd="/x/prun")
     (session,) = presence.live_sessions()
-    assert session["session_id"] == "s-orphan"
+    assert session["instance"] == "s-orphan"  # 8-char instance, not the full id
     assert session["project"] == "prun"
+
+
+def test_summary_omits_full_session_id():
+    """The full session_id must never egress — only the 8-char instance."""
+    presence.register("codex", "0123456789abcdef", cwd="/x/prun")
+    (session,) = presence.live_sessions()
+    assert session["instance"] == "01234567"
+    assert "session_id" not in session
+
+
+def test_naive_timestamp_does_not_blank_everything():
+    """A single tz-naive/corrupt file must not abort the scan (was: TypeError
+    blanked ALL presence)."""
+    presence.register("claude-code", "good", cwd="/x/bourdon")
+    bad = presence.presence_dir() / "codex__bad.json"
+    bad.write_text('{"agent_id": "codex", "last_heartbeat": "2026-06-30T12:00:00"}')
+    live = presence.live_sessions_by_agent()
+    assert "claude-code" in live
+    assert len(live["claude-code"]) == 1
+
+
+def test_by_agent_reaps_hard_stale():
+    """The tray's read path (live_sessions_by_agent) must reap too (was: only
+    live_sessions reaped → unbounded accumulation)."""
+    presence.register("codex", "s1")
+    path = presence._session_file("codex", "s1")
+    future = presence._now() + timedelta(
+        seconds=presence.DEFAULT_TTL_SECONDS * presence.REAP_MULTIPLIER + 60
+    )
+    presence.live_sessions_by_agent(now=future, reap=True)
+    assert not path.exists()
+
+
+def test_future_heartbeat_not_immortal():
+    """A wildly-future heartbeat (clock skew) is stale, not live-forever."""
+    presence.register("codex", "s1")
+    past = presence._now() - timedelta(
+        seconds=presence.DEFAULT_TTL_SECONDS * presence.REAP_MULTIPLIER + 60
+    )
+    assert presence.live_sessions(now=past, reap=False) == []
 
 
 # --- TTL / liveness / reaping -------------------------------------------------
