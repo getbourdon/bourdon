@@ -254,7 +254,7 @@ def export_local_agents(
 
     agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
 
-    _join_live_presence(agents)
+    _join_live_presence(agents, access_level)
 
     return {
         "schema": AGENTS_SCHEMA,
@@ -264,20 +264,33 @@ def export_local_agents(
     }
 
 
-def _join_live_presence(agents: list[dict[str, Any]]) -> None:
-    """Enrich each LOCAL agent row in place with live-session presence.
+def _join_live_presence(
+    agents: list[dict[str, Any]], access_level: str = "private"
+) -> None:
+    """Enrich each agent row in place with live-session presence.
 
     Adds ``live_sessions`` (a possibly-empty list of {instance, host, project,
-    started_at, age_s}) and ``live_count`` to every agent. Presence is ephemeral
-    and local-only (Phase B), read from ``~/.bourdon/presence`` via
-    :mod:`core.presence`; it is orthogonal to the durable L5 manifests. A failure
-    to read presence must never sink the agents export, so this is best-effort:
-    on any error every agent simply gets ``live_count=0``.
+    started_at, age_s}) and ``live_count`` to every agent, read from
+    ``~/.bourdon/presence`` via :mod:`core.presence`. Presence is ephemeral and
+    orthogonal to the durable L5 manifests. Best-effort: a read failure never
+    sinks the export — every agent just gets ``live_count=0``.
+
+    Egress gate (parity with the per-session access gate): presence reveals what
+    you are actively working on *right now* (project, host). It is emitted for
+    the local tray (``private``) and for TRUSTED team peers (``team``) — the
+    latter is what makes the federated cross-machine live-session view work — but
+    NEVER for a ``public``/untrusted caller, who gets ``live_count=0``.
 
     Only agents that already have a manifest row are enriched. A live session
     whose agent has published no L5 manifest yet does not synthesize a row (rare;
     every real agent exports a manifest at session end).
     """
+    if access_level == "public":
+        for agent in agents:
+            agent["live_sessions"] = []
+            agent["live_count"] = 0
+        return
+
     try:
         from core import presence
 

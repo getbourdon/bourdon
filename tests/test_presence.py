@@ -153,3 +153,32 @@ def test_join_is_best_effort_when_presence_absent(tmp_path):
     (agent,) = report["agents"]
     assert agent["live_count"] == 0
     assert agent["live_sessions"] == []
+
+
+def test_presence_gated_out_for_public_caller(tmp_path):
+    """A public/untrusted caller must never see live activity (project, host)."""
+    from core.agents_export import export_local_agents
+
+    agents_dir = tmp_path / "agent-library" / "agents"
+    _write_manifest(agents_dir, "claude-code")
+    presence.register("claude-code", "s1", cwd="/x/secret-project")
+
+    report = export_local_agents(agents_dir, "m", access_level="public")
+    (agent,) = report["agents"]
+    assert agent["live_count"] == 0
+    assert agent["live_sessions"] == []
+
+
+def test_presence_included_for_team_peer(tmp_path):
+    """Trusted team peers DO get presence — this is what enables the federated
+    cross-machine live-session view (B.4)."""
+    from core.agents_export import export_local_agents
+
+    agents_dir = tmp_path / "agent-library" / "agents"
+    _write_manifest(agents_dir, "claude-code")
+    presence.register("claude-code", "s1", cwd="/x/bourdon")
+
+    report = export_local_agents(agents_dir, "m", access_level="team")
+    (agent,) = report["agents"]
+    assert agent["live_count"] == 1
+    assert agent["live_sessions"][0]["project"] == "bourdon"
