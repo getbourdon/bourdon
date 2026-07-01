@@ -149,6 +149,24 @@ function pulseClass(a) {
   return "stale";
 }
 
+// Live count: prefer the accurate registry count (Phase B live_count) over the
+// coarse process scan (Phase A live_process_count). The registry counts logical
+// sessions; the scan counts OS processes and can't see desktop-embedded ones.
+function liveCountOf(a) {
+  if (typeof a.live_count === "number") return a.live_count;
+  if (typeof a.live_process_count === "number") return a.live_process_count;
+  return 0;
+}
+
+// Humanize a heartbeat age given in seconds.
+function fmtAge(seconds) {
+  if (typeof seconds !== "number" || seconds < 0) return "";
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 // ---- overview ---------------------------------------------------------------
 
 function buildAgentRow(a) {
@@ -173,14 +191,16 @@ function buildAgentRow(a) {
   const brand = agentBrand(a.id);
   const touch = a.parse_error ? "" : humanize(a.last_updated);
 
-  // Phase A live-activity badge: running CLI processes on this machine.
-  const liveCount =
-    typeof a.live_process_count === "number" ? a.live_process_count : 0;
+  // Live-activity badge. Prefer the registry session count (Phase B); fall back
+  // to the Phase A process scan. Tooltip lists live-session projects when known.
+  const liveCount = liveCountOf(a);
+  const liveTitle =
+    a.live_sessions && a.live_sessions.length
+      ? a.live_sessions.map((s) => s.project || s.instance || "session").join(", ")
+      : `${liveCount} running CLI process${liveCount === 1 ? "" : "es"} on this machine`;
   const liveBadge =
     liveCount > 0
-      ? `<span class="live-badge" title="${liveCount} running CLI process${
-          liveCount === 1 ? "" : "es"
-        } on this machine"><span class="live-dot"></span>${liveCount} live</span>`
+      ? `<span class="live-badge" title="${esc(liveTitle)}"><span class="live-dot"></span>${liveCount} live</span>`
       : "";
 
   row.innerHTML = `
@@ -354,6 +374,35 @@ function renderDetail() {
         }`
       : `<p class="muted small">No sessions recorded yet — this agent is registered but hasn't published activity.</p>`;
 
+  // Phase B: live sessions (from the presence registry) — shown above the
+  // durable recent-sessions history, since they're happening right now.
+  const liveBlock =
+    a.live_sessions && a.live_sessions.length
+      ? `<div class="detail-section-title">Live sessions</div>` +
+        a.live_sessions
+          .map((s) => {
+            const label = esc(s.project || s.instance || "session");
+            const meta = [
+              s.instance ? esc(s.instance) : null,
+              s.host ? esc(s.host) : null,
+              typeof s.age_s === "number"
+                ? "heartbeat " + esc(fmtAge(s.age_s))
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            return `
+        <div class="sess">
+          <div class="sess-head">
+            <span class="sess-date">${label}</span>
+            <span class="live-badge"><span class="live-dot"></span>live</span>
+          </div>
+          ${meta ? `<div class="sess-focus">${meta}</div>` : ""}
+        </div>`;
+          })
+          .join("")
+      : "";
+
   const brand = agentBrand(a.id);
   const srcTag =
     scope === "federated" && a.source
@@ -371,11 +420,7 @@ function renderDetail() {
     </div>
     <div class="detail-stats">
       ${stat(humanize(a.last_updated), "last touched")}
-      ${
-        typeof a.live_process_count === "number" && a.live_process_count > 0
-          ? stat(a.live_process_count, "live now")
-          : ""
-      }
+      ${liveCountOf(a) > 0 ? stat(liveCountOf(a), "live now") : ""}
       ${stat(a.session_count ?? "—", "sessions")}
       ${stat(a.capability_count ?? "—", "capabilities")}
     </div>
@@ -384,6 +429,7 @@ function renderDetail() {
         ? `<div class="detail-role">${esc(a.role_narrative)}</div>`
         : ""
     }
+    ${liveBlock}
     ${sessionBlock}`;
 }
 

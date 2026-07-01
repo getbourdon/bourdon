@@ -150,6 +150,35 @@ pub struct Agent {
     /// keeps the contract backward-compatible in both directions.
     #[serde(default)]
     pub live_process_count: Option<usize>,
+    /// Phase B live-session registry (parsed from the CLI JSON, NOT the local
+    /// process scan): the accurate count of live logical sessions of this agent
+    /// and their per-session detail. Preferred over `live_process_count` for
+    /// display when present, since it counts sessions (incl. ones the process
+    /// scan can't attribute), not OS processes.
+    #[serde(default)]
+    pub live_count: Option<usize>,
+    #[serde(default)]
+    pub live_sessions: Vec<LiveSession>,
+}
+
+/// One live session from the presence registry (see `core/presence.py`).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct LiveSession {
+    /// Short, stable per-session label (first 8 chars of the session id).
+    #[serde(default)]
+    pub instance: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Basename of the session's cwd (low-PII project label).
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Seconds since the session's last heartbeat.
+    #[serde(default)]
+    pub age_s: Option<i64>,
 }
 
 /// One federated source machine (local or a peer).
