@@ -20,8 +20,20 @@ node_modules/
 .bourdon/
 agent-library/
 *.log
-# not needed at runtime
+# not needed at runtime (keep the image tiny — the server is core/ + cli/ + participants/)
+tray/
 tests/
 BENCHMARKS/
 conformance/
 marketing-site*/
+web/
+spec/
+plans/
+starter-template/
+homebrew/
+Formula/
+examples/
+ARCHIVE/
+docs/
+*.md
+!README.md
