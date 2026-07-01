@@ -319,6 +319,61 @@ a {
   }
 }
 
+/* ---- B.2: inline expandable live-session sub-list ---- */
+.agent-item {
+  display: flex;
+  flex-direction: column;
+}
+.live-badge--toggle {
+  cursor: pointer;
+}
+.live-caret {
+  display: inline-block;
+  margin-left: 1px;
+  opacity: 0.65;
+  transition: transform 0.15s ease;
+}
+.live-badge--toggle.expanded {
+  background: rgba(79, 107, 80, 0.2);
+}
+.live-badge--toggle.expanded .live-caret {
+  transform: rotate(90deg);
+}
+.agent-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 3px 12px 8px 42px;
+}
+.agent-sessions.hidden {
+  display: none;
+}
+.agent-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.agent-session-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green);
+  flex: 0 0 auto;
+}
+.agent-session-proj {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.agent-session-host {
+  color: var(--text-dim);
+}
+.agent-session-age {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
 /* ---- agent brand logos ---- */
 .agent-logo-wrap {
   position: relative;
