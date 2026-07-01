@@ -168,6 +168,26 @@ surface; it returns empty context when L2 is disabled. `bourdon serve` is a
 wrapper around `python -m core.l6_server` with a friendlier banner and the
 same `--transport` / `--port` flags.
 
+## Self-Host (free, always-on)
+
+Bourdon's engine is **free to run yourself, forever** (Apache-2.0 CLI + BUSL-1.1
+engine — self-host all you want; only reselling it as a hosted service is
+reserved to RADLAB). Stand up your own MCP endpoint three ways:
+
+```bash
+# 1. Local, stdio (Claude Desktop / Claude Code) — zero config
+claude mcp add bourdon -- bourdon serve
+
+# 2. Local/LAN HTTP via Docker — token printed once in the logs
+docker compose up -d --build && docker compose logs bourdon
+
+# 3. Always-on personal URL on Fly.io (TLS, sleeps when idle)
+fly launch --no-deploy --copy-config --name <your-app> && fly deploy
+```
+
+Full guide — Docker, Fly.io, tokens, client config, security, federating two of
+your own instances: **[`docs/SELF_HOST.md`](docs/SELF_HOST.md)**.
+
 ### See it work end-to-end
 
 The acceptance demo — one agent writes, a different agent reads via Bourdon
