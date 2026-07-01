@@ -93,6 +93,18 @@
       "items": { "$ref": "#/$defs/Entity" },
       "maxItems": 1000
     },
+    "known_workstreams": {
+      "description": "Ongoing multi-session initiatives, distinct from a single dated Session and from a named glossary Entity. A workstream has a status and accrues sessions/entities over time. L6 uses this to answer 'what's currently in flight?' style queries.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/Workstream" },
+      "maxItems": 200
+    },
+    "notes": {
+      "description": "Freestanding unstructured notes not tied to a specific named entity or a single session's action log. Closer to a journal entry than a glossary term.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/Note" },
+      "maxItems": 1000
+    },
     "visibility_policy": {
       "description": "Default visibility rules applied when an entity does not declare its own visibility.",
       "type": "object",
@@ -202,6 +214,84 @@
         "visibility": {
           "$ref": "#/$defs/Visibility",
           "description": "Overrides visibility_policy.default for this entity. Private entities MUST be omitted from federated L6 stores."
+        }
+      }
+    },
+    "Workstream": {
+      "type": "object",
+      "required": ["name", "status"],
+      "properties": {
+        "name": {
+          "description": "Human-readable workstream name.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "summary": {
+          "description": "Short description of what this workstream is (~1-3 sentences, <500 chars).",
+          "type": "string",
+          "maxLength": 2000
+        },
+        "status": {
+          "description": "Current lifecycle state.",
+          "type": "string",
+          "enum": ["active", "paused", "done", "archived"]
+        },
+        "started": {
+          "description": "ISO 8601 date this workstream began.",
+          "type": "string",
+          "format": "date"
+        },
+        "last_touched": {
+          "description": "ISO 8601 date of the most recent activity on this workstream.",
+          "type": "string",
+          "format": "date"
+        },
+        "related_entities": {
+          "description": "Entity names this workstream references. Cross-references known_entities.",
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 32
+        },
+        "tags": {
+          "description": "Free-text tags. Used for visibility_policy matching and L6 query filtering.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility",
+          "description": "Overrides visibility_policy.default for this workstream. Private workstreams MUST be omitted from federated L6 stores."
+        }
+      }
+    },
+    "Note": {
+      "type": "object",
+      "required": ["date", "text"],
+      "properties": {
+        "date": {
+          "description": "ISO 8601 date the note was written.",
+          "type": "string",
+          "format": "date"
+        },
+        "text": {
+          "description": "Freeform note content. Larger than a Session.key_actions line -- this is a journal entry, not an action log.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "related_entities": {
+          "description": "Entity names this note references. Cross-references known_entities. Optional.",
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 16
+        },
+        "tags": {
+          "description": "Free-text tags. Used for visibility_policy matching and L6 query filtering.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility",
+          "description": "Overrides visibility_policy.default for this note. Private notes MUST be omitted from federated L6 stores."
         }
       }
     }

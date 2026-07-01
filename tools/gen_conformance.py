@@ -70,7 +70,10 @@ from participants.base import (  # noqa: E402
 CONFORMANCE = REPO_ROOT / "conformance"
 SPEC_SCHEMA = REPO_ROOT / "spec" / "L5_schema.json"
 
-CONFORMANCE_VERSION = "1.7.0"  # bump on any fixture change (see manifest.json doc)
+CONFORMANCE_VERSION = "1.8.0"  # bump on any fixture change (see manifest.json doc)
+# 1.8.0: new L5 record families -- Workstream + Note (spec/L5_schema.json,
+#        core.l6_store: known_workstreams/notes, list_workstreams/list_notes,
+#        commit_to_federation gains workstreams/notes params + response fields).
 # 1.7.0: + the turn_compiler_vectors family (P7 turn compilers): the REAL
 #        compile_codex_turn / compile_cursor_turn driven over a dedicated 2-agent
 #        seed with the wall clock FROZEN (deterministic recency). Pins per case the

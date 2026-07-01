@@ -34,13 +34,20 @@ Tools exposed
 - ``find_entity(name, access_level, include_private)``
   Cross-agent entity lookup by name. ``access_level`` defaults to
   ``public``. ``include_private`` remains as a compatibility shim.
+- ``list_workstreams(status, agent, access_level, include_private)``
+  Ongoing multi-session initiatives, distinct from a dated Session and a
+  named glossary Entity. Local-store only (no cross-peer federation yet).
+- ``list_notes(since, agent, access_level, include_private)``
+  Freestanding journal-style notes, not tied to a specific entity or a
+  single session's action log. Local-store only (no cross-peer federation
+  yet).
 - ``get_cross_agent_summary(project, access_level, include_private)``
   Roll-up: all agents + sessions + entities relating to one project.
 - ``prepare_recognition_context(prompt, access_level, include_private)``
   Immediate recognition and a bounded prompt-context fragment for turn start.
 - ``get_deeper_context(prompt, access_level, include_private)``
   Post-recognition L2 context retrieval. Returns empty context when disabled.
-- ``commit_to_federation(agent_id, agent_type, entities, sessions, mode, ...)``
+- ``commit_to_federation(agent_id, agent_type, entities, sessions, workstreams, notes, mode, ...)``
   Write-side tool. Cloud-only / webview-wrapper agents (Claude Desktop,
   ChatGPT desktop, etc.) call this to push L5 contributions when they
   have no readable on-disk store for a Bourdon participant to scrape.
@@ -464,6 +471,19 @@ def create_l6_server(
             kept.append(m)
         return kept
 
+    def _filter_workstream_matches(matches: list, caller: AgentIdentity) -> list:
+        """Drop non-granted agents from WorkstreamMatch rows; drop empty rows."""
+        if caller.is_trusted:
+            return matches
+        kept = []
+        for m in matches:
+            agents = [a for a in m.agents if caller.may_read(a)]
+            if not agents:
+                continue
+            m.agents = agents
+            kept.append(m)
+        return kept
+
     # ---- Resources ------------------------------------------------------------
 
     @mcp.resource("agent-library://agents")
@@ -719,6 +739,128 @@ def create_l6_server(
         }
 
     @mcp.tool()
+    async def list_workstreams(
+        status: str | None = None,
+        agent: str | None = None,
+        access_level: str = "public",
+        include_private: bool = False,
+    ) -> dict:
+        """
+        List workstreams -- ongoing multi-session initiatives, distinct from
+        a single dated Session and from a named glossary Entity.
+
+        Parameters
+        ----------
+        status : str, optional
+            Filter to one lifecycle state: ``active`` / ``paused`` / ``done``
+            / ``archived``. Omit to return all statuses.
+        agent : str, optional
+            Filter to one agent's workstreams.
+
+        Unlike ``list_recent_work``, this is not paginated -- workstreams
+        are a small, named, bounded set (capped at 200/agent per the L5
+        schema). Dedupes by name across agents, same as ``find_entity``.
+
+        Federation note: this queries the LOCAL store only. Cross-peer
+        workstream federation is not yet wired (tracked as a follow-up to
+        the entity/session federated query paths).
+        """
+        caller = _resolve_caller()
+        _audit(caller, "list_workstreams", agent or "*")
+        matches = store.list_workstreams(
+            status=status,
+            agent=agent,
+            include_private=include_private,
+            access_level=access_level,
+        )
+        matches = _filter_workstream_matches(matches, caller)
+        return {
+            "status": status,
+            "agent": agent,
+            "access_level": access_level,
+            "include_private": include_private,
+            "workstreams": [w.to_dict() for w in matches],
+        }
+
+    @mcp.tool()
+    async def list_notes(
+        since: str | None = None,
+        agent: str | None = None,
+        access_level: str = "public",
+        include_private: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict:
+        """
+        Return a page of freestanding notes across agents (or a single
+        agent) -- unstructured journal entries, not tied to a specific
+        named entity or a single session's action log.
+
+        Pagination and default-since-window behavior mirror
+        ``list_recent_work`` exactly.
+
+        Federation note: this queries the LOCAL store only. Cross-peer
+        note federation is not yet wired (tracked as a follow-up to the
+        entity/session federated query paths).
+        """
+        caller = _resolve_caller()
+        if not caller.is_trusted and agent is not None and not caller.may_read(agent):
+            denial = _denied("list_notes", caller, namespace=agent,
+                             detail=f"namespace {agent!r} not granted")
+            denial.update({"notes": [], "next_cursor": None, "has_more": False})
+            return denial
+        _audit(caller, "list_notes", agent or "*")
+        cutoff: datetime | None = None
+        if since:
+            try:
+                cutoff = datetime.fromisoformat(since)
+            except ValueError:
+                try:
+                    from datetime import date as _date
+                    from datetime import time as _time
+
+                    parsed = _date.fromisoformat(since)
+                    cutoff = datetime.combine(parsed, _time.min)
+                except ValueError:
+                    logger.warning("Invalid 'since' value: %s", since)
+        try:
+            page = store.list_notes(
+                since=cutoff,
+                agent=agent,
+                include_private=include_private,
+                access_level=access_level,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as exc:
+            return {
+                "error": str(exc),
+                "since": since,
+                "agent": agent,
+                "access_level": access_level,
+                "include_private": include_private,
+                "limit": limit,
+                "cursor": cursor,
+                "notes": [],
+                "next_cursor": None,
+                "has_more": False,
+            }
+        rows = page.notes
+        if not caller.is_trusted:
+            rows = [n for n in rows if caller.may_read(n.agent)]
+        return {
+            "since": since,
+            "agent": agent,
+            "access_level": access_level,
+            "include_private": include_private,
+            "limit": limit,
+            "cursor": cursor,
+            "notes": [n.to_dict() for n in rows],
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
+
+    @mcp.tool()
     async def list_agents(federation_hop: int = 0) -> dict:
         """
         List agent IDs known to this L6 server, plus any peers' agents.
@@ -787,6 +929,8 @@ def create_l6_server(
         role_narrative: str | None = None,
         entities: list[dict] | None = None,
         sessions: list[dict] | None = None,
+        workstreams: list[dict] | None = None,
+        notes: list[dict] | None = None,
         mode: str = "merge",
     ) -> dict:
         """
@@ -820,6 +964,15 @@ def create_l6_server(
             Each session dict needs at minimum a non-empty ``date`` (ISO
             8601 string). Other L5 session fields -- cwd, project_focus,
             key_actions, files_touched, visibility -- pass through.
+        workstreams : list of dict, optional
+            Each workstream dict needs at minimum a non-empty ``name``. A
+            ``status`` (one of active/paused/done/archived) defaults to
+            ``active`` if omitted. Other fields -- summary, started,
+            last_touched, related_entities, tags, visibility -- pass through.
+        notes : list of dict, optional
+            Each note dict needs at minimum a ``date`` and non-empty
+            ``text``. Other fields -- related_entities, tags, visibility --
+            pass through.
         mode : "merge" or "replace"
             ``merge`` (default) unions new rows with the existing manifest.
             Entities dedupe by ``name.lower()``; sessions dedupe by
@@ -867,6 +1020,13 @@ def create_l6_server(
                 for row in sessions or []:
                     if not isinstance(row, dict) or not str(row.get("date") or "").strip():
                         raise ValueError("each session needs a non-empty ISO-8601 'date'")
+                for row in workstreams or []:
+                    if not isinstance(row, dict) or not str(row.get("name") or "").strip():
+                        raise ValueError("each workstream needs a non-empty 'name'")
+                for row in notes or []:
+                    if (not isinstance(row, dict) or not str(row.get("date") or "").strip()
+                            or not str(row.get("text") or "").strip()):
+                        raise ValueError("each note needs a non-empty 'date' and 'text'")
                 from core.federation_staging import merge_into_staged
 
                 path = merge_into_staged(
@@ -878,6 +1038,8 @@ def create_l6_server(
                     agent_type=agent_type,
                     instance=instance,
                     role_narrative=role_narrative,
+                    workstreams=workstreams,
+                    notes=notes,
                 )
             except ValueError as exc:
                 return {"error": str(exc), "agent_id": agent_id, "mode": mode}
@@ -901,6 +1063,8 @@ def create_l6_server(
                 role_narrative=role_narrative,
                 entities=entities,
                 sessions=sessions,
+                workstreams=workstreams,
+                notes=notes,
                 mode=mode,
             )
         except ValueError as exc:

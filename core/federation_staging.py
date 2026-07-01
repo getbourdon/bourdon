@@ -94,13 +94,15 @@ def merge_into_staged(
     agent_type: str | None = None,
     instance: str | None = None,
     role_narrative: str | None = None,
+    workstreams: list[dict] | None = None,
+    notes: list[dict] | None = None,
 ) -> Path:
     """Merge a quarantined ``commit_to_federation`` call into its staged file.
 
     Repeated quarantined commits accumulate into one staged manifest per
     (caller, agent_id) rather than overwriting each other. Dedupe follows the
-    live-store convention: entities by ``name.lower()``, sessions by
-    ``(date, cwd)``.
+    live-store convention: entities and workstreams by ``name.lower()``,
+    sessions by ``(date, cwd)``, notes by ``(date, text)``.
     """
     dest = staging_root(library_path) / caller / f"{agent_id}.l5.yaml"
     existing: dict[str, Any] = {}
@@ -147,6 +149,16 @@ def merge_into_staged(
             list(existing.get("recent_sessions") or []),
             sessions or [],
             lambda r: (str(r.get("date") or ""), r.get("cwd")),
+        ),
+        "known_workstreams": _merge_by(
+            list(existing.get("known_workstreams") or []),
+            workstreams or [],
+            lambda r: str(r.get("name") or "").lower(),
+        ),
+        "notes": _merge_by(
+            list(existing.get("notes") or []),
+            notes or [],
+            lambda r: (str(r.get("date") or ""), str(r.get("text") or "")),
         ),
     }
     return stage_manifest(library_path, caller, manifest)

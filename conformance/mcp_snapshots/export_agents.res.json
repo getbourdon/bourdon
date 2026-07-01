@@ -6,6 +6,7 @@
       "id": "claude-code",
       "instance": "pc-threadripper",
       "last_updated": "<frozen>",
+      "live_count": 0,
       "recent_activity": [
         {
           "date": "2026-06-08",
@@ -39,6 +40,7 @@
       "freshest_session_date": "2026-06-08",
       "id": "codex",
       "last_updated": "<frozen>",
+      "live_count": 0,
       "recent_activity": [
         {
           "date": "2026-06-08",

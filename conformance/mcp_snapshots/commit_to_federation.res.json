@@ -4,9 +4,15 @@
   "entities_updated": 0,
   "last_updated": "<frozen>",
   "mode": "merge",
+  "notes_added": 0,
+  "notes_updated": 0,
   "path": "<frozen>",
   "sessions_added": 1,
   "sessions_updated": 0,
   "total_entities": 1,
-  "total_sessions": 1
+  "total_notes": 0,
+  "total_sessions": 1,
+  "total_workstreams": 0,
+  "workstreams_added": 0,
+  "workstreams_updated": 0
 }
