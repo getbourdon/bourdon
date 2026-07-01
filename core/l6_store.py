@@ -137,6 +137,76 @@ class EntityMatch:
 
 
 @dataclass
+class WorkstreamMatch:
+    """One workstream, with the agent(s) that know about it."""
+
+    name: str
+    status: str = "active"
+    summary: str = ""
+    agents: list[str] = field(default_factory=list)
+    related_entities: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    last_touched: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "summary": self.summary,
+            "agents": self.agents,
+            "related_entities": self.related_entities,
+            "tags": self.tags,
+            "last_touched": self.last_touched,
+        }
+
+
+@dataclass
+class NoteRef:
+    """One note from one agent's notes list, keyed back to the agent."""
+
+    agent: str
+    date: str
+    text: str
+    related_entities: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "date": self.date,
+            "text": self.text,
+            "related_entities": self.related_entities,
+            "tags": self.tags,
+        }
+
+
+@dataclass
+class PaginatedNotes:
+    """Result of a paginated :meth:`L6Store.list_notes` call. Mirrors
+    :class:`PaginatedSessions`."""
+
+    notes: list[NoteRef] = field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "notes": [n.to_dict() for n in self.notes],
+            "next_cursor": self.next_cursor,
+            "has_more": self.has_more,
+        }
+
+    def __iter__(self):
+        return iter(self.notes)
+
+    def __len__(self) -> int:
+        return len(self.notes)
+
+    def __getitem__(self, index):
+        return self.notes[index]
+
+
+@dataclass
 class SessionRef:
     """One session from one agent's recent_sessions list, keyed back to the agent."""
 
@@ -217,21 +287,16 @@ class ProjectSummary:
 # -- Visibility helpers (module-local, independent of participants.base) ----------
 
 
-def _entity_visibility(entity: dict) -> str:
-    """Return the entity's declared visibility, defaulting to PUBLIC."""
-    if not isinstance(entity, dict):
-        return "public"
-    explicit = entity.get("visibility")
-    if isinstance(explicit, str):
-        return explicit.lower()
-    return "public"
+def _record_visibility(record: dict) -> str:
+    """Return a record's declared visibility, defaulting to PUBLIC.
 
-
-def _session_visibility(session: dict) -> str:
-    """Return the session's declared visibility, defaulting to PUBLIC."""
-    if not isinstance(session, dict):
+    Type-agnostic: entities, sessions, workstreams, and notes all declare
+    visibility the same way (an optional `visibility` string field), so one
+    function covers all four L5 record types.
+    """
+    if not isinstance(record, dict):
         return "public"
-    explicit = session.get("visibility")
+    explicit = record.get("visibility")
     if isinstance(explicit, str):
         return explicit.lower()
     return "public"
@@ -281,8 +346,12 @@ def _visibility_rank(value: str) -> int:
 
 
 def _is_visible(thing: dict, access_level: str) -> bool:
-    """Return True if this entity/session is visible at the given access level."""
-    vis = _entity_visibility(thing) if "name" in thing else _session_visibility(thing)
+    """Return True if this record is visible at the given access level.
+
+    Type-agnostic over entities/sessions/workstreams/notes -- see
+    `_record_visibility`.
+    """
+    vis = _record_visibility(thing)
     normalized_vis = vis if vis in {"public", "team", "private"} else "public"
     return _visibility_rank(normalized_vis) <= _visibility_rank(access_level)
 
@@ -421,6 +490,16 @@ class L6Store:
             for s in manifest.get("recent_sessions") or []
             if isinstance(s, dict) and _is_visible(s, resolved_access)
         ]
+        filtered["known_workstreams"] = [
+            w
+            for w in manifest.get("known_workstreams") or []
+            if isinstance(w, dict) and _is_visible(w, resolved_access)
+        ]
+        filtered["notes"] = [
+            n
+            for n in manifest.get("notes") or []
+            if isinstance(n, dict) and _is_visible(n, resolved_access)
+        ]
         return filtered
 
     def build_recognition_manifest(
@@ -458,9 +537,51 @@ class L6Store:
             access_level=access_level,
         )
         entities_by_key: dict[str, dict[str, Any]] = {}
+        workstreams_by_key: dict[str, dict[str, Any]] = {}
         recent_sessions: list[dict[str, Any]] = []
 
         for agent_id, manifest in sorted(self._manifests.items()):
+            for workstream in manifest.get("known_workstreams") or []:
+                if not isinstance(workstream, dict):
+                    continue
+                if not _is_visible(workstream, resolved_access):
+                    continue
+                name = workstream.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                key = name.strip().lower()
+                merged_ws = workstreams_by_key.setdefault(
+                    key,
+                    {
+                        "name": name.strip(),
+                        "status": str(workstream.get("status") or "active"),
+                        "summary": str(workstream.get("summary") or ""),
+                        "last_touched": "",
+                        "related_entities": [],
+                        "source_agents": [],
+                        "tags": [],
+                        "visibility": resolved_access,
+                    },
+                )
+                _append_unique(merged_ws["source_agents"], agent_id)
+                for ent_name in workstream.get("related_entities") or []:
+                    if isinstance(ent_name, str) and ent_name.strip():
+                        _append_unique(merged_ws["related_entities"], ent_name.strip())
+                for tag in workstream.get("tags") or []:
+                    if isinstance(tag, str) and tag.strip():
+                        _append_unique(merged_ws["tags"], tag.strip())
+                if not merged_ws.get("summary"):
+                    summary = workstream.get("summary")
+                    if isinstance(summary, str) and summary.strip():
+                        merged_ws["summary"] = summary.strip()
+                # Newest last_touched wins for status -- an agent's fresher
+                # view of the workstream's lifecycle state is more likely
+                # correct than a stale one from another agent.
+                lt = workstream.get("last_touched")
+                if isinstance(lt, str) and lt > merged_ws["last_touched"]:
+                    merged_ws["last_touched"] = lt
+                    merged_ws["status"] = str(workstream.get("status") or merged_ws["status"])
+
             for entity in manifest.get("known_entities") or []:
                 if not isinstance(entity, dict):
                     continue
@@ -520,11 +641,16 @@ class L6Store:
             key=lambda session: str(session.get("date") or ""),
             reverse=True,
         )
+        # Notes are deliberately excluded from this digest -- the docstring's
+        # "intentionally small" recognition surface wants what's currently
+        # active (entities, workstreams, sessions), not the full journal.
+        # Use list_notes() for note lookups.
         return {
             "spec_version": "0.1",
             "agent": {"id": "bourdon-l6", "type": "federation"},
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "known_entities": list(entities_by_key.values()),
+            "known_workstreams": list(workstreams_by_key.values()),
             "recent_sessions": recent_sessions,
         }
 
@@ -589,6 +715,141 @@ class L6Store:
                     if isinstance(tag, str) and tag not in match.tags:
                         match.tags.append(tag)
         return list(by_exact_name.values())
+
+    def list_workstreams(
+        self,
+        status: str | None = None,
+        agent: str | None = None,
+        include_private: bool = False,
+        access_level: str | None = None,
+    ) -> list[WorkstreamMatch]:
+        """
+        List workstreams across one or all agents, optionally filtered by
+        lifecycle ``status`` (``active`` / ``paused`` / ``done`` / ``archived``).
+
+        Unlike sessions, workstreams are a small, named, bounded set (capped
+        at 200/agent per the L5 schema) -- so unlike ``list_recent_work``
+        this returns the full matching set directly rather than paginating.
+        Dedupes by name across agents, same as ``find_entity``.
+        """
+        resolved_access = _resolve_access_level(
+            include_private=include_private,
+            access_level=access_level,
+        )
+        manifests = (
+            {agent: self._manifests[agent]}
+            if agent and agent in self._manifests
+            else self._manifests
+        )
+        by_key: dict[str, WorkstreamMatch] = {}
+        for agent_id, manifest in manifests.items():
+            for workstream in manifest.get("known_workstreams") or []:
+                if not isinstance(workstream, dict):
+                    continue
+                if not _is_visible(workstream, resolved_access):
+                    continue
+                name = workstream.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                ws_status = str(workstream.get("status") or "active")
+                if status is not None and ws_status != status:
+                    continue
+                key = name.strip().lower()
+                match = by_key.setdefault(
+                    key,
+                    WorkstreamMatch(
+                        name=name.strip(), status=ws_status,
+                        summary=str(workstream.get("summary") or ""),
+                    ),
+                )
+                if agent_id not in match.agents:
+                    match.agents.append(agent_id)
+                for ent_name in workstream.get("related_entities") or []:
+                    if isinstance(ent_name, str) and ent_name not in match.related_entities:
+                        match.related_entities.append(ent_name)
+                for tag in workstream.get("tags") or []:
+                    if isinstance(tag, str) and tag not in match.tags:
+                        match.tags.append(tag)
+                lt = workstream.get("last_touched")
+                if isinstance(lt, str) and lt > (match.last_touched or ""):
+                    match.last_touched = lt
+                    match.status = ws_status
+        results = list(by_key.values())
+        results.sort(key=lambda w: w.last_touched or "", reverse=True)
+        return results
+
+    def list_notes(
+        self,
+        since: datetime | None = None,
+        agent: str | None = None,
+        include_private: bool = False,
+        access_level: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> PaginatedNotes:
+        """
+        Flatten notes from one or all agents into a unified, paginated list.
+
+        Mirrors ``list_recent_work``'s pagination and default-since-window
+        behavior exactly, over the ``notes`` array instead of
+        ``recent_sessions``.
+        """
+        if since is None and cursor is None:
+            since = datetime.now(timezone.utc) - timedelta(days=DEFAULT_SINCE_DAYS)
+
+        effective_limit = DEFAULT_LIMIT if limit is None else int(limit)
+        if effective_limit < 1:
+            effective_limit = 1
+        if effective_limit > MAX_LIMIT:
+            effective_limit = MAX_LIMIT
+
+        cutoff: date | None = since.date() if since is not None else None
+        resolved_access = _resolve_access_level(
+            include_private=include_private,
+            access_level=access_level,
+        )
+        all_results: list[NoteRef] = []
+        manifests = (
+            {agent: self._manifests[agent]}
+            if agent and agent in self._manifests
+            else self._manifests
+        )
+        for agent_id, manifest in manifests.items():
+            for note in manifest.get("notes") or []:
+                if not isinstance(note, dict):
+                    continue
+                if not _is_visible(note, resolved_access):
+                    continue
+                note_date = note.get("date")
+                if cutoff is not None and isinstance(note_date, str):
+                    try:
+                        parsed = date.fromisoformat(note_date)
+                    except ValueError:
+                        parsed = None
+                    if parsed is None or parsed < cutoff:
+                        continue
+                all_results.append(
+                    NoteRef(
+                        agent=agent_id,
+                        date=str(note_date or ""),
+                        text=str(note.get("text") or ""),
+                        related_entities=list(note.get("related_entities") or []),
+                        tags=list(note.get("tags") or []),
+                    )
+                )
+        all_results.sort(key=lambda n: (n.date, n.agent), reverse=True)
+
+        offset = _decode_cursor(cursor)
+        page = all_results[offset : offset + effective_limit]
+        next_offset = offset + len(page)
+        has_more = next_offset < len(all_results)
+        next_cursor = _encode_cursor(next_offset) if has_more else None
+
+        return PaginatedNotes(
+            notes=page,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
     def list_recent_work(
         self,
@@ -1192,6 +1453,8 @@ class L6Store:
         role_narrative: str | None = None,
         entities: list[dict] | None = None,
         sessions: list[dict] | None = None,
+        workstreams: list[dict] | None = None,
+        notes: list[dict] | None = None,
         mode: str = "merge",
     ) -> dict[str, Any]:
         """Serialize the read-modify-write-reload (3-Star audit P1-3).
@@ -1211,6 +1474,8 @@ class L6Store:
                 role_narrative=role_narrative,
                 entities=entities,
                 sessions=sessions,
+                workstreams=workstreams,
+                notes=notes,
                 mode=mode,
             )
 
@@ -1223,6 +1488,8 @@ class L6Store:
         role_narrative: str | None = None,
         entities: list[dict] | None = None,
         sessions: list[dict] | None = None,
+        workstreams: list[dict] | None = None,
+        notes: list[dict] | None = None,
         mode: str = "merge",
     ) -> dict[str, Any]:
         """
@@ -1260,15 +1527,24 @@ class L6Store:
             datetime string). Other fields (``cwd``, ``project_focus``,
             ``key_actions``, ``files_touched``, ``visibility``) are
             passed through as-is.
+        workstreams : list of dict, optional
+            Workstream rows. Each must have a non-empty ``name`` and a
+            ``status`` (one of ``active``/``paused``/``done``/``archived``;
+            defaults to ``active`` if omitted). Other fields (``summary``,
+            ``started``, ``last_touched``, ``related_entities``, ``tags``,
+            ``visibility``) are passed through as-is.
+        notes : list of dict, optional
+            Note rows. Each must have a ``date`` and non-empty ``text``.
+            Other fields (``related_entities``, ``tags``, ``visibility``)
+            are passed through as-is.
         mode : "merge" or "replace"
-            ``merge`` (default): union new entities/sessions with the
-            existing manifest. Entities dedupe by ``name.lower()``;
-            sessions dedupe by ``(date, cwd)`` tuple. For dupes, the
-            new value wins for non-list fields; list fields (``tags``,
-            ``aliases``, ``key_actions``, ``files_touched``,
-            ``project_focus``) are unioned.
+            ``merge`` (default): union new entities/sessions/workstreams/
+            notes with the existing manifest. Entities and workstreams
+            dedupe by ``name.lower()``; sessions dedupe by ``(date, cwd)``;
+            notes dedupe by ``(date, text)``. For dupes, the new value wins
+            for non-list fields; list fields are unioned.
             ``replace``: discard existing content and write the provided
-            entities/sessions as the whole manifest.
+            rows as the whole manifest.
 
         Returns
         -------
@@ -1292,6 +1568,8 @@ class L6Store:
 
         new_entities = list(entities or [])
         new_sessions = list(sessions or [])
+        new_workstreams = list(workstreams or [])
+        new_notes = list(notes or [])
         for ent in new_entities:
             if not isinstance(ent, dict):
                 raise ValueError(f"entity is not a dict: {ent!r}")
@@ -1303,6 +1581,25 @@ class L6Store:
                 raise ValueError(f"session is not a dict: {ses!r}")
             if not isinstance(ses.get("date"), str) or not ses["date"].strip():
                 raise ValueError(f"session missing non-empty 'date': {ses!r}")
+        for ws in new_workstreams:
+            if not isinstance(ws, dict):
+                raise ValueError(f"workstream is not a dict: {ws!r}")
+            name = ws.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"workstream missing non-empty 'name': {ws!r}")
+            status = ws.setdefault("status", "active")
+            if status not in _ALLOWED_WORKSTREAM_STATUSES:
+                raise ValueError(
+                    f"workstream status {status!r} is not in "
+                    f"{sorted(_ALLOWED_WORKSTREAM_STATUSES)}: {ws!r}"
+                )
+        for note in new_notes:
+            if not isinstance(note, dict):
+                raise ValueError(f"note is not a dict: {note!r}")
+            if not isinstance(note.get("date"), str) or not note["date"].strip():
+                raise ValueError(f"note missing non-empty 'date': {note!r}")
+            if not isinstance(note.get("text"), str) or not note["text"].strip():
+                raise ValueError(f"note missing non-empty 'text': {note!r}")
 
         existing = self._manifests.get(agent_id) if mode == "merge" else None
 
@@ -1332,6 +1629,8 @@ class L6Store:
                 "last_updated": datetime.now(timezone.utc).isoformat(),
                 "recent_sessions": [],
                 "known_entities": [],
+                "known_workstreams": [],
+                "notes": [],
             }
         else:
             # Deep-copy the existing manifest so we don't mutate the in-memory
@@ -1345,23 +1644,34 @@ class L6Store:
             manifest["last_updated"] = datetime.now(timezone.utc).isoformat()
             manifest.setdefault("known_entities", [])
             manifest.setdefault("recent_sessions", [])
+            manifest.setdefault("known_workstreams", [])
+            manifest.setdefault("notes", [])
 
         if instance is not None:
             manifest["agent"]["instance"] = instance
         if role_narrative is not None:
             manifest["agent"]["role_narrative"] = role_narrative
 
-        # -- merge entities/sessions ----------------------------------------
+        # -- merge entities/sessions/workstreams/notes -----------------------
         ent_added, ent_updated = _merge_entities(
             manifest["known_entities"], new_entities
         )
         ses_added, ses_updated = _merge_sessions(
             manifest["recent_sessions"], new_sessions
         )
+        ws_added, ws_updated = _merge_workstreams(
+            manifest["known_workstreams"], new_workstreams
+        )
+        note_added, note_updated = _merge_notes(
+            manifest["notes"], new_notes
+        )
 
-        # Sort sessions newest-first, like list_recent_work expects.
+        # Sort sessions/notes newest-first, like list_recent_work/list_notes expect.
         manifest["recent_sessions"].sort(
             key=lambda s: str(s.get("date") or ""), reverse=True
+        )
+        manifest["notes"].sort(
+            key=lambda n: str(n.get("date") or ""), reverse=True
         )
 
         # -- write atomically -----------------------------------------------
@@ -1384,8 +1694,14 @@ class L6Store:
             "entities_updated": ent_updated,
             "sessions_added": ses_added,
             "sessions_updated": ses_updated,
+            "workstreams_added": ws_added,
+            "workstreams_updated": ws_updated,
+            "notes_added": note_added,
+            "notes_updated": note_updated,
             "total_entities": len(manifest["known_entities"]),
             "total_sessions": len(manifest["recent_sessions"]),
+            "total_workstreams": len(manifest["known_workstreams"]),
+            "total_notes": len(manifest["notes"]),
             "last_updated": manifest["last_updated"],
         }
 
@@ -1415,6 +1731,15 @@ _ENTITY_LIST_FIELDS = ("tags", "aliases")
 
 # Session dict fields that should be unioned (not overwritten) when merging.
 _SESSION_LIST_FIELDS = ("project_focus", "key_actions", "files_touched")
+
+# Workstream dict fields that should be unioned (not overwritten) when merging.
+_WORKSTREAM_LIST_FIELDS = ("tags", "related_entities")
+
+# Note dict fields that should be unioned (not overwritten) when merging.
+_NOTE_LIST_FIELDS = ("tags", "related_entities")
+
+# Mirrors the Workstream.status enum in spec/L5_schema.json.
+_ALLOWED_WORKSTREAM_STATUSES = frozenset({"active", "paused", "done", "archived"})
 
 
 def _coerce_list(value: Any) -> list:
@@ -1521,6 +1846,82 @@ def _merge_sessions(
             updated += 1
         else:
             existing.append(_normalized_row(incoming_ses, _SESSION_LIST_FIELDS))
+            by_key[key] = existing[-1]
+            added += 1
+    return added, updated
+
+
+def _merge_workstreams(
+    existing: list[dict], incoming: list[dict]
+) -> tuple[int, int]:
+    """Merge ``incoming`` into ``existing`` in-place. Dedupe by name.lower().
+
+    Same shape as ``_merge_entities`` -- a workstream is a named, bounded
+    thing that accrues state over time, not a chronological log entry.
+    Returns ``(added_count, updated_count)``. List fields (tags,
+    related_entities) are unioned; non-list fields (including ``status``)
+    are overwritten by the incoming value when non-None -- the caller is
+    expected to pass the workstream's current status on every commit.
+    """
+    by_key: dict[str, dict] = {}
+    for w in existing:
+        if isinstance(w, dict):
+            name = w.get("name")
+            if isinstance(name, str):
+                by_key[name.strip().lower()] = w
+
+    added = 0
+    updated = 0
+    for incoming_ws in incoming:
+        key = str(incoming_ws["name"]).strip().lower()
+        if key in by_key:
+            target = by_key[key]
+            for field_name, value in incoming_ws.items():
+                if field_name in _WORKSTREAM_LIST_FIELDS:
+                    _union_list_field(target, field_name, value)
+                elif value is not None:
+                    target[field_name] = value
+            updated += 1
+        else:
+            existing.append(_normalized_row(incoming_ws, _WORKSTREAM_LIST_FIELDS))
+            by_key[key] = existing[-1]
+            added += 1
+    return added, updated
+
+
+def _merge_notes(
+    existing: list[dict], incoming: list[dict]
+) -> tuple[int, int]:
+    """Merge ``incoming`` into ``existing`` in-place. Dedupe by (date, text).
+
+    Notes have no natural name-like key, so identical (date, text) pairs are
+    treated as the same note (repeat commits of an unchanged note are a
+    no-op update, not a growing pile of duplicates). Distinct notes on the
+    same date get distinct keys because their text differs.
+    Returns ``(added_count, updated_count)``. List fields (tags,
+    related_entities) are unioned; non-list fields are overwritten.
+    """
+
+    def _key(n: dict) -> tuple[str, str]:
+        return (str(n.get("date") or ""), str(n.get("text") or ""))
+
+    by_key: dict[tuple[str, str], dict] = {
+        _key(n): n for n in existing if isinstance(n, dict)
+    }
+    added = 0
+    updated = 0
+    for incoming_note in incoming:
+        key = _key(incoming_note)
+        if key in by_key:
+            target = by_key[key]
+            for field_name, value in incoming_note.items():
+                if field_name in _NOTE_LIST_FIELDS:
+                    _union_list_field(target, field_name, value)
+                elif value is not None:
+                    target[field_name] = value
+            updated += 1
+        else:
+            existing.append(_normalized_row(incoming_note, _NOTE_LIST_FIELDS))
             by_key[key] = existing[-1]
             added += 1
     return added, updated

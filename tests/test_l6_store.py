@@ -11,8 +11,11 @@ import yaml
 from core.l6_store import (
     EntityMatch,
     L6Store,
+    NoteRef,
+    PaginatedNotes,
     ProjectSummary,
     SessionRef,
+    WorkstreamMatch,
 )
 
 # -- Fixture -------------------------------------------------------------------
@@ -37,6 +40,8 @@ def _manifest(
     agent_id: str,
     entities: list[dict] | None = None,
     sessions: list[dict] | None = None,
+    workstreams: list[dict] | None = None,
+    notes: list[dict] | None = None,
 ) -> dict:
     """Build a minimal-but-valid L5 manifest dict for tests."""
     return {
@@ -45,6 +50,8 @@ def _manifest(
         "last_updated": "2026-04-15T12:00:00+00:00",
         "known_entities": entities or [],
         "recent_sessions": sessions or [],
+        "known_workstreams": workstreams or [],
+        "notes": notes or [],
     }
 
 
@@ -1333,3 +1340,289 @@ def test_commit_l5_concurrent_merges_do_not_drop_contributions(tmp_path):
     missing = [f"ent{i}" for i in range(n) if f"ent{i}" not in names]
     assert not missing, f"lost contributions under concurrency: {missing}"
     assert "seed" in names
+
+
+# -- Workstreams -----------------------------------------------------------
+
+
+def test_list_workstreams_empty_store():
+    store = L6Store(Path("/does/not/exist"))
+    assert store.list_workstreams() == []
+
+
+def test_list_workstreams_basic(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            workstreams=[
+                {"name": "Bourdon rollout", "status": "active", "summary": "Ship it"},
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    results = store.list_workstreams()
+    assert len(results) == 1
+    ws = results[0]
+    assert isinstance(ws, WorkstreamMatch)
+    assert ws.name == "Bourdon rollout"
+    assert ws.status == "active"
+    assert ws.agents == ["codex"]
+
+
+def test_list_workstreams_filters_by_status(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            workstreams=[
+                {"name": "A", "status": "active"},
+                {"name": "B", "status": "done"},
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    active = store.list_workstreams(status="active")
+    assert [w.name for w in active] == ["A"]
+    done = store.list_workstreams(status="done")
+    assert [w.name for w in done] == ["B"]
+
+
+def test_list_workstreams_filters_by_agent(library):
+    library["write"]("codex", _manifest("codex", workstreams=[{"name": "A", "status": "active"}]))
+    library["write"]("clyde", _manifest("clyde", workstreams=[{"name": "B", "status": "active"}]))
+    store = L6Store(library["path"])
+    results = store.list_workstreams(agent="codex")
+    assert [w.name for w in results] == ["A"]
+
+
+def test_list_workstreams_dedupes_across_agents_by_name(library):
+    library["write"](
+        "codex",
+        _manifest("codex", workstreams=[{"name": "Shared", "status": "active", "tags": ["a"]}]),
+    )
+    library["write"](
+        "clyde",
+        _manifest("clyde", workstreams=[{"name": "shared", "status": "active", "tags": ["b"]}]),
+    )
+    store = L6Store(library["path"])
+    results = store.list_workstreams()
+    assert len(results) == 1
+    assert sorted(results[0].agents) == ["clyde", "codex"]
+    assert sorted(results[0].tags) == ["a", "b"]
+
+
+def test_list_workstreams_skips_private_by_default(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            workstreams=[{"name": "Secret", "status": "active", "visibility": "private"}],
+        ),
+    )
+    store = L6Store(library["path"])
+    assert store.list_workstreams() == []
+    assert len(store.list_workstreams(include_private=True)) == 1
+
+
+def test_build_recognition_manifest_includes_workstreams_excludes_notes(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            workstreams=[{"name": "Rollout", "status": "active"}],
+            notes=[{"date": "2026-07-01", "text": "a private-feeling note"}],
+        ),
+    )
+    store = L6Store(library["path"])
+    manifest = store.build_recognition_manifest()
+    assert "known_workstreams" in manifest
+    assert manifest["known_workstreams"][0]["name"] == "Rollout"
+    assert "notes" not in manifest
+
+
+def test_get_agent_manifest_filters_workstreams_and_notes_by_visibility(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            workstreams=[
+                {"name": "Public WS", "status": "active"},
+                {"name": "Private WS", "status": "active", "visibility": "private"},
+            ],
+            notes=[
+                {"date": "2026-07-01", "text": "public note"},
+                {"date": "2026-07-01", "text": "private note", "visibility": "private"},
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    manifest = store.get_agent_manifest("codex")
+    assert [w["name"] for w in manifest["known_workstreams"]] == ["Public WS"]
+    assert [n["text"] for n in manifest["notes"]] == ["public note"]
+
+
+# -- Notes -------------------------------------------------------------------
+
+
+def test_list_notes_empty_store():
+    store = L6Store(Path("/does/not/exist"))
+    page = store.list_notes(since=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    assert isinstance(page, PaginatedNotes)
+    assert list(page) == []
+    assert page.has_more is False
+
+
+def test_list_notes_basic(library):
+    library["write"](
+        "codex",
+        _manifest("codex", notes=[{"date": "2026-07-01", "text": "hello"}]),
+    )
+    store = L6Store(library["path"])
+    page = store.list_notes(since=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    notes = list(page)
+    assert len(notes) == 1
+    assert isinstance(notes[0], NoteRef)
+    assert notes[0].text == "hello"
+    assert notes[0].agent == "codex"
+
+
+def test_list_notes_since_cutoff(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            notes=[
+                {"date": "2020-01-01", "text": "old"},
+                {"date": "2026-07-01", "text": "new"},
+            ],
+        ),
+    )
+    store = L6Store(library["path"])
+    page = store.list_notes(since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert [n.text for n in page] == ["new"]
+
+
+def test_list_notes_pagination(library):
+    notes = [{"date": f"2026-06-{i:02d}", "text": f"note{i}"} for i in range(1, 11)]
+    library["write"]("codex", _manifest("codex", notes=notes))
+    store = L6Store(library["path"])
+    page1 = store.list_notes(since=datetime(2020, 1, 1, tzinfo=timezone.utc), limit=4)
+    assert len(page1) == 4
+    assert page1.has_more is True
+    page2 = store.list_notes(
+        since=datetime(2020, 1, 1, tzinfo=timezone.utc), limit=4, cursor=page1.next_cursor
+    )
+    assert len(page2) == 4
+    assert {n.text for n in page1} & {n.text for n in page2} == set()
+
+
+def test_list_notes_skips_private_by_default(library):
+    library["write"](
+        "codex",
+        _manifest(
+            "codex",
+            notes=[{"date": "2026-07-01", "text": "secret", "visibility": "private"}],
+        ),
+    )
+    store = L6Store(library["path"])
+    page = store.list_notes(since=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    assert list(page) == []
+    page_priv = store.list_notes(
+        since=datetime(2020, 1, 1, tzinfo=timezone.utc), include_private=True
+    )
+    assert len(page_priv) == 1
+
+
+# -- commit_l5: workstreams & notes ------------------------------------------
+
+
+def test_commit_l5_creates_workstreams_and_notes(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    result = store.commit_l5(
+        "codex",
+        agent_type="code-assistant",
+        workstreams=[{"name": "Rollout", "status": "active"}],
+        notes=[{"date": "2026-07-01", "text": "first note"}],
+    )
+    assert result["workstreams_added"] == 1
+    assert result["notes_added"] == 1
+    assert result["total_workstreams"] == 1
+    assert result["total_notes"] == 1
+
+
+def test_commit_l5_workstream_merge_dedupes_by_name_and_overwrites_status(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    store.commit_l5(
+        "codex", agent_type="code-assistant",
+        workstreams=[{"name": "Rollout", "status": "active", "tags": ["infra"]}],
+    )
+    result = store.commit_l5(
+        "codex",
+        workstreams=[{"name": "rollout", "status": "done", "tags": ["shipped"]}],
+    )
+    assert result["workstreams_added"] == 0
+    assert result["workstreams_updated"] == 1
+    store.reload_agent("codex")
+    (ws,) = store._manifests["codex"]["known_workstreams"]
+    assert ws["status"] == "done"
+    assert sorted(ws["tags"]) == ["infra", "shipped"]
+
+
+def test_commit_l5_note_merge_dedupes_by_date_and_text(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    store.commit_l5(
+        "codex", agent_type="code-assistant",
+        notes=[{"date": "2026-07-01", "text": "same note", "tags": ["a"]}],
+    )
+    result = store.commit_l5(
+        "codex",
+        notes=[{"date": "2026-07-01", "text": "same note", "tags": ["b"]}],
+    )
+    assert result["notes_added"] == 0
+    assert result["notes_updated"] == 1
+    store.reload_agent("codex")
+    (note,) = store._manifests["codex"]["notes"]
+    assert sorted(note["tags"]) == ["a", "b"]
+
+
+def test_commit_l5_rejects_workstream_missing_name(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    with pytest.raises(ValueError, match="non-empty 'name'"):
+        store.commit_l5(
+            "codex", agent_type="code-assistant", workstreams=[{"status": "active"}]
+        )
+
+
+def test_commit_l5_rejects_invalid_workstream_status(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    with pytest.raises(ValueError, match="status"):
+        store.commit_l5(
+            "codex", agent_type="code-assistant",
+            workstreams=[{"name": "X", "status": "not-a-real-status"}],
+        )
+
+
+def test_commit_l5_workstream_defaults_status_to_active(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    store.commit_l5(
+        "codex", agent_type="code-assistant", workstreams=[{"name": "X"}]
+    )
+    (ws,) = store.list_workstreams()
+    assert ws.status == "active"
+
+
+def test_commit_l5_rejects_note_missing_date(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    with pytest.raises(ValueError, match="non-empty 'date'"):
+        store.commit_l5(
+            "codex", agent_type="code-assistant", notes=[{"text": "no date"}]
+        )
+
+
+def test_commit_l5_rejects_note_missing_text(tmp_path):
+    store = L6Store(tmp_path / "lib")
+    with pytest.raises(ValueError, match="non-empty 'text'"):
+        store.commit_l5(
+            "codex", agent_type="code-assistant", notes=[{"date": "2026-07-01"}]
+        )
