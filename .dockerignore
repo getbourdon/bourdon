@@ -1,0 +1,27 @@
+# keep the build context (and image) small + reproducible
+.git
+.git/**
+.github
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.wrangler/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+node_modules/
+# runtime/local state must never bake into the image
+.bourdon/
+agent-library/
+*.log
+# not needed at runtime
+tests/
+BENCHMARKS/
+conformance/
+marketing-site*/

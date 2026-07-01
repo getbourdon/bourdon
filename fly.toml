@@ -1,0 +1,39 @@
+# Bourdon self-host on Fly.io — a personal, always-on, TLS-terminated MCP endpoint.
+# This is a TEMPLATE. Change `app` (and `primary_region`) to your own, then:
+#
+#   fly launch --no-deploy --copy-config --name <your-app>   # reuse this config
+#   fly volumes create bourdon_data --size 1 --region <region> --app <your-app>
+#   fly deploy --app <your-app>
+#   fly logs   --app <your-app>        # <- your one-time token is printed here
+#
+# Endpoint: https://<your-app>.fly.dev/mcp   (Bearer <that token>)
+#
+# Fly terminates TLS for you; the app speaks plain HTTP on 7500 internally.
+# `auto_stop_machines` scales the instance to zero when idle (first request
+# after idle wakes it in a few seconds) — set min_machines_running = 1 to
+# keep it always warm.
+
+app = "bourdon-selfhost"          # <- CHANGE ME
+primary_region = "iad"            # <- CHANGE ME (fly platform regions)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  BOURDON_HOST = "0.0.0.0"
+  BOURDON_PORT = "7500"
+
+[http_service]
+  internal_port = 7500
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[mounts]]
+  source = "bourdon_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

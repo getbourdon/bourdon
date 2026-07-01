@@ -1,0 +1,23 @@
+# Bourdon self-host — free, single-instance MCP server.
+#
+#   docker compose up -d --build
+#   docker compose logs bourdon      # <- your one-time token is printed here
+#
+# Then point your MCP client at  http://<this-host>:7500/mcp  with
+#   Authorization: Bearer <that token>
+#
+# See docs/SELF_HOST.md for the full guide (Claude Desktop stdio, Fly.io, etc.).
+services:
+  bourdon:
+    build: .
+    # Prefer a published image once one exists:
+    # image: ghcr.io/getbourdon/bourdon:latest
+    container_name: bourdon
+    ports:
+      - "7500:7500"
+    volumes:
+      - bourdon-data:/data
+    restart: unless-stopped
+
+volumes:
+  bourdon-data:
