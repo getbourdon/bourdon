@@ -1012,6 +1012,99 @@ def _handle_agents(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- presence (live-session registry) -----------------------------------------
+
+
+def _hook_stdin() -> dict[str, Any]:
+    """Parse a hook's JSON payload from stdin, if any.
+
+    Claude Code / Codex hooks pipe a JSON object on stdin (session_id, cwd,
+    hook_event_name, ...). Returns {} when stdin is a tty, empty, or unparsable,
+    so the presence commands also work when invoked by hand with explicit flags.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read()
+    except Exception:  # noqa: BLE001 -- stdin is best-effort
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _resolve_session(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Resolve (session_id, cwd) from explicit flags, falling back to hook stdin."""
+    session = getattr(args, "session", None)
+    cwd = getattr(args, "cwd", None)
+    if session and cwd:
+        return session, cwd
+    hook = _hook_stdin()
+    return (
+        session or hook.get("session_id"),
+        cwd or hook.get("cwd"),
+    )
+
+
+def _handle_presence_register(args: argparse.Namespace) -> int:
+    from core import presence
+
+    session, cwd = _resolve_session(args)
+    if not session:
+        print("presence register: no --session and no session_id on stdin", file=sys.stderr)
+        return 2
+    presence.register(args.agent, session, cwd=cwd)
+    return 0
+
+
+def _handle_presence_heartbeat(args: argparse.Namespace) -> int:
+    from core import presence
+
+    session, cwd = _resolve_session(args)
+    if not session:
+        print("presence heartbeat: no --session and no session_id on stdin", file=sys.stderr)
+        return 2
+    presence.heartbeat(args.agent, session, cwd=cwd)
+    return 0
+
+
+def _handle_presence_deregister(args: argparse.Namespace) -> int:
+    from core import presence
+
+    session, _cwd = _resolve_session(args)
+    if not session:
+        print("presence deregister: no --session and no session_id on stdin", file=sys.stderr)
+        return 2
+    presence.deregister(args.agent, session)
+    return 0
+
+
+def _handle_presence_list(args: argparse.Namespace) -> int:
+    from core import presence
+
+    ttl = getattr(args, "ttl", None)
+    if getattr(args, "json", False):
+        print(json.dumps(presence.live_sessions(ttl_seconds=ttl), indent=2))
+        return 0
+    by_agent = presence.live_sessions_by_agent(ttl_seconds=ttl)
+    if not by_agent:
+        print("No live sessions.")
+        return 0
+    for agent_id in sorted(by_agent):
+        sessions = by_agent[agent_id]
+        print(f"{agent_id}: {len(sessions)} live")
+        for s in sessions:
+            proj = s.get("project") or "?"
+            age = s.get("age_s")
+            age_str = f"{age}s ago" if isinstance(age, int) else "?"
+            print(f"  - {s.get('instance')}  {proj}  (heartbeat {age_str})")
+    return 0
+
+
 def _handle_dogfood(args: argparse.Namespace) -> int:
     """Run an end-to-end federation smoke test on the local machine."""
     from cli.dogfood import format_matrix, run_dogfood
@@ -3429,6 +3522,60 @@ def _build_parser() -> argparse.ArgumentParser:
     agents_cmd.add_argument("--agents-dir", help=argparse.SUPPRESS)
     agents_cmd.add_argument("--peers-config", help=argparse.SUPPRESS)
     agents_cmd.set_defaults(func=_handle_agents)
+
+    # -- presence (live-session registry) -------------------------------------
+    presence_cmd = subparsers.add_parser(
+        "presence",
+        help=(
+            "Live-session registry: register/heartbeat/deregister the current "
+            "agent session, or list live sessions. Ephemeral (TTL-based), "
+            "local-only; joined onto the tray contract as live_count."
+        ),
+    )
+    presence_sub = presence_cmd.add_subparsers(dest="presence_command")
+
+    def _add_session_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--agent", required=True,
+            help="Agent id to register the session under (e.g. claude-code).",
+        )
+        p.add_argument(
+            "--session",
+            help="Session id. Falls back to session_id from hook JSON on stdin.",
+        )
+        p.add_argument(
+            "--cwd",
+            help="Working directory. Falls back to cwd from hook JSON on stdin.",
+        )
+
+    presence_register = presence_sub.add_parser(
+        "register", help="Mark the current session live (SessionStart hook)."
+    )
+    _add_session_flags(presence_register)
+    presence_register.set_defaults(func=_handle_presence_register)
+
+    presence_heartbeat = presence_sub.add_parser(
+        "heartbeat", help="Refresh the current session's liveness (per-turn hook)."
+    )
+    _add_session_flags(presence_heartbeat)
+    presence_heartbeat.set_defaults(func=_handle_presence_heartbeat)
+
+    presence_deregister = presence_sub.add_parser(
+        "deregister", help="Mark the current session gone (SessionEnd hook)."
+    )
+    _add_session_flags(presence_deregister)
+    presence_deregister.set_defaults(func=_handle_presence_deregister)
+
+    presence_list = presence_sub.add_parser(
+        "list", help="List live sessions across all agents."
+    )
+    presence_list.add_argument(
+        "--json", action="store_true", help="Emit the flat live-session JSON array."
+    )
+    presence_list.add_argument(
+        "--ttl", type=int, help="Liveness window in seconds (default from env/3600)."
+    )
+    presence_list.set_defaults(func=_handle_presence_list)
 
     dogfood_cmd = subparsers.add_parser(
         "dogfood",
