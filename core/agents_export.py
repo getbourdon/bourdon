@@ -254,7 +254,7 @@ def export_local_agents(
 
     agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
 
-    _join_live_presence(agents, access_level)
+    _join_live_presence(agents, access_level, source=local_name)
 
     return {
         "schema": AGENTS_SCHEMA,
@@ -265,7 +265,7 @@ def export_local_agents(
 
 
 def _join_live_presence(
-    agents: list[dict[str, Any]], access_level: str = "private"
+    agents: list[dict[str, Any]], access_level: str = "private", *, source: str = ""
 ) -> None:
     """Enrich each agent row in place with live-session presence.
 
@@ -281,9 +281,10 @@ def _join_live_presence(
     latter is what makes the federated cross-machine live-session view work — but
     NEVER for a ``public``/untrusted caller, who gets ``live_count=0``.
 
-    Only agents that already have a manifest row are enriched. A live session
-    whose agent has published no L5 manifest yet does not synthesize a row (rare;
-    every real agent exports a manifest at session end).
+    An agent with live sessions but NO L5 manifest yet (registered before its
+    first export) gets a minimal synthesized row — a running session must never
+    be invisible in the tray. Synthesized rows carry only the id + live fields
+    (``session_count`` 0, no durable data to show).
     """
     if access_level == "public":
         for agent in agents:
@@ -298,8 +299,7 @@ def _join_live_presence(
     except Exception:  # noqa: BLE001 -- presence is best-effort, never fatal
         by_agent = {}
 
-    for agent in agents:
-        sessions = by_agent.get(str(agent.get("id") or ""), [])
+    def _attach(agent: dict[str, Any], sessions: list[dict[str, Any]]) -> None:
         for session in sessions:
             # Route presence strings through the same audited redaction pipeline
             # every other exported field uses (project = cwd basename, host =
@@ -310,3 +310,18 @@ def _join_live_presence(
                 session["host"] = _redact_field(str(session["host"]))
         agent["live_sessions"] = sessions
         agent["live_count"] = len(sessions)
+
+    seen: set[str] = set()
+    for agent in agents:
+        agent_id = str(agent.get("id") or "")
+        seen.add(agent_id)
+        _attach(agent, by_agent.get(agent_id, []))
+
+    for agent_id, sessions in by_agent.items():
+        if agent_id in seen:
+            continue
+        row = error_agent_entry(agent_id, "", source=source)
+        row["parse_error"] = None  # not an error — just no manifest yet
+        row["session_count"] = 0
+        _attach(row, sessions)
+        agents.append(row)

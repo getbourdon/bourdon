@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import socket
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,9 @@ DEFAULT_TTL_SECONDS = 3600
 #: Files older than TTL * this are deleted opportunistically on read (lazy GC),
 #: so a machine that crashes often does not accumulate presence files forever.
 REAP_MULTIPLIER = 3
+
+#: Heartbeats fresher than this skip the write (see :func:`heartbeat`).
+HEARTBEAT_MIN_INTERVAL_SECONDS = 60
 
 #: Filename-token sanitizer. agent_id / session_id arrive from hook stdin, so we
 #: constrain them to a safe charset (defense-in-depth against path traversal).
@@ -202,14 +206,27 @@ def heartbeat(
     agent_id: str, session_id: str, *, cwd: str | None = None
 ) -> Path:
     """Refresh a session's liveness. Self-heals: if the file is missing (e.g. a
-    heartbeat arrived before/without a register), it creates it."""
+    heartbeat arrived before/without a register), it creates it.
+
+    Throttled: a heartbeat fires on EVERY user prompt, and every write wakes the
+    tray's presence watcher (a CLI read each time). When the stored heartbeat is
+    fresher than ``HEARTBEAT_MIN_INTERVAL_SECONDS`` and the project is unchanged,
+    the write is skipped — liveness is measured against an hour-scale TTL, so
+    minute-granularity loses nothing.
+    """
     path = _session_file(agent_id, session_id)
     existing = _read_one(path)
     if existing is None:
         return register(agent_id, session_id, cwd=cwd)
-    existing["last_heartbeat"] = _iso(_now())
-    if cwd:
-        existing["project"] = _project_from_cwd(cwd)
+    now = _now()
+    hb = _parse_iso(existing.get("last_heartbeat"))
+    project = _project_from_cwd(cwd) if cwd else None
+    fresh = hb is not None and 0 <= (now - hb).total_seconds() < HEARTBEAT_MIN_INTERVAL_SECONDS
+    if fresh and (project is None or project == existing.get("project")):
+        return path
+    existing["last_heartbeat"] = _iso(now)
+    if project:
+        existing["project"] = project
     _atomic_write_json(path, existing)
     return path
 
@@ -339,3 +356,86 @@ def live_sessions_by_agent(
     for sessions in grouped.values():
         sessions.sort(key=lambda s: str(s.get("started_at") or ""), reverse=False)
     return grouped
+
+
+# --- hook entrypoint -----------------------------------------------------------
+#
+# The register/heartbeat/deregister verbs run as Claude Code / Codex HOOKS
+# (SessionStart / UserPromptSubmit / SessionEnd). Hooks fire on every prompt, so
+# they must be cheap and harmless: `python -m core.presence <verb> --agent X`
+# imports only this module + stdlib (the full `bourdon` CLI pulls the federation
+# stack), never raises, never prints on success, and always exits 0 — a hook's
+# stderr is injected into the model's context and a non-zero exit can block the
+# user's turn.
+
+
+def _read_hook_stdin() -> dict[str, Any]:
+    """Parse a hook's JSON payload from stdin ({} on tty / empty / invalid)."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read()
+    except Exception:  # noqa: BLE001 -- stdin is best-effort
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_session(
+    session: str | None = None, cwd: str | None = None
+) -> tuple[str | None, str | None]:
+    """Resolve (session_id, cwd): explicit args → hook stdin JSON → env.
+
+    Env fallbacks (``BOURDON_SESSION_ID``, then the terminal's
+    ``TERM_SESSION_ID``; ``PWD`` for cwd) cover agents whose hooks pass nothing
+    explicit — e.g. codex, whose hook expands ``$TERM_SESSION_ID`` (per-terminal
+    granularity). No resolvable session is a valid outcome: callers no-op.
+    """
+    session = session or None
+    cwd = cwd or None
+    if not (session and cwd):
+        hook = _read_hook_stdin()
+        session = session or hook.get("session_id")
+        cwd = cwd or hook.get("cwd")
+    if not session:
+        session = os.environ.get("BOURDON_SESSION_ID") or os.environ.get(
+            "TERM_SESSION_ID"
+        )
+    if not cwd:
+        cwd = os.environ.get("PWD")
+    return (session or None), (cwd or None)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Hook micro-entrypoint. Always returns 0 (see module comment above)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m core.presence")
+    parser.add_argument("verb", choices=("register", "heartbeat", "deregister"))
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--session")
+    parser.add_argument("--cwd")
+    try:
+        args = parser.parse_args(argv)
+        session, cwd = resolve_session(args.session, args.cwd)
+        if session:
+            if args.verb == "register":
+                register(args.agent, session, cwd=cwd)
+            elif args.verb == "heartbeat":
+                heartbeat(args.agent, session, cwd=cwd)
+            else:
+                deregister(args.agent, session)
+    except SystemExit:
+        pass  # argparse already printed usage to stderr — diagnosable, non-blocking
+    except Exception:  # noqa: BLE001 -- a presence failure must never harm a session
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

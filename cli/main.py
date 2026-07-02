@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import contextlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -1017,53 +1016,17 @@ def _handle_agents(args: argparse.Namespace) -> int:
 # -- presence (live-session registry) -----------------------------------------
 
 
-def _hook_stdin() -> dict[str, Any]:
-    """Parse a hook's JSON payload from stdin, if any.
-
-    Claude Code / Codex hooks pipe a JSON object on stdin (session_id, cwd,
-    hook_event_name, ...). Returns {} when stdin is a tty, empty, or unparsable,
-    so the presence commands also work when invoked by hand with explicit flags.
-    """
-    try:
-        if sys.stdin is None or sys.stdin.isatty():
-            return {}
-        raw = sys.stdin.read()
-    except Exception:  # noqa: BLE001 -- stdin is best-effort
-        return {}
-    if not raw.strip():
-        return {}
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _resolve_session(args: argparse.Namespace) -> tuple[str | None, str | None]:
-    """Resolve (session_id, cwd) from explicit flags, then hook stdin, then env.
+    """Resolve (session_id, cwd): flags → hook stdin → env.
 
-    The env fallbacks (``BOURDON_SESSION_ID``, then the terminal's
-    ``TERM_SESSION_ID``; ``PWD`` for cwd) cover agents whose hooks don't pass a
-    session id explicitly or on stdin — e.g. codex, whose hook expands
-    ``$TERM_SESSION_ID``. ``TERM_SESSION_ID`` is per-terminal (Apple Terminal /
-    iTerm2), so codex presence is keyed at terminal-session granularity — good
-    enough for the common case. Terminals that don't set it (some VS Code / ssh
-    contexts) simply yield no session, and the presence hooks then no-op rather
-    than fail (see the handlers below).
+    Single implementation lives in :func:`core.presence.resolve_session` (shared
+    with the ``python -m core.presence`` hook micro-entrypoint).
     """
-    session = getattr(args, "session", None) or None
-    cwd = getattr(args, "cwd", None) or None
-    if not (session and cwd):
-        hook = _hook_stdin()
-        session = session or hook.get("session_id")
-        cwd = cwd or hook.get("cwd")
-    if not session:
-        session = (
-            os.environ.get("BOURDON_SESSION_ID") or os.environ.get("TERM_SESSION_ID")
-        )
-    if not cwd:
-        cwd = os.environ.get("PWD")
-    return (session or None), (cwd or None)
+    from core.presence import resolve_session
+
+    return resolve_session(
+        getattr(args, "session", None), getattr(args, "cwd", None)
+    )
 
 
 # The register/heartbeat/deregister verbs run as CLAUDE CODE / CODEX HOOKS
