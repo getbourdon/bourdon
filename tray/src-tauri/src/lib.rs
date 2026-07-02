@@ -61,7 +61,15 @@ fn cli_program() -> String {
             return p;
         }
     }
-    let venv = repo_root().join(".venv").join("bin").join("python");
+    // venv layout differs by platform: POSIX puts the interpreter in
+    // `.venv/bin/python`, Windows in `.venv\Scripts\python.exe`. Using the
+    // POSIX path unconditionally makes `is_file()` always fail on Windows,
+    // silently defeating venv auto-detection.
+    let venv = if cfg!(windows) {
+        repo_root().join(".venv").join("Scripts").join("python.exe")
+    } else {
+        repo_root().join(".venv").join("bin").join("python")
+    };
     if venv.is_file() {
         return venv.to_string_lossy().into_owned();
     }
