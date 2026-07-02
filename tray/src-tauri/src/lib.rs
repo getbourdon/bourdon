@@ -47,15 +47,33 @@ use tauri::{App, AppHandle, Emitter, Manager, WindowEvent};
 // std::process::Command does NOT use a shell, so there is no word-splitting,
 // globbing, or metacharacter interpretation. This is the required posture.
 
-/// Python executable. Override with `BOURDON_PYTHON` to point at a venv that has
-/// the `mcp` deps required for `--federated` peer calls; defaults to bare
-/// `python` (sufficient for local-only reads). The token for peers is read by
-/// the CLI from the environment this process inherits (e.g. `BOURDON_PEER_TOKEN_*`).
+/// Python executable, resolved so an installed tray works with ZERO env setup:
+///   1. `BOURDON_PYTHON` when set (a venv with the `mcp` deps enables
+///      `--federated` peer calls; peer tokens flow via inherited env).
+///   2. The repo venv (`<repo>/.venv/bin/python`) when present — dev machines
+///      often have no bare `python`, and the venv has the full dep set.
+///   3. `python3` (POSIX convention) / `python` (Windows).
+/// Without this, a normally-launched app on a python3-only machine shows the
+/// red "Can't read memory" state.
 fn cli_program() -> String {
-    std::env::var("BOURDON_PYTHON")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "python".to_string())
+    if let Ok(p) = std::env::var("BOURDON_PYTHON") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    // venv layout differs by platform: POSIX puts the interpreter in
+    // `.venv/bin/python`, Windows in `.venv\Scripts\python.exe`. Using the
+    // POSIX path unconditionally makes `is_file()` always fail on Windows,
+    // silently defeating venv auto-detection.
+    let venv = if cfg!(windows) {
+        repo_root().join(".venv").join("Scripts").join("python.exe")
+    } else {
+        repo_root().join(".venv").join("bin").join("python")
+    };
+    if venv.is_file() {
+        return venv.to_string_lossy().into_owned();
+    }
+    if cfg!(windows) { "python" } else { "python3" }.to_string()
 }
 
 /// Fixed argv tail (argv[1..]). Never interpolate runtime values here.
@@ -519,9 +537,34 @@ fn health_label(health: Health) -> &'static str {
     }
 }
 
-/// Swap the tray icon + tooltip to match a health state. Best-effort: logged on
+/// Live-session total across agents, mirroring the frontend's precedence
+/// (`liveCountOf` in main.js): the registry count when > 0, else the Phase A
+/// process scan. Keeping the two in lockstep is what makes the tooltip agree
+/// with the badges.
+fn live_total(report: Option<&AgentsReport>) -> usize {
+    report
+        .map(|r| {
+            r.agents
+                .iter()
+                .map(|a| {
+                    let reg = a.live_count.unwrap_or(0);
+                    if reg > 0 {
+                        reg
+                    } else {
+                        a.live_process_count.unwrap_or(0)
+                    }
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Swap the tray icon + tooltip to match a read result. Best-effort: logged on
 /// failure but never panics (a tray-update failure must not crash the app).
-fn apply_health_to_tray(app: &AppHandle, health: Health, agent_count: usize) {
+fn apply_result_to_tray(app: &AppHandle, result: &AgentsResult) {
+    let health = result.health;
+    let agent_count = result.report.as_ref().map(|r| r.agents.len()).unwrap_or(0);
+    let live = live_total(result.report.as_ref());
     let state = app.state::<TrayState>();
     let guard = match state.0.lock() {
         Ok(g) => g,
@@ -534,11 +577,17 @@ fn apply_health_to_tray(app: &AppHandle, health: Health, agent_count: usize) {
             }
             Err(e) => eprintln!("tray: failed to decode icon for {health:?}: {e}"),
         }
+        let live_part = if live > 0 {
+            format!(" · {live} live")
+        } else {
+            String::new()
+        };
         let tip = format!(
-            "Bourdon — {} ({} agent{})",
+            "Bourdon — {} ({} agent{}{})",
             health_label(health),
             agent_count,
-            if agent_count == 1 { "" } else { "s" }
+            if agent_count == 1 { "" } else { "s" },
+            live_part,
         );
         let _ = tray.set_tooltip(Some(tip));
     }
@@ -551,12 +600,7 @@ fn apply_health_to_tray(app: &AppHandle, health: Health, agent_count: usize) {
 /// Run a read, update the tray icon to match the health, return the result.
 fn read_and_apply(app: &AppHandle, federated: bool) -> AgentsResult {
     let result = run_cli(federated);
-    let agent_count = result
-        .report
-        .as_ref()
-        .map(|r| r.agents.len())
-        .unwrap_or(0);
-    apply_health_to_tray(app, result.health, agent_count);
+    apply_result_to_tray(app, &result);
     result
 }
 
@@ -593,6 +637,90 @@ async fn get_agents_federated(app: AppHandle) -> AgentsResult {
     tauri::async_runtime::spawn_blocking(move || read_and_apply(&app, true))
         .await
         .unwrap_or_else(|e| read_task_failed("federated", e))
+}
+
+/// Run a local read, update the tray, and push the payload to any open window.
+/// Shared by the tray "Refresh" menu item and the presence watcher.
+fn refresh_and_broadcast(app: &AppHandle) {
+    let result = read_and_apply(app, false);
+    let _ = app.emit("agents-refreshed", &result);
+}
+
+// ===========================================================================
+// Live auto-refresh — watch the presence registry (event-driven, no polling)
+// ===========================================================================
+
+/// Presence writes arrive in bursts (register + heartbeats across several
+/// sessions); coalesce a burst into one CLI read.
+const WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Watch `~/.bourdon/presence` and refresh whenever live sessions change, so
+/// the menubar icon/tooltip and any open window stay current without the user
+/// ever pressing Refresh. Event-driven (FSEvents/inotify via `notify`) — the
+/// Phase-0 "zero polling" posture is preserved. Best-effort: if the watch can't
+/// be established the tray simply stays manual-refresh (warning logged).
+///
+/// Note: the read itself may reap hard-stale presence files, which re-fires the
+/// watcher once; the follow-up read finds nothing new to reap and settles.
+fn spawn_presence_watcher(app: AppHandle) {
+    // Resolve <home>/.bourdon/presence (BOURDON_HOME override — parity with
+    // core/presence.py). The registry creates the dir lazily; create it up
+    // front (0700, matching the registry) so the watch attaches on a fresh
+    // machine.
+    let home = std::env::var("BOURDON_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| app.path().home_dir().ok().map(|h| h.join(".bourdon")));
+    let Some(dir) = home.map(|h| h.join("presence")) else {
+        eprintln!("tray: no home dir; presence watcher disabled");
+        return;
+    };
+
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("tray: cannot create presence dir {dir:?}: {e}");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let watcher = notify::recommended_watcher(
+            move |res: Result<notify::Event, notify::Error>| {
+                if res.is_ok() {
+                    let _ = tx.send(());
+                }
+            },
+        );
+        let mut watcher = match watcher {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("tray: presence watcher unavailable: {e}");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            eprintln!("tray: cannot watch {dir:?}: {e}");
+            return;
+        }
+
+        // Initial read so the icon shows real state right after launch (login
+        // item / LaunchAgent), before any window is opened.
+        refresh_and_broadcast(&app);
+
+        // Debounce: block until something changes, drain the burst, read once.
+        // `watcher` stays alive for the life of this loop (owns `tx`).
+        while rx.recv().is_ok() {
+            while rx.recv_timeout(WATCH_DEBOUNCE).is_ok() {}
+            refresh_and_broadcast(&app);
+        }
+    });
 }
 
 /// Show + focus the main window (used by tray "Open Bourdon" and left-click).
@@ -694,14 +822,7 @@ fn build_tray(app: &App) -> tauri::Result<()> {
                 // Re-run the read; this updates the tray icon as a side effect
                 // and pushes a fresh payload to the frontend via an event so an
                 // open window re-renders. (Tray refresh = local/fast.)
-                let result = run_cli(false);
-                let count = result
-                    .report
-                    .as_ref()
-                    .map(|r| r.agents.len())
-                    .unwrap_or(0);
-                apply_health_to_tray(app, result.health, count);
-                let _ = app.emit("agents-refreshed", &result);
+                refresh_and_broadcast(app);
             }
             // "quit" handled by PredefinedMenuItem::quit automatically.
             _ => {}
@@ -774,6 +895,9 @@ pub fn run() {
                 let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             build_tray(app)?;
+            // Live auto-refresh: presence changes drive the icon/tooltip and
+            // any open window from launch onward.
+            spawn_presence_watcher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

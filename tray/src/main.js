@@ -282,8 +282,17 @@ function buildAgentRow(a) {
 }
 
 // Flat list (This machine scope).
+// Header live-total chip, kept in lockstep with the Rust tooltip (live_total).
+function updateLiveTotal(agents) {
+  const total = agents.reduce((n, a) => n + liveCountOf(a), 0);
+  const chip = el("live-total");
+  chip.textContent = `${total} live`;
+  chip.classList.toggle("hidden", total === 0);
+}
+
 function renderOverview(agents) {
   el("agent-count").textContent = String(agents.length);
+  updateLiveTotal(agents);
   const root = el("agent-list");
   root.innerHTML = "";
   for (const a of agents) root.appendChild(buildAgentRow(a));
@@ -292,6 +301,7 @@ function renderOverview(agents) {
 // Grouped-by-machine list (Federated scope).
 function renderGrouped(agents) {
   el("agent-count").textContent = String(agents.length);
+  updateLiveTotal(agents);
   const root = el("agent-list");
   root.innerHTML = "";
 
