@@ -29,6 +29,10 @@ serde_json = "1"
 # the CLI invocation. Pinned to 0.36.x to respect rust-version 1.77.2 (sysinfo
 # 0.39+ requires rustc 1.95). Only the "system" feature (processes) is needed.
 sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+# Live auto-refresh: watch ~/.bourdon/presence for session register/heartbeat/
+# deregister writes and re-run the local read (debounced). Event-driven — keeps
+# the Phase-0 "no polling" posture while making the menubar icon genuinely live.
+notify = "8"
 
 [features]
 # Default Tauri custom-protocol feature for release builds.

@@ -220,6 +220,12 @@ a {
   font-size: 11px;
   color: var(--text-muted);
 }
+.count-chip--live {
+  color: var(--green);
+  font-weight: 600;
+  background: rgba(79, 107, 80, 0.12);
+  border-color: rgba(79, 107, 80, 0.25);
+}
 
 .agent-list {
   display: flex;
