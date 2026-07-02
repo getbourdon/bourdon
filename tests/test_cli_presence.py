@@ -18,7 +18,7 @@ def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("BOURDON_HOME", str(tmp_path / "dot-bourdon"))
     monkeypatch.delenv("BOURDON_SESSION_ID", raising=False)
     monkeypatch.delenv("TERM_SESSION_ID", raising=False)
-    monkeypatch.setattr(cli_main, "_hook_stdin", lambda: {})
+    monkeypatch.setattr(presence, "_read_hook_stdin", lambda: {})
     yield
 
 

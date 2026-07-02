@@ -222,3 +222,53 @@ def test_presence_included_for_team_peer(tmp_path):
     (agent,) = report["agents"]
     assert agent["live_count"] == 1
     assert agent["live_sessions"][0]["project"] == "bourdon"
+
+
+# --- v0.2: heartbeat throttle / synthesized rows / hook entrypoint ------------
+
+
+def test_heartbeat_throttled_when_fresh():
+    """A fresh heartbeat skips the write (every write wakes the tray watcher)."""
+    presence.register("claude-code", "s1", cwd="/x/bourdon")
+    path = presence._session_file("claude-code", "s1")
+    before = path.stat().st_mtime_ns
+    presence.heartbeat("claude-code", "s1", cwd="/x/bourdon")
+    assert path.stat().st_mtime_ns == before  # no write
+    # A project change bypasses the throttle (the tray should show the move).
+    presence.heartbeat("claude-code", "s1", cwd="/x/ILTT")
+    record = presence._read_one(path)
+    assert record["project"] == "ILTT"
+
+
+def test_live_but_manifestless_agent_gets_synthesized_row(tmp_path):
+    """A running session must never be invisible: an agent with presence but no
+    L5 manifest yet gets a minimal row."""
+    from core.agents_export import export_local_agents
+
+    agents_dir = tmp_path / "agent-library" / "agents"
+    _write_manifest(agents_dir, "codex")
+    presence.register("claude-code", "s1", cwd="/x/bourdon")  # no manifest
+
+    report = export_local_agents(agents_dir, "test-machine")
+    by_id = {a["id"]: a for a in report["agents"]}
+    row = by_id["claude-code"]
+    assert row["live_count"] == 1
+    assert row["session_count"] == 0
+    assert row["parse_error"] is None
+    assert row["source"] == "test-machine"
+    # And the gate still wins: a public caller sees no synthesized rows.
+    public = export_local_agents(agents_dir, "test-machine", access_level="public")
+    assert [a["id"] for a in public["agents"]] == ["codex"]
+
+
+def test_hook_entrypoint_registers_and_always_exits_zero(monkeypatch):
+    monkeypatch.setattr(presence, "_read_hook_stdin", lambda: {})
+    assert presence.main(["register", "--agent", "codex", "--session", "s-cli"]) == 0
+    (session,) = presence.live_sessions()
+    assert session["instance"] == "s-cli"
+    # Missing session everywhere → no-op, still 0.
+    monkeypatch.delenv("BOURDON_SESSION_ID", raising=False)
+    monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+    assert presence.main(["heartbeat", "--agent", "codex"]) == 0
+    # Bad argv (unknown verb) → argparse error swallowed, still 0.
+    assert presence.main(["explode", "--agent", "codex"]) == 0
