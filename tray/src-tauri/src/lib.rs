@@ -320,12 +320,20 @@ fn compute_health(report: &AgentsReport) -> Health {
         .map(|d| today - d)
         .min(); // smallest age = most recent
 
-    let fresh = match freshest_age {
-        // Newest activity is within the window (negative age = future date,
-        // also "fresh"). None = no agent has any session date at all → stale.
-        Some(age) => age <= FRESHNESS_WINDOW_DAYS,
-        None => false,
-    };
+    // A live session RIGHT NOW is the freshest possible signal — without this,
+    // the "first live session, no manifest exported yet" state (a synthesized
+    // row with no session dates) would read as stale/Yellow.
+    let any_live = agents
+        .iter()
+        .any(|a| a.live_count.unwrap_or(0) > 0 || a.live_process_count.unwrap_or(0) > 0);
+
+    let fresh = any_live
+        || match freshest_age {
+            // Newest activity is within the window (negative age = future date,
+            // also "fresh"). None = no agent has any session date at all → stale.
+            Some(age) => age <= FRESHNESS_WINDOW_DAYS,
+            None => false,
+        };
 
     if fresh && !any_error {
         Health::Green
@@ -565,32 +573,39 @@ fn apply_result_to_tray(app: &AppHandle, result: &AgentsResult) {
     let health = result.health;
     let agent_count = result.report.as_ref().map(|r| r.agents.len()).unwrap_or(0);
     let live = live_total(result.report.as_ref());
+    // DEADLOCK GUARD: set_icon/set_tooltip marshal to the main thread and BLOCK
+    // until it runs the closure. Holding the TrayState mutex across that wait,
+    // while any main-thread path (e.g. a menu handler) blocks then locks the
+    // same mutex, freezes the whole app. Clone the handle out and drop the
+    // guard BEFORE dispatching — the mutex only protects the Option slot.
     let state = app.state::<TrayState>();
-    let guard = match state.0.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    if let Some(tray) = guard.as_ref() {
-        match Image::from_bytes(icon_bytes_for(health)) {
-            Ok(img) => {
-                let _ = tray.set_icon(Some(img));
-            }
-            Err(e) => eprintln!("tray: failed to decode icon for {health:?}: {e}"),
-        }
-        let live_part = if live > 0 {
-            format!(" · {live} live")
-        } else {
-            String::new()
+    let tray = {
+        let guard = match state.0.lock() {
+            Ok(g) => g,
+            Err(_) => return,
         };
-        let tip = format!(
-            "Bourdon — {} ({} agent{}{})",
-            health_label(health),
-            agent_count,
-            if agent_count == 1 { "" } else { "s" },
-            live_part,
-        );
-        let _ = tray.set_tooltip(Some(tip));
+        guard.as_ref().cloned()
+    };
+    let Some(tray) = tray else { return };
+    match Image::from_bytes(icon_bytes_for(health)) {
+        Ok(img) => {
+            let _ = tray.set_icon(Some(img));
+        }
+        Err(e) => eprintln!("tray: failed to decode icon for {health:?}: {e}"),
     }
+    let live_part = if live > 0 {
+        format!(" · {live} live")
+    } else {
+        String::new()
+    };
+    let tip = format!(
+        "Bourdon — {} ({} agent{}{})",
+        health_label(health),
+        agent_count,
+        if agent_count == 1 { "" } else { "s" },
+        live_part,
+    );
+    let _ = tray.set_tooltip(Some(tip));
 }
 
 // ===========================================================================
@@ -600,7 +615,13 @@ fn apply_result_to_tray(app: &AppHandle, result: &AgentsResult) {
 /// Run a read, update the tray icon to match the health, return the result.
 fn read_and_apply(app: &AppHandle, federated: bool) -> AgentsResult {
     let result = run_cli(federated);
-    apply_result_to_tray(app, &result);
+    // The menubar icon/tooltip reflect THIS machine only. Applying federated
+    // results would make the tooltip's totals flap between local and
+    // local+peers depending on which read ran last; the window owns the
+    // federated view, the tray owns the local one.
+    if !federated {
+        apply_result_to_tray(app, &result);
+    }
     result
 }
 
@@ -654,6 +675,9 @@ fn refresh_and_broadcast(app: &AppHandle) {
 /// sessions); coalesce a burst into one CLI read.
 const WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Upper bound on how long a continuous event drip may defer a refresh.
+const MAX_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Watch `~/.bourdon/presence` and refresh whenever live sessions change, so
 /// the menubar icon/tooltip and any open window stay current without the user
 /// ever pressing Refresh. Event-driven (FSEvents/inotify via `notify`) — the
@@ -693,8 +717,21 @@ fn spawn_presence_watcher(app: AppHandle) {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let watcher = notify::recommended_watcher(
             move |res: Result<notify::Event, notify::Error>| {
-                if res.is_ok() {
-                    let _ = tx.send(());
+                // Mutation kinds ONLY. inotify (Linux) watches include IN_OPEN,
+                // and our own refresh opens the watched dir + every file — an
+                // unfiltered callback re-triggers itself forever (verified:
+                // notify 8.2 inotify.rs WatchMask::OPEN). Access/Other are
+                // never a presence change; dropping them also halves macOS
+                // wakeups (mkstemp + rename = multiple events per write).
+                if let Ok(ev) = res {
+                    if matches!(
+                        ev.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Modify(_)
+                            | notify::EventKind::Remove(_)
+                    ) {
+                        let _ = tx.send(());
+                    }
                 }
             },
         );
@@ -715,9 +752,17 @@ fn spawn_presence_watcher(app: AppHandle) {
         refresh_and_broadcast(&app);
 
         // Debounce: block until something changes, drain the burst, read once.
-        // `watcher` stays alive for the life of this loop (owns `tx`).
+        // The drain is latency-bounded so a steady sub-debounce event drip
+        // (many active sessions) can defer a refresh by at most MAX_DEBOUNCE
+        // rather than indefinitely. `watcher` stays alive for the life of this
+        // loop (owns `tx`).
         while rx.recv().is_ok() {
-            while rx.recv_timeout(WATCH_DEBOUNCE).is_ok() {}
+            let drain_started = std::time::Instant::now();
+            while rx.recv_timeout(WATCH_DEBOUNCE).is_ok() {
+                if drain_started.elapsed() >= MAX_DEBOUNCE {
+                    break;
+                }
+            }
             refresh_and_broadcast(&app);
         }
     });
@@ -821,8 +866,12 @@ fn build_tray(app: &App) -> tauri::Result<()> {
             "refresh" => {
                 // Re-run the read; this updates the tray icon as a side effect
                 // and pushes a fresh payload to the frontend via an event so an
-                // open window re-renders. (Tray refresh = local/fast.)
-                refresh_and_broadcast(app);
+                // open window re-renders. Off the main thread: menu handlers
+                // run ON the event loop, and blocking it in the python
+                // subprocess both freezes the UI and (worse) deadlocks against
+                // any concurrent tray update waiting on a main-thread dispatch.
+                let app = app.clone();
+                std::thread::spawn(move || refresh_and_broadcast(&app));
             }
             // "quit" handled by PredefinedMenuItem::quit automatically.
             _ => {}

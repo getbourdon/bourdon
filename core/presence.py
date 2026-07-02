@@ -210,9 +210,10 @@ def heartbeat(
 
     Throttled: a heartbeat fires on EVERY user prompt, and every write wakes the
     tray's presence watcher (a CLI read each time). When the stored heartbeat is
-    fresher than ``HEARTBEAT_MIN_INTERVAL_SECONDS`` and the project is unchanged,
-    the write is skipped — liveness is measured against an hour-scale TTL, so
-    minute-granularity loses nothing.
+    fresher than the throttle interval and the project is unchanged, the write
+    is skipped. The interval is ``HEARTBEAT_MIN_INTERVAL_SECONDS`` capped at a
+    quarter of the TTL, so a shortened ``BOURDON_PRESENCE_TTL`` (tests, tight
+    deployments) can never make an actively-heartbeating session flap dead.
     """
     path = _session_file(agent_id, session_id)
     existing = _read_one(path)
@@ -221,7 +222,8 @@ def heartbeat(
     now = _now()
     hb = _parse_iso(existing.get("last_heartbeat"))
     project = _project_from_cwd(cwd) if cwd else None
-    fresh = hb is not None and 0 <= (now - hb).total_seconds() < HEARTBEAT_MIN_INTERVAL_SECONDS
+    interval = min(HEARTBEAT_MIN_INTERVAL_SECONDS, max(1, _ttl_seconds() // 4))
+    fresh = hb is not None and 0 <= (now - hb).total_seconds() < interval
     if fresh and (project is None or project == existing.get("project")):
         return path
     existing["last_heartbeat"] = _iso(now)

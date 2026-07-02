@@ -252,9 +252,15 @@ def export_local_agents(
                     error_agent_entry(stem, str(exc), source=local_name)
                 )
 
-    agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
-
     _join_live_presence(agents, access_level, source=local_name)
+
+    # Live-now outranks stale recency: without the live_count key, an agent
+    # that is live RIGHT NOW but has no manifest yet (synthesized row,
+    # last_updated None) would sort beneath months-stale entries.
+    agents.sort(
+        key=lambda a: ((a.get("live_count") or 0) > 0, a.get("last_updated") or ""),
+        reverse=True,
+    )
 
     return {
         "schema": AGENTS_SCHEMA,
@@ -320,7 +326,10 @@ def _join_live_presence(
     for agent_id, sessions in by_agent.items():
         if agent_id in seen:
             continue
-        row = error_agent_entry(agent_id, "", source=source)
+        # The id originates from a presence file (hook-supplied), so it goes
+        # through the same redaction pipeline as every other exported string —
+        # manifest rows get this in summarize_agent_manifest.
+        row = error_agent_entry(_redact_field(agent_id), "", source=source)
         row["parse_error"] = None  # not an error — just no manifest yet
         row["session_count"] = 0
         _attach(row, sessions)

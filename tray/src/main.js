@@ -80,6 +80,7 @@ function logoMarkup(d, cls, hex) {
 
 let lastResult = null; // most recent AgentsResult
 let openAgentId = null; // id of the agent in the detail view, or null
+const expandedLive = new Set(); // "source//id" keys with an open session sub-list
 let openAgentSource = null; // source machine of the open agent (federated disambiguation)
 let scope = "local"; // "local" | "federated"
 
@@ -142,9 +143,12 @@ function visClass(v) {
   return "";
 }
 
-// Freshness "pulse" class for an agent's overview dot.
+// Freshness "pulse" class for an agent's overview dot. Live-now is the
+// freshest possible signal — without it, a live agent with no exported
+// manifest yet would show a grey "idle" dot beside its green live badge.
 function pulseClass(a) {
   if (a.parse_error) return "err";
+  if (liveCountOf(a) > 0) return "fresh";
   const days = daysSince(a.freshest_session_date);
   if (days == null) return "idle"; // no sessions yet
   if (days <= FRESHNESS_DAYS) return "fresh";
@@ -199,7 +203,13 @@ function buildAgentRow(a) {
         .join(" · ");
 
   const brand = agentBrand(a.id);
-  const touch = a.parse_error ? "" : humanize(a.last_updated);
+  // A live agent with no manifest yet has no last_updated — show nothing
+  // rather than a contradictory "unknown" beside its green live badge.
+  const touch = a.parse_error
+    ? ""
+    : !a.last_updated && liveCountOf(a) > 0
+      ? ""
+      : humanize(a.last_updated);
 
   // Live-activity badge. Prefer the registry session count (Phase B); fall back
   // to the Phase A process scan. When we have per-session detail, the badge is a
@@ -241,8 +251,12 @@ function buildAgentRow(a) {
   });
 
   if (expandable) {
+    // Auto-refresh re-renders the whole list; restore this agent's expanded
+    // state so a watcher tick doesn't collapse what the user just opened.
+    const expandKey = `${a.source || ""}//${a.id}`;
+    const startOpen = expandedLive.has(expandKey);
     const list = document.createElement("div");
-    list.className = "agent-sessions hidden";
+    list.className = `agent-sessions${startOpen ? "" : " hidden"}`;
     list.innerHTML = sessions
       .map((s) => {
         const proj = esc(s.project || s.instance || "session");
@@ -266,10 +280,13 @@ function buildAgentRow(a) {
     const badge = row.querySelector(".live-badge--toggle");
     if (badge) {
       badge.tabIndex = 0;
+      badge.classList.toggle("expanded", startOpen);
       const toggle = (e) => {
         e.stopPropagation();
         const nowHidden = list.classList.toggle("hidden");
         badge.classList.toggle("expanded", !nowHidden);
+        if (nowHidden) expandedLive.delete(expandKey);
+        else expandedLive.add(expandKey);
       };
       badge.addEventListener("click", toggle);
       badge.addEventListener("keydown", (e) => {

@@ -22,11 +22,17 @@ def _isolated_federation_state(tmp_path, monkeypatch):
     Without this, any test that builds an L6 server would append audit
     entries to the developer's real ~/.bourdon/audit.jsonl and read their
     real federation.yaml.
+
+    BOURDON_HOME isolates ~/.bourdon itself: the presence registry lives
+    there, and the agents export both joins and SYNTHESIZES rows from it, so
+    a developer's real live sessions (e.g. the Claude Code session running
+    the tests) would otherwise leak into every envelope assertion.
     """
     monkeypatch.setenv(
         "BOURDON_FEDERATION_CONFIG", str(tmp_path / "federation.yaml")
     )
     monkeypatch.setenv("BOURDON_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("BOURDON_HOME", str(tmp_path / "dot-bourdon"))
 
 
 @pytest.fixture
