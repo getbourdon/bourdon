@@ -252,9 +252,15 @@ def export_local_agents(
                     error_agent_entry(stem, str(exc), source=local_name)
                 )
 
-    agents.sort(key=lambda a: (a.get("last_updated") or ""), reverse=True)
-
     _join_live_presence(agents, access_level, source=local_name)
+
+    # Live-now outranks stale recency: without the live_count key, an agent
+    # that is live RIGHT NOW but has no manifest yet (synthesized row,
+    # last_updated None) would sort beneath months-stale entries.
+    agents.sort(
+        key=lambda a: ((a.get("live_count") or 0) > 0, a.get("last_updated") or ""),
+        reverse=True,
+    )
 
     return {
         "schema": AGENTS_SCHEMA,
