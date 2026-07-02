@@ -326,7 +326,10 @@ def _join_live_presence(
     for agent_id, sessions in by_agent.items():
         if agent_id in seen:
             continue
-        row = error_agent_entry(agent_id, "", source=source)
+        # The id originates from a presence file (hook-supplied), so it goes
+        # through the same redaction pipeline as every other exported string —
+        # manifest rows get this in summarize_agent_manifest.
+        row = error_agent_entry(_redact_field(agent_id), "", source=source)
         row["parse_error"] = None  # not an error — just no manifest yet
         row["session_count"] = 0
         _attach(row, sessions)
